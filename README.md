@@ -23,6 +23,8 @@
 
 It allows you to connect virtually any USB controller — including **all XInput-compatible PC gamepads**, official and third-party **Xbox controllers** (Xbox 360, Xbox One, Xbox Series X|S), **Nintendo Switch** controllers, and Sony **DualShock 3** / **DualSense** — and play across the entire PS4 operating system and all games with **zero input lag**, full analog precision, and hardware rumble feedback.
 
+Unlike traditional game-specific hooks that only intercept inputs inside running titles, OneFamily operates as an independent, system-level background daemon. It registers connected gamepads directly into the PlayStation 4 pad subsystem (`libScePad`) as genuine Type 1 DualShock 4 devices. This provides complete OS integration: you can log into any user account, switch profiles on the fly, access the system Quick Menu, navigate the XMB dashboard, and play local multiplayer titles just like an official Sony controller.
+
 ---
 
 ## Screenshots
@@ -51,7 +53,9 @@ It allows you to connect virtually any USB controller — including **all XInput
 
 ## Key Features
 
-- **Native DualShock 4 Virtual Device:** Emulates an official Type 1 DualShock 4 via `libScePad`, ensuring 100% compatibility with all PS4 games, apps, and the system shell (XMB).
+- **Native System-Wide DualShock 4 Emulation:** Registers controllers directly into `libScePad` as official Type 1 DualShock 4 devices. Unlike user-space game hooks, it functions seamlessly across the entire console environment—including the XMB dashboard, system settings, media applications, PlayStation Store, and all retail or homebrew titles.
+- **Multi-User Profile Login & Profile Switching:** Fully integrated with the PS4 User Service (`libSceUserService`). When you plug in a controller or press the Guide/PS button, you can assign it to any profile on the console (Player 1, Player 2, or Guest), enabling native local co-op and split-screen multiplayer across different accounts.
+- **Complete Quick Menu & Shell Navigation:** The Guide/PS button provides native PlayStation Home functionality. Tap to return to the XMB dashboard, or hold to open the PlayStation Quick Menu (to adjust audio, manage power options, or suspend applications).
 - **Universal XInput & Third-Party Xbox Support:** Comprehensive hardware descriptor detection supporting official Microsoft controllers as well as licensed and third-party gamepads (PowerA, PDP, 8BitDo, Razer, Hori, Nacon, Thrustmaster, GameSir, Logitech, and generic PC XInput devices).
 - **Ultra-Low Latency (250 Hz Polling):** Operates on an unthrottled 4 ms polling loop for competitive, instantaneous input response with zero latency overhead.
 - **All-in-One Automated Setup:** The companion app handles full deployment on first launch:
