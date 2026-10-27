@@ -164,68 +164,125 @@ static void init_dualsense_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "DualSense init output report sent (ret=%d)", r);
 }
 
+static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expected_ack, int timeout_ms) {
+    if (!g_dev_handle || !p_sceUsbdInterruptTransfer || g_usb_state.endpoint_out == 0 || g_usb_state.endpoint_in == 0) return -1;
+
+    int transferred = 0;
+    int r = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out, (uint8_t*)tx, tx_len, &transferred, 100);
+    if (r != 0) {
+        daemon_log(LOG_LEVEL_WARN, "Switch Pro send failed (ret=0x%08X)", r);
+        return r;
+    }
+
+    uint64_t end_time = daemon_sys_time_us() + (uint64_t)timeout_ms * 1000;
+    uint8_t rx[64];
+    while (daemon_sys_time_us() < end_time) {
+        transferred = 0;
+        int in_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 20);
+        if (in_ret == 0 && transferred > 0) {
+            daemon_log(LOG_LEVEL_INFO, "Switch Pro handshake recv [%d bytes]: rx[0]=0x%02X rx[1]=0x%02X",
+                       transferred, rx[0], (transferred > 1 ? rx[1] : 0));
+            if (expected_ack == 0) {
+                return 0; // Don't care about specific ack, packet successfully drained
+            }
+            if (rx[0] == 0x81 && (expected_ack == 0xFF || rx[1] == expected_ack)) {
+                return 0; // Matched expected proprietary ACK
+            }
+            if (rx[0] == 0x21 || rx[0] == 0x30) {
+                return 0; // Already in subcommand reply or full report mode!
+            }
+        }
+        daemon_sys_usleep(2000);
+    }
+
+    return -1; // Timed out waiting for ack
+}
+
 static void init_switch_pro_controller(void) {
-    daemon_log(LOG_LEVEL_INFO, "Sending Switch Pro initialization handshake...");
+    daemon_log(LOG_LEVEL_INFO, "Starting synchronous Switch Pro USB handshake...");
 
     uint8_t pkt[64];
+    uint8_t rx[64];
+    int transferred = 0;
 
-    // 1. Handshake: 0x80, 0x02
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x80;
-    pkt[1] = 0x02;
-    int r1 = send_init_packet(pkt, sizeof(pkt));
-    daemon_log(LOG_LEVEL_INFO, "Switch Pro handshake 1 (0x80, 0x02) sent (ret=%d)", r1);
-    daemon_sys_usleep(20000);
+    // Drain any leftover input in the USB FIFO first
+    for (int i = 0; i < 5; i++) {
+        transferred = 0;
+        int dr = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 10);
+        if (dr != 0 || transferred == 0) break;
+        daemon_log(LOG_LEVEL_INFO, "Drained initial Switch packet [%d bytes]: 0x%02X", transferred, rx[0]);
+    }
 
-    // 2. High-speed / baudrate: 0x80, 0x03
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x80;
-    pkt[1] = 0x03;
-    int r2 = send_init_packet(pkt, sizeof(pkt));
-    daemon_log(LOG_LEVEL_INFO, "Switch Pro high-speed (0x80, 0x03) sent (ret=%d)", r2);
-    daemon_sys_usleep(20000);
+    // Step 1: Handshake (0x80, 0x02) - with up to 3 attempts
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x80;
+        pkt[1] = 0x02;
+        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 100);
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro Handshake (0x80, 0x02) attempt %d ret=%d", attempt, r);
+        if (r == 0) break;
+        daemon_sys_usleep(10000);
+    }
 
-    // 3. Handshake repeat: 0x80, 0x02
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x80;
-    pkt[1] = 0x02;
-    int r3 = send_init_packet(pkt, sizeof(pkt));
-    daemon_log(LOG_LEVEL_INFO, "Switch Pro handshake 2 sent (ret=%d)", r3);
-    daemon_sys_usleep(20000);
+    // Step 2: High Speed baudrate (0x80, 0x03)
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x80;
+        pkt[1] = 0x03;
+        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x03, 100);
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro HighSpeed (0x80, 0x03) attempt %d ret=%d", attempt, r);
+        if (r == 0) break;
+        daemon_sys_usleep(10000);
+    }
 
-    // 4. Subcommand 0x03 to enable Standard Full Report (0x30)
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x01; // Output report ID (Rumble & Subcommand)
-    pkt[1] = 0x00; // Counter
-    pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40; // Neutral rumble L
-    pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40; // Neutral rumble R
-    pkt[10] = 0x03; // Subcommand: Set Input Mode
-    pkt[11] = 0x30; // Mode: 0x30 (Standard full report)
-    int r4 = send_init_packet(pkt, sizeof(pkt));
-    daemon_log(LOG_LEVEL_INFO, "Switch Pro SetInputMode 0x30 sent (ret=%d)", r4);
-    daemon_sys_usleep(20000);
+    // Step 3: Handshake repeat (0x80, 0x02)
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x80;
+        pkt[1] = 0x02;
+        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 100);
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro Handshake 2 (0x80, 0x02) attempt %d ret=%d", attempt, r);
+        if (r == 0) break;
+        daemon_sys_usleep(10000);
+    }
 
-    // 5. Subcommand 0x40: Enable 6-Axis IMU sensors
+    // Step 4: Force USB (0x80, 0x04)
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x80;
+        pkt[1] = 0x04;
+        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x04, 100);
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro ForceUSB (0x80, 0x04) attempt %d ret=%d", attempt, r);
+        if (r == 0) break;
+        daemon_sys_usleep(10000);
+    }
+
+    // Step 5: Subcommand 0x03 (Set Input Report Mode to 0x30 Full Mode)
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x01; // Output report ID
+        pkt[1] = attempt; // Packet counter
+        pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40; // Neutral rumble L
+        pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40; // Neutral rumble R
+        pkt[10] = 0x03; // Subcommand: Set Input Mode
+        pkt[11] = 0x30; // 0x30 = Standard full report mode
+        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 150); // wait for 0x21 or 0x30
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro SetInputMode 0x30 attempt %d ret=%d", attempt, r);
+        if (r == 0) break;
+        daemon_sys_usleep(10000);
+    }
+
+    // Step 6: Subcommand 0x30 (Player 1 LED)
     memset(pkt, 0, sizeof(pkt));
     pkt[0] = 0x01;
-    pkt[1] = 0x01;
-    pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
-    pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
-    pkt[10] = 0x40; // Subcommand: Enable 6-Axis IMU
-    pkt[11] = 0x01; // Enable
-    send_init_packet(pkt, sizeof(pkt));
-    daemon_sys_usleep(20000);
-
-    // 6. Subcommand 0x30: Turn on Player 1 LED
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x01;
-    pkt[1] = 0x02;
+    pkt[1] = 0x04;
     pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
     pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
     pkt[10] = 0x30; // Subcommand: Set Player Lights
-    pkt[11] = 0x01; // LED 1
-    send_init_packet(pkt, sizeof(pkt));
-    daemon_sys_usleep(20000);
+    pkt[11] = 0x01; // LED 1 ON
+    switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 100);
+
+    daemon_log(LOG_LEVEL_INFO, "Switch Pro initialization sequence completed");
 }
 
 static const char* controller_type_to_str(ControllerType type) {
@@ -638,6 +695,13 @@ void usb_driver_poll_step(void) {
             }
         }
     } else if (ret == 0x80240007 || ret == -7) {
+        if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
+            static int s_logged_sw_timeout = 0;
+            if (s_logged_sw_timeout < 5) {
+                daemon_log(LOG_LEVEL_WARN, "Switch Pro USB interrupt transfer timed out (0x80240007)");
+                s_logged_sw_timeout++;
+            }
+        }
         // Normal USB interrupt timeout: keep 250 Hz stream alive with last known state
         if (s_last_ds4.connected) {
             s_last_ds4.timestamp = daemon_sys_time_us();
