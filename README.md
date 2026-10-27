@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/assets/logo.png" alt="OneFamily Logo" width="220"/>
+  <img src="assets/logo.png" alt="OneFamily Logo" width="220"/>
 </p>
 
 <h1 align="center">OneFamily</h1>
@@ -17,15 +17,15 @@
 
 ---
 
-## 🌟 Overview
+## Overview
 
-**OneFamily** is a modern, high-performance background daemon and 1080p companion homebrew app for jailbroken PlayStation 4 consoles running **GoldHEN**.
+**OneFamily** is a high-performance background daemon and 1080p companion homebrew application for jailbroken PlayStation 4 consoles running **GoldHEN**.
 
-It allows you to connect virtually any USB controller (Xbox 360, Xbox One, Xbox Series X|S, Nintendo Switch, DualShock 3, DualSense) and play across the entire PS4 operating system and all games with **zero input lag**, full analog precision, and rumble feedback.
+It allows you to connect virtually any USB controller — including **all XInput-compatible PC gamepads**, official and third-party **Xbox controllers** (Xbox 360, Xbox One, Xbox Series X|S), **Nintendo Switch** controllers, and Sony **DualShock 3** / **DualSense** — and play across the entire PS4 operating system and all games with **zero input lag**, full analog precision, and hardware rumble feedback.
 
 ---
 
-## 📸 Screenshots
+## Screenshots
 
 <p align="center">
   <b>PS4 Dashboard & Auto-Boot Notification</b><br>
@@ -49,41 +49,43 @@ It allows you to connect virtually any USB controller (Xbox 360, Xbox One, Xbox 
 
 ---
 
-## ✨ Key Features
+## Key Features
 
-- **🎮 Native DualShock 4 Virtual Device:** Emulates an official Type 1 DualShock 4 via `libScePad`, ensuring 100% compatibility with all PS4 games, apps, and the system shell (XMB).
-- **⚡ Ultra-Low Latency (250 Hz Polling):** Operates on an unthrottled 4 ms polling loop for competitive, instantaneous input response.
-- **🚀 All-in-One Automated Setup:** The companion app handles everything on first launch:
+- **Native DualShock 4 Virtual Device:** Emulates an official Type 1 DualShock 4 via `libScePad`, ensuring 100% compatibility with all PS4 games, apps, and the system shell (XMB).
+- **Universal XInput & Third-Party Xbox Support:** Comprehensive hardware descriptor detection supporting official Microsoft controllers as well as licensed and third-party gamepads (PowerA, PDP, 8BitDo, Razer, Hori, Nacon, Thrustmaster, GameSir, Logitech, and generic PC XInput devices).
+- **Ultra-Low Latency (250 Hz Polling):** Operates on an unthrottled 4 ms polling loop for competitive, instantaneous input response with zero latency overhead.
+- **All-in-One Automated Setup:** The companion app handles full deployment on first launch:
   - Deploys the background daemon payload to `/data/payloads/onefamily.bin`.
   - Configures `/data/GoldHEN/payloads.ini` for automatic boot on system start (`[AutoRun]`).
   - Initializes `/data/GoldHEN/onefamily.ini` with optimal default settings.
-- **🎯 Analog Stick Drift Auto-Calibration:** Measures resting stick noise across 180 frames (~3 seconds) and automatically calculates the minimal ideal deadzone to eliminate drift while preserving responsiveness.
-- **📳 Dual Vibration / Rumble Support:** Full support for large (heavy) and small (light) rumble motors, including a dedicated hardware vibration tester in the companion app.
-- **🔄 On-the-Fly USB Hotplugging:** Plug, unplug, or switch controllers anytime without needing to restart the game or console.
-- **🕹️ Customizable Controls:**
+- **Analog Stick Drift Auto-Calibration:** Measures resting stick noise across 180 frames (~3 seconds) and automatically calculates the minimal ideal deadzone to eliminate drift while preserving responsiveness.
+- **Dual Vibration / Rumble Support:** Full support for large (heavy) and small (light) rumble motors, including a dedicated hardware vibration tester in the companion app.
+- **On-the-Fly USB Hotplugging:** Plug, unplug, or switch controllers anytime without needing to restart the game or console.
+- **Customizable Controls:**
   - Stick Deadzones: 0% up to 25%.
   - Trigger Activation Thresholds.
-  - Swap Bumpers and Triggers (L1/R1 $\leftrightarrow$ L2/R2).
+  - Swap Bumpers and Triggers (L1/R1 <-> L2/R2).
   - Nintendo Switch Button Layout: Positional (A=Circle, B=Cross) or By Letter.
   - Xbox Guide Button Mapping: Native PS Button or Touchpad Click.
 
 ---
 
-## 🎮 Supported Controllers
+## Supported Controllers
 
-| Controller Family | Connection | Vibration | Drift Calibration |
-| :--- | :---: | :---: | :---: |
-| **Microsoft Xbox Series X \| S** | USB | ✅ Yes | ✅ Yes |
-| **Microsoft Xbox One / One S / One X** | USB | ✅ Yes | ✅ Yes |
-| **Microsoft Xbox 360 (Official & Clones)** | USB | ✅ Yes | ✅ Yes |
-| **Nintendo Switch Pro Controller** | USB | — | ✅ Yes |
-| **Nintendo Switch Third-Party Controllers** | USB | — | ✅ Yes |
-| **Sony PlayStation 5 DualSense / Edge** | USB | ✅ Yes | ✅ Yes |
-| **Sony PlayStation 3 DualShock 3** | USB | ✅ Yes | ✅ Yes |
+| Controller Family | Model / Vendor | Connection | Vibration | Drift Calibration |
+| :--- | :--- | :---: | :---: | :---: |
+| **All PC XInput Gamepads** | Standard XInput & DirectInput/XInput hybrids | USB | Yes | Yes |
+| **Xbox Third-Party Controllers** | PowerA, PDP, 8BitDo, Razer, Hori, Nacon, Thrustmaster, GameSir | USB | Yes | Yes |
+| **Microsoft Xbox Series X \| S** | Official Wireless Controller (USB-C cable) | USB | Yes | Yes |
+| **Microsoft Xbox One / S / X / Elite** | Official Wireless Controller (Micro-USB cable) | USB | Yes | Yes |
+| **Microsoft Xbox 360** | Official Wired Controller & third-party clones | USB | Yes | Yes |
+| **Nintendo Switch Pro Controller** | Official Pro Controller & third-party Switch pads | USB | — | Yes |
+| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | USB | Yes | Yes |
+| **Sony PlayStation 3 DualShock 3** | Official DualShock 3 (automatic handshake) | USB | Yes | Yes |
 
 ---
 
-## 🚀 Quick Start / Installation
+## Quick Start / Installation
 
 1. **Install the Companion App:**
    - Download `onefamily_companion.pkg` from the [Releases](../../releases) page.
@@ -103,10 +105,10 @@ It allows you to connect virtually any USB controller (Xbox 360, Xbox One, Xbox 
 
 ---
 
-## 🛠️ Building from Source
+## Building from Source
 
 ### Prerequisites
-- [OpenOrbis PS4 Toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain)
+- OpenOrbis PS4 Toolchain
 - LLVM Clang / LLD (`clang`, `ld.lld`)
 - .NET 8 / 9 SDK (for `PkgTool.Core`)
 - Python 3.x
@@ -127,6 +129,6 @@ The compiled binaries will be output to:
 
 ---
 
-## 📜 License
+## License
 
 This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
