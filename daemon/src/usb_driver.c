@@ -164,11 +164,76 @@ static void init_dualsense_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "DualSense init output report sent (ret=%d)", r);
 }
 
+static void init_switch_pro_controller(void) {
+    daemon_log(LOG_LEVEL_INFO, "Sending Switch Pro initialization handshake...");
+
+    uint8_t pkt[64];
+
+    // 1. Handshake: 0x80, 0x02
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x80;
+    pkt[1] = 0x02;
+    int r1 = send_init_packet(pkt, sizeof(pkt));
+    daemon_log(LOG_LEVEL_INFO, "Switch Pro handshake 1 (0x80, 0x02) sent (ret=%d)", r1);
+    daemon_sys_usleep(20000);
+
+    // 2. High-speed / baudrate: 0x80, 0x03
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x80;
+    pkt[1] = 0x03;
+    int r2 = send_init_packet(pkt, sizeof(pkt));
+    daemon_log(LOG_LEVEL_INFO, "Switch Pro high-speed (0x80, 0x03) sent (ret=%d)", r2);
+    daemon_sys_usleep(20000);
+
+    // 3. Handshake repeat: 0x80, 0x02
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x80;
+    pkt[1] = 0x02;
+    int r3 = send_init_packet(pkt, sizeof(pkt));
+    daemon_log(LOG_LEVEL_INFO, "Switch Pro handshake 2 sent (ret=%d)", r3);
+    daemon_sys_usleep(20000);
+
+    // 4. Subcommand 0x03 to enable Standard Full Report (0x30)
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x01; // Output report ID (Rumble & Subcommand)
+    pkt[1] = 0x00; // Counter
+    pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40; // Neutral rumble L
+    pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40; // Neutral rumble R
+    pkt[10] = 0x03; // Subcommand: Set Input Mode
+    pkt[11] = 0x30; // Mode: 0x30 (Standard full report)
+    int r4 = send_init_packet(pkt, sizeof(pkt));
+    daemon_log(LOG_LEVEL_INFO, "Switch Pro SetInputMode 0x30 sent (ret=%d)", r4);
+    daemon_sys_usleep(20000);
+
+    // 5. Subcommand 0x40: Enable 6-Axis IMU sensors
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x01;
+    pkt[1] = 0x01;
+    pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
+    pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
+    pkt[10] = 0x40; // Subcommand: Enable 6-Axis IMU
+    pkt[11] = 0x01; // Enable
+    send_init_packet(pkt, sizeof(pkt));
+    daemon_sys_usleep(20000);
+
+    // 6. Subcommand 0x30: Turn on Player 1 LED
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x01;
+    pkt[1] = 0x02;
+    pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
+    pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
+    pkt[10] = 0x30; // Subcommand: Set Player Lights
+    pkt[11] = 0x01; // LED 1
+    send_init_packet(pkt, sizeof(pkt));
+    daemon_sys_usleep(20000);
+}
+
 static const char* controller_type_to_str(ControllerType type) {
     switch (type) {
         case CONTROLLER_XBOX360:  return "Xbox 360";
         case CONTROLLER_XBOXONE:  return "Xbox One/Series";
         case CONTROLLER_SWITCH:   return "Switch";
+        case CONTROLLER_SWITCH_PRO:return "Switch Pro";
         case CONTROLLER_DS3:      return "DualShock 3";
         case CONTROLLER_DUALSENSE:return "DualSense";
         default:                  return "Unknown";
@@ -250,6 +315,8 @@ static int scan_and_open(void) {
                         }
                     } else if (det.type == CONTROLLER_DUALSENSE) {
                         init_dualsense_controller();
+                    } else if (det.type == CONTROLLER_SWITCH_PRO) {
+                        init_switch_pro_controller();
                     }
 
                     daemon_notify("OneFamily: %s Connected",
@@ -377,7 +444,7 @@ void usb_driver_poll_step(void) {
         s_trans_cfg.stick_deadzone = g_daemon_config.stick_deadzone;
         s_trans_cfg.trigger_threshold = g_daemon_config.trigger_threshold;
 
-        if (g_usb_state.type == CONTROLLER_SWITCH) {
+        if (g_usb_state.type == CONTROLLER_SWITCH || g_usb_state.type == CONTROLLER_SWITCH_PRO) {
             s_trans_cfg.swap_ab = (g_daemon_config.switch_positional == 0);
             s_trans_cfg.swap_xy = (g_daemon_config.switch_positional == 0);
         } else {
@@ -470,6 +537,56 @@ void usb_driver_poll_step(void) {
             }
             s_last_ds4 = ds4;
             vpad_send_data(&ds4);
+        } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO && transferred >= 11) {
+            static int s_logged_sw_report = 0;
+            if (s_logged_sw_report < 10) {
+                daemon_log(LOG_LEVEL_INFO, "Switch Pro report [%d bytes]: rx[0]=0x%02X b3=0x%02X b4=0x%02X b5=0x%02X",
+                           transferred, rx[0], (transferred > 3 ? rx[3] : 0), (transferred > 4 ? rx[4] : 0), (transferred > 5 ? rx[5] : 0));
+                s_logged_sw_report++;
+            }
+
+            if (rx[0] == 0x30 || rx[0] == 0x21 || rx[0] == 0x31) {
+                if (transferred >= 12) {
+                    translator_convert_switch_pro((const SwitchFullReport*)rx, &ds4, &s_trans_cfg);
+
+                    // Combo: Minus (Share) + Plus (Options) -> Touchpad Click
+                    if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
+                        ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
+                        ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                    }
+                    // Combo: Minus (Share) + D-Pad Down -> PS Button (Home)
+                    if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
+                        ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
+                        ds4.buttons |= DS4_BUTTON_PS;
+                    }
+
+                    static uint32_t s_last_sw_btn = 0;
+                    if (ds4.buttons != s_last_sw_btn) {
+                        s_last_sw_btn = ds4.buttons;
+                        daemon_log(LOG_LEVEL_INFO, "Switch Pro buttons active: 0x%08X", ds4.buttons);
+                    }
+
+                    s_last_ds4 = ds4;
+                    vpad_send_data(&ds4);
+                }
+            } else if (rx[0] == 0x3F && transferred >= sizeof(SwitchSimpleReport)) {
+                const SwitchSimpleReport* simple = (const SwitchSimpleReport*)rx;
+                SwitchInputOnlyReport sw_fallback;
+                sw_fallback.buttons0 = simple->buttons0;
+                sw_fallback.buttons1 = simple->buttons1;
+                sw_fallback.hat = simple->hat;
+                sw_fallback.left_stick_x = (uint8_t)(((int32_t)simple->left_stick_x + 32768) >> 8);
+                sw_fallback.left_stick_y = (uint8_t)(((int32_t)simple->left_stick_y + 32768) >> 8);
+                sw_fallback.right_stick_x = (uint8_t)(((int32_t)simple->right_stick_x + 32768) >> 8);
+                sw_fallback.right_stick_y = (uint8_t)(((int32_t)simple->right_stick_y + 32768) >> 8);
+
+                translator_convert_switch(&sw_fallback, &ds4, &s_trans_cfg);
+                if (sw_fallback.buttons1 & SWITCH_BTN_HOME) {
+                    ds4.buttons |= get_guide_button_mask();
+                }
+                s_last_ds4 = ds4;
+                vpad_send_data(&ds4);
+            }
         } else if (g_usb_state.type == CONTROLLER_DS3 && transferred >= sizeof(DS3Report)) {
             translator_convert_ds3((const DS3Report*)rx, &ds4, &s_trans_cfg);
             if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
@@ -532,6 +649,12 @@ void usb_driver_poll_step(void) {
             if (s_logged_ds_err < 10) {
                 daemon_log(LOG_LEVEL_WARN, "DualSense interrupt transfer returned 0x%08X (ep=0x%02X)", ret, g_usb_state.endpoint_in);
                 s_logged_ds_err++;
+            }
+        } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
+            static int s_logged_sw_err = 0;
+            if (s_logged_sw_err < 10) {
+                daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X)", ret, g_usb_state.endpoint_in);
+                s_logged_sw_err++;
             }
         }
         // Physical disconnect or USB transfer failure

@@ -22,7 +22,8 @@ typedef enum {
     CONTROLLER_XBOXONE,
     CONTROLLER_SWITCH,
     CONTROLLER_DS3,
-    CONTROLLER_DUALSENSE
+    CONTROLLER_DUALSENSE,
+    CONTROLLER_SWITCH_PRO
 } ControllerType;
 
 /*
@@ -102,5 +103,10 @@ void translator_convert_ds3(const DS3Report* ds3, OrbisPadData* ds4, const Trans
  * Translate DualSense report to OrbisPadData
  */
 void translator_convert_dualsense(const DualSenseReport* ps5, OrbisPadData* ds4, const TranslatorConfig* config);
+
+/*
+ * Translate Switch Pro Controller full report (0x30, 0x21, 0x31) to OrbisPadData
+ */
+void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4, const TranslatorConfig* config);
 
 #endif // TRANSLATOR_H

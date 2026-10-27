@@ -149,6 +149,50 @@ static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* ou
     return found;
 }
 
+static int detect_switch_pro_endpoints(libusb_device* dev, DetectedController* out) {
+    if (!dev || !out) return 0;
+
+    struct libusb_config_descriptor* cfg = NULL;
+    if (usbd_get_active_config_descriptor(dev, &cfg) != 0 || !cfg) {
+        return 0;
+    }
+
+    int found = 0;
+    for (int i = 0; i < cfg->bNumInterfaces && !found; i++) {
+        const struct libusb_interface* intf = &cfg->interface[i];
+        for (int a = 0; a < intf->num_altsetting && !found; a++) {
+            const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
+
+            if (alt->bInterfaceClass != USB_CLASS_HID) continue;
+
+            uint8_t ep_in = 0;
+            uint8_t ep_out = 0;
+            for (int k = 0; k < alt->bNumEndpoints; k++) {
+                const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
+                if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
+                    if (ep->bEndpointAddress & EP_DIR_IN) {
+                        if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                    } else {
+                        if (ep_out == 0) ep_out = ep->bEndpointAddress;
+                    }
+                }
+            }
+
+            if (ep_in != 0) {
+                out->type          = CONTROLLER_SWITCH_PRO;
+                out->interface_num = alt->bInterfaceNumber;
+                out->alt_setting   = alt->bAlternateSetting;
+                out->ep_in         = ep_in;
+                out->ep_out        = ep_out ? ep_out : 0x01;
+                found = 1;
+            }
+        }
+    }
+
+    usbd_free_config_descriptor(cfg);
+    return found;
+}
+
 int controller_identify(libusb_device* dev, const struct libusb_device_descriptor* desc, DetectedController* out) {
     if (!dev || !desc || !out) return 0;
     memset(out, 0, sizeof(*out));
@@ -198,7 +242,20 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         }
     }
 
-    // 3. Nintendo Switch
+    // 3. Nintendo Switch Pro & Official Controllers
+    if (is_switch_pro_controller(desc->idVendor, desc->idProduct)) {
+        out->type = CONTROLLER_SWITCH_PRO;
+        out->vid = desc->idVendor;
+        out->pid = desc->idProduct;
+        if (!detect_switch_pro_endpoints(dev, out)) {
+            out->interface_num = 0;
+            out->ep_in = 0x81;
+            out->ep_out = 0x01;
+        }
+        return 1;
+    }
+
+    // 4. Nintendo Switch Third-Party Input-Only (PDP, etc.)
     if (is_switch_input_only_controller(desc->idVendor, desc->idProduct)) {
         out->type = CONTROLLER_SWITCH;
         out->vid = desc->idVendor;
@@ -209,7 +266,7 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         return 1;
     }
 
-    // 4. Generic Descriptor-based detection (Third-Party Xbox 360 / Xbox One)
+    // 5. Generic Descriptor-based detection (Third-Party Xbox 360 / Xbox One)
     if (controller_detect_by_descriptor(dev, out)) {
         out->generic = 1;
         out->vid = desc->idVendor;
