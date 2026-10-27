@@ -790,6 +790,20 @@ void translator_convert_dualsense(const DualSenseReport* ps5, OrbisPadData* ds4,
     }
     ds4->touch.fingers = finger_count;
 
+    // Motion data - set to neutral (required by OrbisPadData)
+    ds4->quat.x = 0.0f;
+    ds4->quat.y = 0.0f;
+    ds4->quat.z = 0.0f;
+    ds4->quat.w = 1.0f;
+
+    ds4->vel.x = 0.0f;
+    ds4->vel.y = 0.0f;
+    ds4->vel.z = 0.0f;
+
+    ds4->acell.x = 0.0f;
+    ds4->acell.y = 0.0f;
+    ds4->acell.z = 1.0f;  // 1g downward
+
     ds4->connected = 1;
     ds4->count = 1;
     ds4->timestamp = sceKernelGetProcessTime();

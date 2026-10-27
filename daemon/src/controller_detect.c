@@ -171,7 +171,7 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
                 // Fallback to standard DualSense HID interface if descriptor parse failed
                 out->interface_num = 3;
                 out->ep_in = 0x84;
-                out->ep_out = 0x04;
+                out->ep_out = 0x03;
             }
             return 1;
         }

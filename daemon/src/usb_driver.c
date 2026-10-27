@@ -154,6 +154,16 @@ static void init_gip_controller(void) {
     daemon_sys_usleep(10000);
 }
 
+static void init_dualsense_controller(void) {
+    daemon_log(LOG_LEVEL_INFO, "Sending DualSense operational output report...");
+    uint8_t init_pkt[48];
+    memset(init_pkt, 0, sizeof(init_pkt));
+    init_pkt[0] = 0x02; // DualSense Output Report
+    init_pkt[1] = 0x03; // Enable compatible rumble & haptics
+    int r = send_init_packet(init_pkt, sizeof(init_pkt));
+    daemon_log(LOG_LEVEL_INFO, "DualSense init output report sent (ret=%d)", r);
+}
+
 static const char* controller_type_to_str(ControllerType type) {
     switch (type) {
         case CONTROLLER_XBOX360:  return "Xbox 360";
@@ -238,6 +248,8 @@ static int scan_and_open(void) {
                             int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 1000);
                             daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational handshake sent (ret=%d)", cret);
                         }
+                    } else if (det.type == CONTROLLER_DUALSENSE) {
+                        init_dualsense_controller();
                     }
 
                     daemon_notify("OneFamily: %s Connected",
@@ -349,7 +361,7 @@ void usb_driver_poll_step(void) {
     // 2. Read from connected controller
     uint8_t rx[128];
     int transferred = 0;
-    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 4);
+    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 16);
 
     if (ret == 0 && transferred > 0) {
         if (!s_logged_first_report) {
@@ -467,6 +479,13 @@ void usb_driver_poll_step(void) {
             s_last_ds4 = ds4;
             vpad_send_data(&ds4);
         } else if (g_usb_state.type == CONTROLLER_DUALSENSE && transferred >= 10) {
+            static int s_logged_ds_report = 0;
+            if (s_logged_ds_report < 10) {
+                daemon_log(LOG_LEVEL_INFO, "DualSense report [%d bytes]: rx[0]=0x%02X b0=0x%02X b1=0x%02X b2=0x%02X",
+                           transferred, rx[0], (transferred > 8 ? rx[8] : 0), (transferred > 9 ? rx[9] : 0), (transferred > 10 ? rx[10] : 0));
+                s_logged_ds_report++;
+            }
+
             const DualSenseReport* ps5 = NULL;
             DualSenseReport temp_report;
             if (rx[0] == 0x01 && transferred >= 11) {
@@ -480,10 +499,23 @@ void usb_driver_poll_step(void) {
             }
             if (ps5) {
                 translator_convert_dualsense(ps5, &ds4, &s_trans_cfg);
+                // Combo: Create (Share) + Options -> Touchpad Click (Map/Inventory in games)
+                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
+                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
+                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                }
+                // Combo: Create (Share) + D-Pad Down -> PS Button (Home)
                 if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
                     ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
                     ds4.buttons |= DS4_BUTTON_PS;
                 }
+
+                static uint32_t s_last_ds_btn = 0;
+                if (ds4.buttons != s_last_ds_btn) {
+                    s_last_ds_btn = ds4.buttons;
+                    daemon_log(LOG_LEVEL_INFO, "DualSense buttons active: 0x%08X", ds4.buttons);
+                }
+
                 s_last_ds4 = ds4;
                 vpad_send_data(&ds4);
             }
@@ -495,6 +527,13 @@ void usb_driver_poll_step(void) {
             vpad_send_data(&s_last_ds4);
         }
     } else if (ret != 0) {
+        if (g_usb_state.type == CONTROLLER_DUALSENSE) {
+            static int s_logged_ds_err = 0;
+            if (s_logged_ds_err < 10) {
+                daemon_log(LOG_LEVEL_WARN, "DualSense interrupt transfer returned 0x%08X (ep=0x%02X)", ret, g_usb_state.endpoint_in);
+                s_logged_ds_err++;
+            }
+        }
         // Physical disconnect or USB transfer failure
         if (!p_sceUsbdCheckConnected || p_sceUsbdCheckConnected(g_dev_handle) != 0) {
             close_controller();
