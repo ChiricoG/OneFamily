@@ -576,14 +576,11 @@ void translator_convert_ds3(const DS3Report* ds3, OrbisPadData* ds4, const Trans
 
     memset(ds4, 0, sizeof(OrbisPadData));
 
-    // Analog sticks
+    // Analog sticks (DualShock 3 native coordinates match DS4: 0 = Top/Left, 255 = Bottom/Right)
     uint8_t lx = ds3->left_stick_x;
     uint8_t ly = ds3->left_stick_y;
     uint8_t rx = ds3->right_stick_x;
     uint8_t ry = ds3->right_stick_y;
-
-    if (config->invert_left_y)  ly = 255 - ly;
-    if (config->invert_right_y) ry = 255 - ry;
 
     if (config->stick_deadzone > 0) {
         lx = translator_apply_deadzone(lx, config->stick_deadzone);
