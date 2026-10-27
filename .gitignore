@@ -1,0 +1,26 @@
+# Build artifacts & binaries
+bin/
+obj/
+daemon/obj/
+app/obj/
+app/bin/
+app/eboot.bin
+app/*.pkg
+*.pkg
+*.o
+*.elf
+*.oelf
+
+# Generated SFO
+app/sce_sys/param.sfo
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+.DS_Store
