@@ -139,7 +139,7 @@ static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* ou
                 out->interface_num = alt->bInterfaceNumber;
                 out->alt_setting   = alt->bAlternateSetting;
                 out->ep_in         = ep_in;
-                out->ep_out        = ep_out;
+                out->ep_out        = ep_out ? ep_out : 0x03;
                 found = 1;
             }
         }

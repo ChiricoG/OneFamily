@@ -155,13 +155,30 @@ static void init_gip_controller(void) {
 }
 
 static void init_dualsense_controller(void) {
-    daemon_log(LOG_LEVEL_INFO, "Sending DualSense operational output report...");
-    uint8_t init_pkt[48];
+    daemon_log(LOG_LEVEL_INFO, "Initializing DualSense controller (EP_IN:0x%02X, EP_OUT:0x%02X, IF:%d)...",
+               g_usb_state.endpoint_in, g_usb_state.endpoint_out, g_claimed_interface);
+
+    // Full 64-byte DualSense USB output report (Report ID 0x02) per Sony/Linux hid-playstation spec
+    uint8_t init_pkt[64];
     memset(init_pkt, 0, sizeof(init_pkt));
-    init_pkt[0] = 0x02; // DualSense Output Report
-    init_pkt[1] = 0x03; // Enable compatible rumble & haptics
+    init_pkt[0] = 0x02; // Report ID
+    init_pkt[1] = 0x01 | 0x02; // valid_flag0: COMPATIBLE_VIBRATION (0x01) | HAPTICS_SELECT (0x02)
+    init_pkt[2] = 0x04 | 0x10; // valid_flag1: LIGHTBAR_CONTROL_ENABLE (0x04) | PLAYER_INDICATOR_CONTROL_ENABLE (0x10)
+    init_pkt[3] = 0x00; // Small motor
+    init_pkt[4] = 0x00; // Large motor
+    init_pkt[44] = 0x04; // Player 1 LED (Center dot ON)
+    init_pkt[45] = 0x00; // Red
+    init_pkt[46] = 0x00; // Green
+    init_pkt[47] = 0xFF; // Blue (PlayStation Blue Lightbar)
+
     int r = send_init_packet(init_pkt, sizeof(init_pkt));
-    daemon_log(LOG_LEVEL_INFO, "DualSense init output report sent (ret=%d)", r);
+    daemon_log(LOG_LEVEL_INFO, "DualSense init output report sent via Interrupt OUT (ret=0x%08X)", r);
+
+    // Fallback: If Interrupt OUT transfer failed or returned error, also send via Control Transfer SET_REPORT
+    if (r != 0 && p_sceUsbdControlTransfer && g_dev_handle) {
+        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, g_claimed_interface, init_pkt, sizeof(init_pkt), 100);
+        daemon_log(LOG_LEVEL_INFO, "DualSense init SET_REPORT control transfer sent (ret=0x%08X)", cr);
+    }
 }
 
 static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expected_ack, int timeout_ms) {
@@ -435,12 +452,15 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         uint8_t pkt[8] = { 0x00, 0xFF, 0x00, (small_motor > 0) ? 1 : 0, large_motor, 0x00, 0x00, 0x00 };
         p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
     } else if (g_usb_state.type == CONTROLLER_DUALSENSE) {
-        uint8_t pkt[48];
+        uint8_t pkt[64];
         memset(pkt, 0, sizeof(pkt));
         pkt[0] = 0x02; // DualSense Output Report
-        pkt[1] = 0x03; // Enable right & left rumble
+        pkt[1] = 0x01 | 0x02; // Enable compatible rumble & haptics
+        pkt[2] = 0x04 | 0x10; // Lightbar & Player LED keepalive
         pkt[3] = small_motor;
         pkt[4] = large_motor;
+        pkt[44] = 0x04; // Player 1 LED
+        pkt[47] = 0xFF; // Blue lightbar
         p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
     }
 }
@@ -712,6 +732,25 @@ void usb_driver_poll_step(void) {
         }
 
         if (ret == 0x80240007 || ret == -7) {
+            if (g_usb_state.type == CONTROLLER_DUALSENSE) {
+                static int s_logged_ds_timeout = 0;
+                static int s_consecutive_ds_timeouts = 0;
+                s_consecutive_ds_timeouts++;
+                if (s_logged_ds_timeout < 5) {
+                    daemon_log(LOG_LEVEL_WARN, "DualSense USB interrupt transfer timed out (0x80240007, ep=0x%02X)", g_usb_state.endpoint_in);
+                    s_logged_ds_timeout++;
+                }
+                // If endpoint 0x84 times out 50 times (~1 sec) with 0 reports received, try endpoint 0x81 as alternate
+                if (!s_logged_first_report && s_consecutive_ds_timeouts == 50) {
+                    if (g_usb_state.endpoint_in == 0x84) {
+                        daemon_log(LOG_LEVEL_WARN, "DualSense: no reports on EP 0x84, attempting fallback to EP 0x81");
+                        g_usb_state.endpoint_in = 0x81;
+                    } else if (g_usb_state.endpoint_in == 0x81) {
+                        daemon_log(LOG_LEVEL_WARN, "DualSense: no reports on EP 0x81, returning to EP 0x84");
+                        g_usb_state.endpoint_in = 0x84;
+                    }
+                }
+            }
             // Normal USB interrupt timeout: keep 250 Hz stream alive with last known state
             if (s_last_ds4.connected) {
                 s_last_ds4.timestamp = daemon_sys_time_us();
