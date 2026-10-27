@@ -679,14 +679,11 @@ void translator_convert_dualsense(const DualSenseReport* ps5, OrbisPadData* ds4,
 
     memset(ds4, 0, sizeof(OrbisPadData));
 
-    // Analog sticks
+    // Analog sticks (DualSense native coordinates match DS4: 0 = Top/Left, 255 = Bottom/Right)
     uint8_t lx = ps5->left_stick_x;
     uint8_t ly = ps5->left_stick_y;
     uint8_t rx = ps5->right_stick_x;
     uint8_t ry = ps5->right_stick_y;
-
-    if (config->invert_left_y)  ly = 255 - ly;
-    if (config->invert_right_y) ry = 255 - ry;
 
     if (config->stick_deadzone > 0) {
         lx = translator_apply_deadzone(lx, config->stick_deadzone);

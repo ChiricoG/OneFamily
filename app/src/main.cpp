@@ -59,9 +59,13 @@ int main() {
     // Standard handle for navigating the app and reading controller telemetry
     int padHandle = scePadOpen(userId, 0, 0, NULL);
 
-    // Check if First-Launch Setup Wizard is required
-    if (!Installer::isInstalled()) {
-        InstallResult res = Installer::runInstallation();
+    // Check if First-Launch Setup Wizard or Payload Update is required
+    bool isInstalled = Installer::isInstalled();
+    bool isUpToDate = Installer::isPayloadUpToDate();
+
+    if (!isInstalled || !isUpToDate) {
+        bool isUpdate = isInstalled && !isUpToDate;
+        InstallResult res = Installer::runInstallation(isUpdate);
 
         int wizardFrames = 0;
         uint32_t wizardPrevButtons = 0;

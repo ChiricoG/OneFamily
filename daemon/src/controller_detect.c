@@ -23,6 +23,7 @@ static int is_xone_pid(uint16_t pid) {
 }
 
 #define USB_CLASS_VENDOR_SPECIFIC   0xFF
+#define USB_CLASS_HID               0x03
 
 // Xbox 360 compatible (XInput) interface signature
 #define XB360_IF_SUBCLASS           0x5D
@@ -104,6 +105,50 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
     return found;
 }
 
+static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* out) {
+    if (!dev || !out) return 0;
+
+    struct libusb_config_descriptor* cfg = NULL;
+    if (usbd_get_active_config_descriptor(dev, &cfg) != 0 || !cfg) {
+        return 0;
+    }
+
+    int found = 0;
+    for (int i = 0; i < cfg->bNumInterfaces && !found; i++) {
+        const struct libusb_interface* intf = &cfg->interface[i];
+        for (int a = 0; a < intf->num_altsetting && !found; a++) {
+            const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
+
+            if (alt->bInterfaceClass != USB_CLASS_HID) continue;
+
+            uint8_t ep_in = 0;
+            uint8_t ep_out = 0;
+            for (int k = 0; k < alt->bNumEndpoints; k++) {
+                const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
+                if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
+                    if (ep->bEndpointAddress & EP_DIR_IN) {
+                        if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                    } else {
+                        if (ep_out == 0) ep_out = ep->bEndpointAddress;
+                    }
+                }
+            }
+
+            if (ep_in != 0) {
+                out->type          = CONTROLLER_DUALSENSE;
+                out->interface_num = alt->bInterfaceNumber;
+                out->alt_setting   = alt->bAlternateSetting;
+                out->ep_in         = ep_in;
+                out->ep_out        = ep_out;
+                found = 1;
+            }
+        }
+    }
+
+    usbd_free_config_descriptor(cfg);
+    return found;
+}
+
 int controller_identify(libusb_device* dev, const struct libusb_device_descriptor* desc, DetectedController* out) {
     if (!dev || !desc || !out) return 0;
     memset(out, 0, sizeof(*out));
@@ -122,9 +167,12 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->type = CONTROLLER_DUALSENSE;
             out->vid = desc->idVendor;
             out->pid = desc->idProduct;
-            out->interface_num = 3; // Interface 3 is HID on DualSense
-            out->ep_in = 0x84;
-            out->ep_out = 0x04;
+            if (!detect_dualsense_endpoints(dev, out)) {
+                // Fallback to standard DualSense HID interface if descriptor parse failed
+                out->interface_num = 3;
+                out->ep_in = 0x84;
+                out->ep_out = 0x04;
+            }
             return 1;
         }
     }

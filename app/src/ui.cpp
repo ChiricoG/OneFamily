@@ -478,7 +478,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_rounded_outline(scene, CARD_X, 280, CARD_W, 160, 12, COLOR_CARD_BORDER, 1);
         draw_image(scene, iconInfo, CARD_X + 24, 305);
         draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 318, COLOR_WHITE);
-        draw_text(scene, "Version: v1.0 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 350, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Version: v1.1.0 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 350, COLOR_BLUE_BRIGHT);
         draw_text(scene, "Configuration File: /data/GoldHEN/onefamily.ini", fontCardDesc, CARD_X + 90, 380, COLOR_TEXT_DIM);
         draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 410, COLOR_TEXT_DIM);
 
@@ -546,7 +546,7 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
     // Top Header
     draw_image(scene, xboxLogo, 60, 60);
     draw_text(scene, "OneFamily", fontTitle, 175, 95, COLOR_WHITE);
-    draw_text(scene, "All-in-One Setup & Startup Guide", fontSubtitle, 175, 128, COLOR_BLUE_BRIGHT);
+    draw_text(scene, res.isUpdate ? "Update & Startup Guide" : "All-in-One Setup & Startup Guide", fontSubtitle, 175, 128, COLOR_BLUE_BRIGHT);
 
     // Main Card
     int cardW = 1420;
@@ -560,8 +560,8 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
 
     // Title inside card
     draw_image(scene, iconSave, cardX + 40, cardY + 36);
-    draw_text(scene, "OneFamily Installation Completed", fontCardTitle, cardX + 105, cardY + 60, COLOR_WHITE);
-    draw_text(scene, "System files and auto-boot successfully configured for GoldHEN:", fontCardDesc, cardX + 105, cardY + 90, COLOR_TEXT_DIM);
+    draw_text(scene, res.isUpdate ? "OneFamily Update Completed" : "OneFamily Installation Completed", fontCardTitle, cardX + 105, cardY + 60, COLOR_WHITE);
+    draw_text(scene, res.isUpdate ? "System payload and configuration successfully updated for GoldHEN:" : "System files and auto-boot successfully configured for GoldHEN:", fontCardDesc, cardX + 105, cardY + 90, COLOR_TEXT_DIM);
 
     // Status Lines
     int lineY = cardY + 135;
@@ -569,8 +569,8 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
 
     // Item 1: Payload
     if (res.payloadCopied) {
-        draw_text(scene, "[OK] Payload File:", fontCardTitle, cardX + 50, lineY, COLOR_BLUE_BRIGHT);
-        draw_text(scene, "Installed to /data/payloads/onefamily.bin", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
+        draw_text(scene, res.isUpdate ? "[OK] Payload Updated:" : "[OK] Payload File:", fontCardTitle, cardX + 50, lineY, COLOR_BLUE_BRIGHT);
+        draw_text(scene, res.isUpdate ? "Replaced with latest version (/data/payloads/onefamily.bin)" : "Installed to /data/payloads/onefamily.bin", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
     } else {
         draw_text(scene, "[FAIL] Payload File:", fontCardTitle, cardX + 50, lineY, Color{ 255, 80, 80 });
         draw_text(scene, "Failed to copy payload to /data/payloads/onefamily.bin", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
@@ -579,8 +579,8 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
 
     // Item 2: Config
     if (res.configCreated) {
-        draw_text(scene, "[OK] Configuration:", fontCardTitle, cardX + 50, lineY, COLOR_BLUE_BRIGHT);
-        draw_text(scene, "Initialized /data/GoldHEN/onefamily.ini with optimal settings", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
+        draw_text(scene, res.isUpdate ? "[OK] Configuration:" : "[OK] Configuration:", fontCardTitle, cardX + 50, lineY, COLOR_BLUE_BRIGHT);
+        draw_text(scene, res.isUpdate ? "Replaced /data/GoldHEN/onefamily.ini with latest version & defaults" : "Initialized /data/GoldHEN/onefamily.ini with optimal settings", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
     } else {
         draw_text(scene, "[FAIL] Configuration:", fontCardTitle, cardX + 50, lineY, Color{ 255, 80, 80 });
         draw_text(scene, "Failed to create configuration file", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
@@ -590,7 +590,7 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
     // Item 3: Auto-boot in payloads.ini
     if (res.autobootConfigured) {
         draw_text(scene, "[OK] Auto-Boot:", fontCardTitle, cardX + 50, lineY, COLOR_BLUE_BRIGHT);
-        draw_text(scene, "Registered in /data/GoldHEN/payloads.ini ([AutoRun])", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
+        draw_text(scene, res.isUpdate ? "Verified in /data/GoldHEN/payloads.ini ([AutoRun])" : "Registered in /data/GoldHEN/payloads.ini ([AutoRun])", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
     } else {
         draw_text(scene, "[FAIL] Auto-Boot:", fontCardTitle, cardX + 50, lineY, Color{ 255, 80, 80 });
         draw_text(scene, "Failed to register auto-boot entry in payloads.ini", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
@@ -601,19 +601,35 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
     scene->DrawRectangle(cardX + 40, divY, cardW - 80, 2, COLOR_DIVIDER);
 
     // Startup Guide (4 Steps in English)
-    draw_text(scene, "Next Steps to activate your controller:", fontCardTitle, cardX + 50, divY + 38, COLOR_WHITE);
+    if (res.isUpdate) {
+        draw_text(scene, "Next Steps to apply the update:", fontCardTitle, cardX + 50, divY + 38, COLOR_WHITE);
 
-    int stepY = divY + 76;
-    draw_text(scene, "1. Restart your console (power off and reboot PS4).", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
+        int stepY = divY + 76;
+        draw_text(scene, "1. Restart your console (power off and reboot PS4).", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
 
-    stepY += 36;
-    draw_text(scene, "2. Run the jailbreak via GoldHEN.", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
+        stepY += 36;
+        draw_text(scene, "2. GoldHEN will auto-launch the newly updated OneFamily payload on boot.", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
 
-    stepY += 36;
-    draw_text(scene, "3. OneFamily will be active automatically: connect your pad, it will be recognized and work immediately!", fontCardDesc, cardX + 50, stepY, COLOR_BLUE_BRIGHT);
+        stepY += 36;
+        draw_text(scene, "3. All new controller features, fixes, and mappings are now active!", fontCardDesc, cardX + 50, stepY, COLOR_BLUE_BRIGHT);
 
-    stepY += 36;
-    draw_text(scene, "4. Open OneFamily Companion anytime to configure or calibrate your pad.", fontCardDesc, cardX + 50, stepY, COLOR_TEXT_DIM);
+        stepY += 36;
+        draw_text(scene, "4. Open OneFamily Companion anytime to tweak your configuration.", fontCardDesc, cardX + 50, stepY, COLOR_TEXT_DIM);
+    } else {
+        draw_text(scene, "Next Steps to activate your controller:", fontCardTitle, cardX + 50, divY + 38, COLOR_WHITE);
+
+        int stepY = divY + 76;
+        draw_text(scene, "1. Restart your console (power off and reboot PS4).", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
+
+        stepY += 36;
+        draw_text(scene, "2. Run the jailbreak via GoldHEN.", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
+
+        stepY += 36;
+        draw_text(scene, "3. OneFamily will be active automatically: connect your pad, it will be recognized and work immediately!", fontCardDesc, cardX + 50, stepY, COLOR_BLUE_BRIGHT);
+
+        stepY += 36;
+        draw_text(scene, "4. Open OneFamily Companion anytime to configure or calibrate your pad.", fontCardDesc, cardX + 50, stepY, COLOR_TEXT_DIM);
+    }
 
     // Footer
     scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);

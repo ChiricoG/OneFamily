@@ -71,7 +71,7 @@ def build_sfo(params, output_path="param.sfo"):
 if __name__ == '__main__':
     params = {
         "APP_TYPE": 1,
-        "APP_VER": "01.00",
+        "APP_VER": "01.10",
         "ATTRIBUTE": 0,
         "CATEGORY": "gd",
         "CONTENT_ID": "UP9000-XBOX00001_00-XBOXCONFIGURATOR",
@@ -79,7 +79,7 @@ if __name__ == '__main__':
         "SYSTEM_VER": 0,
         "TITLE": "OneFamily Companion",
         "TITLE_ID": "XBOX00001",
-        "VERSION": "01.00"
+        "VERSION": "01.10"
     }
 
     out = os.path.join(os.path.dirname(__file__), "sce_sys", "param.sfo")

@@ -3,6 +3,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -136,6 +138,67 @@ static bool update_payloads_ini() {
     return true;
 }
 
+bool Installer::isPayloadUpToDate() {
+    // 1. Locate bundled payload
+    const char* bundled_path = NULL;
+    if (file_exists(BUNDLED_PAYLOAD_PATH)) {
+        bundled_path = BUNDLED_PAYLOAD_PATH;
+    } else if (file_exists(BUNDLED_PAYLOAD_FALLBACK)) {
+        bundled_path = BUNDLED_PAYLOAD_FALLBACK;
+    }
+    if (!bundled_path) return false;
+
+    // 2. Locate installed target payload
+    const char* target_path = NULL;
+    if (file_exists(TARGET_PAYLOAD_PATH)) {
+        target_path = TARGET_PAYLOAD_PATH;
+    } else if (file_exists(TARGET_USER_PAYLOAD_PATH)) {
+        target_path = TARGET_USER_PAYLOAD_PATH;
+    }
+    if (!target_path) return false;
+
+    // 3. Open both and compare file sizes
+    int fd_b = sceKernelOpen(bundled_path, O_RDONLY, 0);
+    if (fd_b < 0) return false;
+    off_t bundled_sz = sceKernelLseek(fd_b, 0, SEEK_END);
+    sceKernelLseek(fd_b, 0, SEEK_SET);
+
+    int fd_t = sceKernelOpen(target_path, O_RDONLY, 0);
+    if (fd_t < 0) {
+        sceKernelClose(fd_b);
+        return false;
+    }
+    off_t target_sz = sceKernelLseek(fd_t, 0, SEEK_END);
+    sceKernelLseek(fd_t, 0, SEEK_SET);
+
+    if (bundled_sz <= 0 || target_sz <= 0 || bundled_sz != target_sz) {
+        sceKernelClose(fd_b);
+        sceKernelClose(fd_t);
+        return false;
+    }
+
+    // 4. Compare contents in 8 KB chunks
+    uint8_t buf_b[8192];
+    uint8_t buf_t[8192];
+    bool match = true;
+    off_t remaining = bundled_sz;
+
+    while (remaining > 0) {
+        size_t chunk = (remaining > (off_t)sizeof(buf_b)) ? sizeof(buf_b) : (size_t)remaining;
+        ssize_t rb = sceKernelRead(fd_b, buf_b, chunk);
+        ssize_t rt = sceKernelRead(fd_t, buf_t, chunk);
+        if (rb != (ssize_t)chunk || rt != (ssize_t)chunk || memcmp(buf_b, buf_t, chunk) != 0) {
+            match = false;
+            break;
+        }
+        remaining -= chunk;
+    }
+
+    sceKernelClose(fd_b);
+    sceKernelClose(fd_t);
+    return match;
+}
+
 bool Installer::isInstalled() {
     // 1. Target payload must exist
     bool binExists = file_exists(TARGET_PAYLOAD_PATH) || file_exists(TARGET_USER_PAYLOAD_PATH);
@@ -156,8 +219,9 @@ bool Installer::isInstalled() {
     return true;
 }
 
-InstallResult Installer::runInstallation() {
+InstallResult Installer::runInstallation(bool isUpdate) {
     InstallResult res;
+    res.isUpdate = isUpdate;
 
     // 1. Ensure target directory tree
     mkdir("/data", 0777);
@@ -180,7 +244,7 @@ InstallResult Installer::runInstallation() {
         return res;
     }
 
-    // 3. Write payload to destination
+    // 3. Write payload to destination (overwriting existing file with latest version)
     bool write1 = write_binary_file(TARGET_PAYLOAD_PATH, payloadData.data(), payloadData.size());
     bool write2 = write_binary_file(TARGET_USER_PAYLOAD_PATH, payloadData.data(), payloadData.size());
     res.payloadCopied = (write1 || write2);
@@ -189,12 +253,14 @@ InstallResult Installer::runInstallation() {
         return res;
     }
 
-    // 4. Ensure default config exists
+    // 4. Overwrite / replace configuration file with latest version and default layout
     ConfigManager cfgMgr;
-    cfgMgr.load(); // automatically creates /data/GoldHEN/onefamily.ini if missing
+    cfgMgr.getConfig().set_defaults();
+    cfgMgr.save(); // Overwrites /data/GoldHEN/onefamily.ini
+    sceKernelUnlink(LEGACY_INI_FILE_PATH); // Clean up legacy xbox_controller.ini if present
     res.configCreated = true;
 
-    // 5. Update /data/GoldHEN/payloads.ini for permanent autoboot
+    // 5. Update /data/GoldHEN/payloads.ini for permanent autoboot (checked and skipped if already present)
     res.autobootConfigured = update_payloads_ini();
     if (!res.autobootConfigured) {
         res.detailMessage = "Failed to configure /data/GoldHEN/payloads.ini";

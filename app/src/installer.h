@@ -5,13 +5,14 @@
 #include <stdint.h>
 
 struct InstallResult {
+    bool isUpdate;
     bool payloadCopied;
     bool configCreated;
     bool autobootConfigured;
     std::string detailMessage;
 
     InstallResult()
-        : payloadCopied(false), configCreated(false),
+        : isUpdate(false), payloadCopied(false), configCreated(false),
           autobootConfigured(false), detailMessage("") {}
 
     bool isSuccess() const {
@@ -22,5 +23,6 @@ struct InstallResult {
 class Installer {
 public:
     static bool isInstalled();
-    static InstallResult runInstallation();
+    static bool isPayloadUpToDate();
+    static InstallResult runInstallation(bool isUpdate = false);
 };

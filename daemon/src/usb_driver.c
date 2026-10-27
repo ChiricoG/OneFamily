@@ -347,7 +347,7 @@ void usb_driver_poll_step(void) {
     }
 
     // 2. Read from connected controller
-    uint8_t rx[64];
+    uint8_t rx[128];
     int transferred = 0;
     int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 4);
 
@@ -466,9 +466,20 @@ void usb_driver_poll_step(void) {
             }
             s_last_ds4 = ds4;
             vpad_send_data(&ds4);
-        } else if (g_usb_state.type == CONTROLLER_DUALSENSE && transferred >= sizeof(DualSenseReport)) {
-            if (rx[0] == 0x01) {
-                translator_convert_dualsense((const DualSenseReport*)rx, &ds4, &s_trans_cfg);
+        } else if (g_usb_state.type == CONTROLLER_DUALSENSE && transferred >= 10) {
+            const DualSenseReport* ps5 = NULL;
+            DualSenseReport temp_report;
+            if (rx[0] == 0x01 && transferred >= 11) {
+                ps5 = (const DualSenseReport*)rx;
+            } else if (transferred >= 10) {
+                memset(&temp_report, 0, sizeof(temp_report));
+                temp_report.report_id = 0x01;
+                int copy_len = transferred > 63 ? 63 : transferred;
+                memcpy(&temp_report.left_stick_x, rx, copy_len);
+                ps5 = &temp_report;
+            }
+            if (ps5) {
+                translator_convert_dualsense(ps5, &ds4, &s_trans_cfg);
                 if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
                     ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
                     ds4.buttons |= DS4_BUTTON_PS;
