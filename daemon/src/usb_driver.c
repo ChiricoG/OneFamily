@@ -487,7 +487,10 @@ void usb_driver_poll_step(void) {
     int transferred = 0;
     int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 16);
 
+    static int s_consecutive_disconnects = 0;
+
     if (ret == 0 && transferred > 0) {
+        s_consecutive_disconnects = 0;
         if (!s_logged_first_report) {
             daemon_log(LOG_LEVEL_INFO, "USB first input report received (%d bytes) from %s",
                        transferred, controller_type_to_str(g_usb_state.type));
@@ -694,35 +697,33 @@ void usb_driver_poll_step(void) {
                 vpad_send_data(&ds4);
             }
         }
-    } else if (ret == 0x80240007 || ret == -7) {
-        if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
-            static int s_logged_sw_timeout = 0;
-            if (s_logged_sw_timeout < 5) {
-                daemon_log(LOG_LEVEL_WARN, "Switch Pro USB interrupt transfer timed out (0x80240007)");
-                s_logged_sw_timeout++;
+    } else {
+        // Check for physical disconnect on any transfer error/timeout
+        if (p_sceUsbdCheckConnected != NULL && p_sceUsbdCheckConnected(g_dev_handle) != 0) {
+            s_consecutive_disconnects++;
+            if (s_consecutive_disconnects >= 3) {
+                daemon_log(LOG_LEVEL_INFO, "USB controller physical disconnect confirmed (ret=0x%08X)", ret);
+                close_controller();
+                s_consecutive_disconnects = 0;
+                return;
             }
+        } else {
+            s_consecutive_disconnects = 0;
         }
-        // Normal USB interrupt timeout: keep 250 Hz stream alive with last known state
-        if (s_last_ds4.connected) {
-            s_last_ds4.timestamp = daemon_sys_time_us();
-            vpad_send_data(&s_last_ds4);
-        }
-    } else if (ret != 0) {
-        if (g_usb_state.type == CONTROLLER_DUALSENSE) {
-            static int s_logged_ds_err = 0;
-            if (s_logged_ds_err < 10) {
+
+        if (ret == 0x80240007 || ret == -7) {
+            // Normal USB interrupt timeout: keep 250 Hz stream alive with last known state
+            if (s_last_ds4.connected) {
+                s_last_ds4.timestamp = daemon_sys_time_us();
+                vpad_send_data(&s_last_ds4);
+            }
+        } else if (ret != 0) {
+            if (g_usb_state.type == CONTROLLER_DUALSENSE) {
                 daemon_log(LOG_LEVEL_WARN, "DualSense interrupt transfer returned 0x%08X (ep=0x%02X)", ret, g_usb_state.endpoint_in);
-                s_logged_ds_err++;
-            }
-        } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
-            static int s_logged_sw_err = 0;
-            if (s_logged_sw_err < 10) {
+            } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
                 daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X)", ret, g_usb_state.endpoint_in);
-                s_logged_sw_err++;
             }
-        }
-        // Physical disconnect or USB transfer failure
-        if (!p_sceUsbdCheckConnected || p_sceUsbdCheckConnected(g_dev_handle) != 0) {
+            // Fatal transfer error, close controller
             close_controller();
         }
     }

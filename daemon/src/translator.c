@@ -587,12 +587,11 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
     uint16_t raw_ry = (uint16_t)(sw->right_stick[1] >> 4) | (((uint16_t)sw->right_stick[2]) << 4);
 
     // Scale 12-bit (0..4095) to 8-bit (0..255)
-    // Switch raw_ly/raw_ry: 4095 = top, 0 = bottom
-    // PlayStation DS4: 0 = top, 255 = bottom
+    // Switch Pro native Y axis matches PlayStation DS4 coordinate space (0 = top, 255 = bottom)
     uint8_t lx = (uint8_t)(raw_lx >> 4);
-    uint8_t ly = (uint8_t)(255 - (raw_ly >> 4));
+    uint8_t ly = (uint8_t)(raw_ly >> 4);
     uint8_t rx = (uint8_t)(raw_rx >> 4);
-    uint8_t ry = (uint8_t)(255 - (raw_ry >> 4));
+    uint8_t ry = (uint8_t)(raw_ry >> 4);
 
     // Apply Y-axis inversion if configured
     if (config->invert_left_y) {
