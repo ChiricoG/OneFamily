@@ -149,8 +149,14 @@ static void init_gip_controller(void) {
     send_init_packet(powera_init, sizeof(powera_init));
     daemon_sys_usleep(10000);
 
-    const uint8_t pdp_init[] = { 0x0a, 0x20, 0x00, 0x03, 0x00, 0x01, 0x14 };
-    send_init_packet(pdp_init, sizeof(pdp_init));
+    // PDP / Victrix / Turtle Beach handshake packet 1 (LED on / handshake)
+    const uint8_t pdp_init1[] = { 0x0a, 0x20, 0x00, 0x03, 0x00, 0x01, 0x14 };
+    send_init_packet(pdp_init1, sizeof(pdp_init1));
+    daemon_sys_usleep(10000);
+
+    // PDP / Victrix / Turtle Beach handshake packet 2 (Input mode unlock)
+    const uint8_t pdp_init2[] = { 0x06, 0x20, 0x00, 0x02, 0x01, 0x00 };
+    send_init_packet(pdp_init2, sizeof(pdp_init2));
     daemon_sys_usleep(10000);
 }
 
@@ -578,8 +584,8 @@ void usb_driver_poll_step(void) {
                 s_last_ds4 = ds4;
                 vpad_send_data(&ds4);
             } else if (rx[0] == XBOXONE_REPORT_GUIDE) {
-                // Send GIP ACK to controller if requested (GIP_OPT_ACK)
-                if (rx[1] & 0x01) {
+                // Send GIP ACK to controller if requested (GIP_OPT_ACK: 0x10 or 0x01)
+                if ((rx[1] & 0x10) || (rx[1] & 0x01)) {
                     uint8_t ack_pkt[13] = {
                         0x01, 0x20, rx[2], 0x09, 0x00, 0x07, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
                     };
@@ -600,6 +606,15 @@ void usb_driver_poll_step(void) {
                 }
                 s_last_ds4.timestamp = daemon_sys_time_us();
                 vpad_send_data(&s_last_ds4);
+            } else {
+                // Handle general GIP control / status / announce packets requiring host ACK
+                if (transferred >= 3 && ((rx[1] & 0x10) || (rx[1] & 0x01))) {
+                    uint8_t ack_pkt[13] = {
+                        0x01, 0x20, rx[2], 0x09, 0x00, rx[0], 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
+                    };
+                    send_init_packet(ack_pkt, sizeof(ack_pkt));
+                    daemon_log(LOG_LEVEL_INFO, "GIP ACK sent for cmd 0x%02X (seq 0x%02X, len %d)", rx[0], rx[2], transferred);
+                }
             }
         } else if (g_usb_state.type == CONTROLLER_SWITCH && transferred >= sizeof(SwitchInputOnlyReport)) {
             translator_convert_switch((const SwitchInputOnlyReport*)rx, &ds4, &s_trans_cfg);

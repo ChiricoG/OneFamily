@@ -10,6 +10,8 @@
 
 #define XBOX_VID                    0x045E
 #define XBOX360_PID                 0x028E
+#define PDP_VID                     0x0E6F
+#define VICTRIX_PRO_BFG_XBOX_PID    0x024C
 
 static const uint16_t s_xboxone_pids[] = {
     0x02D1, 0x02DD, 0x02E3, 0x02EA, 0x0B00, 0x0B0A, 0x0B12
@@ -221,7 +223,7 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         }
     }
 
-    // 2. Microsoft Xbox 360 & Xbox One / Series
+    // 2. Microsoft Xbox 360 & Xbox One / Series / PDP Victrix
     if (desc->idVendor == XBOX_VID) {
         if (desc->idProduct == XBOX360_PID) {
             out->type = CONTROLLER_XBOX360;
@@ -238,6 +240,18 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->interface_num = 0;
             out->ep_in = 0x82;
             out->ep_out = 0x02;
+            return 1;
+        }
+    } else if (desc->idVendor == PDP_VID) {
+        if (desc->idProduct == VICTRIX_PRO_BFG_XBOX_PID) {
+            out->type = CONTROLLER_XBOXONE;
+            out->vid = desc->idVendor;
+            out->pid = desc->idProduct;
+            if (!controller_detect_by_descriptor(dev, out)) {
+                out->interface_num = 0;
+                out->ep_in = 0x82;
+                out->ep_out = 0x02;
+            }
             return 1;
         }
     }
