@@ -9,6 +9,9 @@
 
 #include <stdint.h>
 
+#define XBOX360_REPORT_INPUT        0x00
+#define XBOX360_REPORT_OUTPUT       0x00
+
 /*
  * Xbox 360 Input Report Structure (20 bytes)
  *

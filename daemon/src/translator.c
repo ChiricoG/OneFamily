@@ -971,3 +971,144 @@ void translator_convert_dualsense(const DualSenseReport* ps5, OrbisPadData* ds4,
     ds4->count = 1;
     ds4->timestamp = sceKernelGetProcessTime();
 }
+
+void translator_convert_stadia(const StadiaInputReport* stadia, OrbisPadData* ds4, const TranslatorConfig* config) {
+    TranslatorConfig default_config;
+    if (!config) {
+        translator_init(&default_config);
+        config = &default_config;
+    }
+
+    memset(ds4, 0, sizeof(OrbisPadData));
+
+    // Analog sticks (Stadia native HID coordinates: 0 = Top/Left, 255 = Bottom/Right, 128 = Center)
+    uint8_t lx = stadia->left_stick_x;
+    uint8_t ly = stadia->left_stick_y;
+    uint8_t rx = stadia->right_stick_x;
+    uint8_t ry = stadia->right_stick_y;
+
+    if (config->stick_deadzone > 0) {
+        lx = translator_apply_deadzone(lx, config->stick_deadzone);
+        ly = translator_apply_deadzone(ly, config->stick_deadzone);
+        rx = translator_apply_deadzone(rx, config->stick_deadzone);
+        ry = translator_apply_deadzone(ry, config->stick_deadzone);
+    }
+
+    ds4->leftStick.x = lx;
+    ds4->leftStick.y = ly;
+    ds4->rightStick.x = rx;
+    ds4->rightStick.y = ry;
+
+    // Analog triggers
+    if (g_config.swap_triggers_bumpers) {
+        ds4->analogButtons.l2 = (stadia->buttons_extra & 0x04) ? 255 : 0; // L1 bumper
+        ds4->analogButtons.r2 = (stadia->buttons_extra & 0x02) ? 255 : 0; // R1 bumper
+    } else {
+        ds4->analogButtons.l2 = stadia->left_trigger;
+        ds4->analogButtons.r2 = stadia->right_trigger;
+    }
+
+    uint32_t ds4_buttons = 0;
+
+    // Face buttons: A=0x40, B=0x20, X=0x10, Y=0x08 in buttons_extra
+    if (config->swap_ab) {
+        if (stadia->buttons_extra & 0x40) ds4_buttons |= DS4_BUTTON_CIRCLE; // A -> Circle
+        if (stadia->buttons_extra & 0x20) ds4_buttons |= DS4_BUTTON_CROSS;  // B -> Cross
+    } else {
+        if (stadia->buttons_extra & 0x40) ds4_buttons |= DS4_BUTTON_CROSS;   // A -> Cross
+        if (stadia->buttons_extra & 0x20) ds4_buttons |= DS4_BUTTON_CIRCLE;  // B -> Circle
+    }
+
+    if (config->swap_xy) {
+        if (stadia->buttons_extra & 0x10) ds4_buttons |= DS4_BUTTON_TRIANGLE; // X -> Triangle
+        if (stadia->buttons_extra & 0x08) ds4_buttons |= DS4_BUTTON_SQUARE;   // Y -> Square
+    } else {
+        if (stadia->buttons_extra & 0x10) ds4_buttons |= DS4_BUTTON_SQUARE;   // X -> Square
+        if (stadia->buttons_extra & 0x08) ds4_buttons |= DS4_BUTTON_TRIANGLE; // Y -> Triangle
+    }
+
+    // Bumpers & Triggers
+    // L1: buttons_extra bit 2 (0x04), R1: buttons_extra bit 1 (0x02)
+    // L2: buttons_main bit 2 (0x04), R2: buttons_main bit 3 (0x08) or analog threshold
+    if (g_config.swap_triggers_bumpers) {
+        if (stadia->buttons_extra & 0x04) ds4_buttons |= DS4_BUTTON_L2;
+        if (stadia->buttons_extra & 0x02) ds4_buttons |= DS4_BUTTON_R2;
+        if (stadia->left_trigger >= config->trigger_threshold || (stadia->buttons_main & 0x04)) ds4_buttons |= DS4_BUTTON_L1;
+        if (stadia->right_trigger >= config->trigger_threshold || (stadia->buttons_main & 0x08)) ds4_buttons |= DS4_BUTTON_R1;
+    } else {
+        if (stadia->buttons_extra & 0x04) ds4_buttons |= DS4_BUTTON_L1;
+        if (stadia->buttons_extra & 0x02) ds4_buttons |= DS4_BUTTON_R1;
+        if (stadia->left_trigger >= config->trigger_threshold || (stadia->buttons_main & 0x04)) ds4_buttons |= DS4_BUTTON_L2;
+        if (stadia->right_trigger >= config->trigger_threshold || (stadia->buttons_main & 0x08)) ds4_buttons |= DS4_BUTTON_R2;
+    }
+
+    // Stick clicks: L3 (buttons_extra bit 0: 0x01), R3 (buttons_main bit 7: 0x80)
+    if (stadia->buttons_extra & 0x01) ds4_buttons |= DS4_BUTTON_L3;
+    if (stadia->buttons_main & 0x80)  ds4_buttons |= DS4_BUTTON_R3;
+
+    // Menu buttons:
+    // Menu (three lines / Start): buttons_main bit 5 (0x20) -> OPTIONS
+    // Options (three dots / Select): buttons_main bit 6 (0x40) -> SHARE
+    if (stadia->buttons_main & 0x20) ds4_buttons |= DS4_BUTTON_OPTIONS;
+    if (stadia->buttons_main & 0x40) ds4_buttons |= DS4_BUTTON_SHARE;
+
+    // Stadia logo button: buttons_main bit 4 (0x10) -> Guide button handling
+    if (stadia->buttons_main & 0x10) {
+        if (g_config.guide_action == CONFIG_GUIDE_TOUCHPAD) {
+            ds4_buttons |= DS4_BUTTON_TOUCHPAD;
+        } else if (g_config.guide_action == CONFIG_GUIDE_SHARE) {
+            ds4_buttons |= DS4_BUTTON_SHARE;
+        } else {
+            ds4_buttons |= DS4_BUTTON_PS;
+        }
+    }
+
+    // Capture (bit 0: 0x01) and Google Assistant (bit 1: 0x02) buttons
+    // Mapped directly to DualShock 4 Touchpad button!
+    if (stadia->buttons_main & 0x03) {
+        ds4_buttons |= DS4_BUTTON_TOUCHPAD;
+    }
+
+    // D-Pad Hat Switch (0=Up, 1=UpRight, 2=Right, 3=DownRight, 4=Down, 5=DownLeft, 6=Left, 7=UpLeft, 8=Release)
+    switch (stadia->dpad) {
+        case 0: ds4_buttons |= DS4_BUTTON_DPAD_UP; break;
+        case 1: ds4_buttons |= DS4_BUTTON_DPAD_UP | DS4_BUTTON_DPAD_RIGHT; break;
+        case 2: ds4_buttons |= DS4_BUTTON_DPAD_RIGHT; break;
+        case 3: ds4_buttons |= DS4_BUTTON_DPAD_DOWN | DS4_BUTTON_DPAD_RIGHT; break;
+        case 4: ds4_buttons |= DS4_BUTTON_DPAD_DOWN; break;
+        case 5: ds4_buttons |= DS4_BUTTON_DPAD_DOWN | DS4_BUTTON_DPAD_LEFT; break;
+        case 6: ds4_buttons |= DS4_BUTTON_DPAD_LEFT; break;
+        case 7: ds4_buttons |= DS4_BUTTON_DPAD_UP | DS4_BUTTON_DPAD_LEFT; break;
+        default: break;
+    }
+
+    ds4->buttons = ds4_buttons;
+
+    // Capacitive Touchpad emulation: when Touchpad button is pressed, emit centered touch point
+    if (ds4_buttons & DS4_BUTTON_TOUCHPAD) {
+        ds4->touch.fingers = 1;
+        ds4->touch.touch[0].finger = 0;
+        ds4->touch.touch[0].x = 960;
+        ds4->touch.touch[0].y = 470;
+    } else {
+        ds4->touch.fingers = 0;
+    }
+
+    // Motion data - neutral
+    ds4->quat.x = 0.0f;
+    ds4->quat.y = 0.0f;
+    ds4->quat.z = 0.0f;
+    ds4->quat.w = 1.0f;
+
+    ds4->vel.x = 0.0f;
+    ds4->vel.y = 0.0f;
+    ds4->vel.z = 0.0f;
+
+    ds4->acell.x = 0.0f;
+    ds4->acell.y = 0.0f;
+    ds4->acell.z = 1.0f;  // 1g downward
+
+    ds4->connected = 1;
+    ds4->count = 1;
+    ds4->timestamp = sceKernelGetProcessTime();
+}

@@ -319,6 +319,7 @@ static const char* controller_type_to_str(ControllerType type) {
         case CONTROLLER_SWITCH_PRO:return "Switch Pro";
         case CONTROLLER_DS3:      return "DualShock 3";
         case CONTROLLER_DUALSENSE:return "DualSense";
+        case CONTROLLER_STADIA:   return "Google Stadia";
         default:                  return "Unknown";
     }
 }
@@ -372,10 +373,11 @@ static int scan_and_open(void) {
                     g_usb_state.type = det.type;
                     g_usb_state.endpoint_in = det.ep_in;
                     g_usb_state.endpoint_out = det.ep_out;
+                    g_usb_state.is_wireless = det.is_wireless;
                     found = 1;
 
-                    daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X)",
-                               controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in);
+                    daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X, wireless=%d)",
+                               controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in, det.is_wireless);
 
                     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
                     s_last_ds4.leftStick.x = 128;
@@ -439,11 +441,21 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
 
     int transferred = 0;
     if (g_usb_state.type == CONTROLLER_XBOX360) {
-        uint8_t pkt[8] = { 0x00, 0x08, 0x00, large_motor, small_motor, 0x00, 0x00, 0x00 };
-        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
-        if (ret != 0) {
-            uint8_t pkt4[4] = { 0x00, 0x04, large_motor, small_motor };
-            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, 50);
+        if (g_usb_state.is_wireless) {
+            // Wireless Xbox 360 Receiver Rumble (12 bytes)
+            uint8_t pkt12[12] = {
+                0x00, 0x01, 0x0F, 0xC0,
+                0x00, large_motor, small_motor, 0x00,
+                0x00, 0x00, 0x00, 0x00
+            };
+            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt12, sizeof(pkt12), &transferred, 50);
+        } else {
+            uint8_t pkt[8] = { 0x00, 0x08, 0x00, large_motor, small_motor, 0x00, 0x00, 0x00 };
+            int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+            if (ret != 0) {
+                uint8_t pkt4[4] = { 0x00, 0x04, large_motor, small_motor };
+                p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, 50);
+            }
         }
     } else if (g_usb_state.type == CONTROLLER_XBOXONE) {
         static uint8_t s_xone_seq = 0;
@@ -473,6 +485,29 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         pkt[44] = 0x04;       // Player 1 LED
         pkt[47] = 0xFF;       // Blue lightbar
         p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+    } else if (g_usb_state.type == CONTROLLER_STADIA) {
+        // Stadia Rumble Output Report (Report ID 0x05, 5 bytes)
+        // [0] = 0x05
+        // [1..2] = strong_magnitude (16-bit LE, 0..65535)
+        // [3..4] = weak_magnitude (16-bit LE, 0..65535)
+        uint16_t strong = (uint16_t)large_motor * 257;
+        uint16_t weak   = (uint16_t)small_motor * 257;
+        uint8_t pkt[5] = {
+            STADIA_REPORT_ID_RUMBLE,
+            (uint8_t)(strong & 0xFF),
+            (uint8_t)((strong >> 8) & 0xFF),
+            (uint8_t)(weak & 0xFF),
+            (uint8_t)((weak >> 8) & 0xFF)
+        };
+        int sent = 0;
+        if (ep != 0) {
+            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50) == 0) {
+                sent = 1;
+            }
+        }
+        if (!sent && p_sceUsbdControlTransfer) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, pkt, sizeof(pkt), 50);
+        }
     }
 }
 
@@ -546,10 +581,38 @@ void usb_driver_poll_step(void) {
             s_trans_cfg.swap_xy = 0;
         }
 
-        if (g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 20) {
-            if (xbox360_report_valid((const Xbox360Report*)rx)) {
-                translator_convert((const Xbox360Report*)rx, &ds4, &s_trans_cfg);
-                const Xbox360Report* x360 = (const Xbox360Report*)rx;
+        if (g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) {
+            static int s_logged_x360_report = 0;
+            if (s_logged_x360_report < 5) {
+                daemon_log(LOG_LEVEL_INFO, "Xbox 360 report [%d bytes, wireless=%d]: rx[0]=0x%02X rx[1]=0x%02X rx[2]=0x%02X rx[3]=0x%02X",
+                           transferred, g_usb_state.is_wireless, rx[0], rx[1], rx[2], rx[3]);
+                s_logged_x360_report++;
+            }
+
+            const Xbox360Report* x360 = NULL;
+            Xbox360Report temp_report;
+
+            if (g_usb_state.is_wireless && transferred >= 24 && rx[4] == XBOX360_REPORT_INPUT) {
+                // Wireless receiver report (4-byte RF/slot header prefix, payload at &rx[4])
+                if (rx[1] == 0x01 || rx[1] == 0x00) {
+                    x360 = (const Xbox360Report*)(&rx[4]);
+                }
+            } else if (rx[0] == XBOX360_REPORT_INPUT) {
+                // Wired Xbox 360 report (Linux xpad style: accepts any report starting with type 0x00)
+                if (transferred < (int)sizeof(Xbox360Report)) {
+                    memset(&temp_report, 0, sizeof(temp_report));
+                    memcpy(&temp_report, rx, transferred);
+                    x360 = &temp_report;
+                } else {
+                    x360 = (const Xbox360Report*)rx;
+                }
+            } else if (transferred >= 24 && rx[4] == XBOX360_REPORT_INPUT && (rx[1] == 0x01 || rx[1] == 0x00)) {
+                // Wireless receiver report fallback if descriptor flag was wired
+                x360 = (const Xbox360Report*)(&rx[4]);
+            }
+
+            if (x360 != NULL) {
+                translator_convert(x360, &ds4, &s_trans_cfg);
                 int guide_pressed = (x360->buttons_high & XBOX360_GUIDE) ? 1 : 0;
                 if (guide_pressed != s_last_guide_pressed) {
                     s_last_guide_pressed = guide_pressed;
@@ -738,6 +801,50 @@ void usb_driver_poll_step(void) {
                 s_last_ds4 = ds4;
                 vpad_send_data(&ds4);
             }
+        } else if (g_usb_state.type == CONTROLLER_STADIA && transferred >= 9) {
+            static int s_logged_stadia_report = 0;
+            if (s_logged_stadia_report < 10) {
+                daemon_log(LOG_LEVEL_INFO, "Stadia report [%d bytes]: rx[0]=0x%02X rx[1]=0x%02X rx[2]=0x%02X rx[3]=0x%02X",
+                           transferred, rx[0], (transferred > 1 ? rx[1] : 0), (transferred > 2 ? rx[2] : 0), (transferred > 3 ? rx[3] : 0));
+                s_logged_stadia_report++;
+            }
+
+            const StadiaInputReport* stadia = NULL;
+            StadiaInputReport temp_report;
+            if (rx[0] == STADIA_REPORT_ID_INPUT && transferred >= (int)sizeof(StadiaInputReport)) {
+                stadia = (const StadiaInputReport*)rx;
+            } else if (transferred >= 9) {
+                // If report ID 0x03 was stripped by USB host
+                memset(&temp_report, 0, sizeof(temp_report));
+                temp_report.report_id = STADIA_REPORT_ID_INPUT;
+                int copy_len = transferred > (int)(sizeof(StadiaInputReport) - 1) ? (int)(sizeof(StadiaInputReport) - 1) : transferred;
+                memcpy(&temp_report.dpad, rx, copy_len);
+                stadia = &temp_report;
+            }
+
+            if (stadia) {
+                translator_convert_stadia(stadia, &ds4, &s_trans_cfg);
+
+                // Combo: Options (Share) + Menu (Options) -> Touchpad Click (Map/Inventory in games)
+                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
+                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
+                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                }
+                // Combo: Options (Share) + D-Pad Down -> PS Button (Home)
+                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
+                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
+                    ds4.buttons |= DS4_BUTTON_PS;
+                }
+
+                static uint32_t s_last_stadia_btn = 0;
+                if (ds4.buttons != s_last_stadia_btn) {
+                    s_last_stadia_btn = ds4.buttons;
+                    daemon_log(LOG_LEVEL_INFO, "Stadia buttons active: 0x%08X", ds4.buttons);
+                }
+
+                s_last_ds4 = ds4;
+                vpad_send_data(&ds4);
+            }
         }
     } else {
         // Check for physical disconnect on any transfer error/timeout
@@ -777,6 +884,9 @@ void usb_driver_poll_step(void) {
                 }
             } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
                 daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
+                           ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+            } else if (g_usb_state.type == CONTROLLER_STADIA) {
+                daemon_log(LOG_LEVEL_WARN, "Stadia interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
                            ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
             }
 

@@ -30,6 +30,7 @@ typedef struct {
     uint8_t  ep_in;             // interrupt IN endpoint address (e.g. 0x81)
     uint8_t  ep_out;            // interrupt OUT endpoint address, 0 if none
     int      generic;           // 1 = found via descriptor, 0 = known VID/PID
+    int      is_wireless;       // 1 = wireless receiver (e.g. protocol 0x81)
 } DetectedController;
 
 /*

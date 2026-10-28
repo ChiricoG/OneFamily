@@ -478,7 +478,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_rounded_outline(scene, CARD_X, 280, CARD_W, 160, 12, COLOR_CARD_BORDER, 1);
         draw_image(scene, iconInfo, CARD_X + 24, 305);
         draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 318, COLOR_WHITE);
-        draw_text(scene, "Version: v1.1.5-beta2 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 350, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Version: v1.1.5-beta3 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 350, COLOR_BLUE_BRIGHT);
         draw_text(scene, "Configuration File: /data/GoldHEN/onefamily.ini", fontCardDesc, CARD_X + 90, 380, COLOR_TEXT_DIM);
         draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 410, COLOR_TEXT_DIM);
 
@@ -487,7 +487,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_rounded_outline(scene, CARD_X, 460, CARD_W, 160, 12, COLOR_CARD_BORDER, 1);
         draw_image(scene, iconMode, CARD_X + 24, 485);
         draw_text(scene, "Supported Hardware & Connection", fontCardTitle, CARD_X + 90, 498, COLOR_WHITE);
-        draw_text(scene, "- Compatible with Xbox One, Series X|S, 360, Switch, PS3, and PS5.", fontCardDesc, CARD_X + 90, 530, COLOR_TEXT_DIM);
+        draw_text(scene, "- Compatible with Xbox One, Series X|S, 360, Switch, PS3, PS5, and Stadia.", fontCardDesc, CARD_X + 90, 530, COLOR_TEXT_DIM);
         draw_text(scene, "- Connect to any USB port on your PS4 console using a standard USB cable.", fontCardDesc, CARD_X + 90, 560, COLOR_TEXT_DIM);
         draw_text(scene, "- Plug-and-play: recognized immediately by GoldHEN with on-screen popups.", fontCardDesc, CARD_X + 90, 590, COLOR_TEXT_DIM);
 
@@ -669,7 +669,7 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
         draw_text(scene, "The Input Tester operates in pure hardware mode to isolate controller inputs from DualShock 4.",
                   fontCardDesc, warnX + 40, textY, COLOR_TEXT_DIM);
         textY += 40;
-        draw_text(scene, "Please connect an Xbox (360, One, Series X|S), Switch, PS3, or PS5 USB controller to your PS4.",
+        draw_text(scene, "Please connect an Xbox (360, One, Series X|S), Switch, PS3, PS5, or Stadia USB controller to your PS4.",
                   fontCardDesc, warnX + 40, textY, COLOR_WHITE);
         textY += 40;
         draw_text(scene, "Once connected via USB cable, the controller will be recognized immediately without restarting.",

@@ -6,6 +6,7 @@
 #include "controller_detect.h"
 #include "ps_controllers.h"
 #include "switch_controller.h"
+#include "stadia.h"
 #include <string.h>
 
 #define XBOX_VID                    0x045E
@@ -29,7 +30,8 @@ static int is_xone_pid(uint16_t pid) {
 
 // Xbox 360 compatible (XInput) interface signature
 #define XB360_IF_SUBCLASS           0x5D
-#define XB360_IF_PROTOCOL           0x01    // 0x81 would be the wireless receiver (not supported)
+#define XB360_IF_PROTOCOL_WIRED     0x01
+#define XB360_IF_PROTOCOL_WIRELESS  0x81    // Wireless receiver (2.4G dongles like 8BitDo / G6)
 
 // Xbox One / GIP interface signature
 #define XBONE_IF_SUBCLASS           0x47
@@ -57,14 +59,20 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
         for (int a = 0; a < intf->num_altsetting && !found; a++) {
             const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
             ControllerType type = CONTROLLER_NONE;
+            int is_wireless = 0;
 
             if (alt->bInterfaceClass != USB_CLASS_VENDOR_SPECIFIC) {
                 continue;
             }
 
             if (alt->bInterfaceSubClass == XB360_IF_SUBCLASS &&
-                alt->bInterfaceProtocol == XB360_IF_PROTOCOL) {
+                (alt->bInterfaceProtocol == XB360_IF_PROTOCOL_WIRED ||
+                 alt->bInterfaceProtocol == XB360_IF_PROTOCOL_WIRELESS ||
+                 alt->bInterfaceProtocol == 0x00)) {
                 type = CONTROLLER_XBOX360;
+                if (alt->bInterfaceProtocol == XB360_IF_PROTOCOL_WIRELESS) {
+                    is_wireless = 1;
+                }
             } else if (alt->bInterfaceSubClass == XBONE_IF_SUBCLASS &&
                        alt->bInterfaceProtocol == XBONE_IF_PROTOCOL) {
                 type = CONTROLLER_XBOXONE;
@@ -99,6 +107,7 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
             out->alt_setting   = alt->bAlternateSetting;
             out->ep_in         = ep_in;
             out->ep_out        = ep_out;
+            out->is_wireless   = is_wireless;
             found = 1;
         }
     }
@@ -195,6 +204,50 @@ static int detect_switch_pro_endpoints(libusb_device* dev, DetectedController* o
     return found;
 }
 
+static int detect_stadia_endpoints(libusb_device* dev, DetectedController* out) {
+    if (!dev || !out) return 0;
+
+    struct libusb_config_descriptor* cfg = NULL;
+    if (usbd_get_active_config_descriptor(dev, &cfg) != 0 || !cfg) {
+        return 0;
+    }
+
+    int found = 0;
+    for (int i = 0; i < cfg->bNumInterfaces && !found; i++) {
+        const struct libusb_interface* intf = &cfg->interface[i];
+        for (int a = 0; a < intf->num_altsetting && !found; a++) {
+            const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
+
+            if (alt->bInterfaceClass != USB_CLASS_HID) continue;
+
+            uint8_t ep_in = 0;
+            uint8_t ep_out = 0;
+            for (int k = 0; k < alt->bNumEndpoints; k++) {
+                const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
+                if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
+                    if (ep->bEndpointAddress & EP_DIR_IN) {
+                        if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                    } else {
+                        if (ep_out == 0) ep_out = ep->bEndpointAddress;
+                    }
+                }
+            }
+
+            if (ep_in != 0) {
+                out->type          = CONTROLLER_STADIA;
+                out->interface_num = alt->bInterfaceNumber;
+                out->alt_setting   = alt->bAlternateSetting;
+                out->ep_in         = ep_in;
+                out->ep_out        = ep_out;
+                found = 1;
+            }
+        }
+    }
+
+    usbd_free_config_descriptor(cfg);
+    return found;
+}
+
 int controller_identify(libusb_device* dev, const struct libusb_device_descriptor* desc, DetectedController* out) {
     if (!dev || !desc || !out) return 0;
     memset(out, 0, sizeof(*out));
@@ -280,7 +333,20 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         return 1;
     }
 
-    // 5. Generic Descriptor-based detection (Third-Party Xbox 360 / Xbox One)
+    // 5. Google Stadia Controller
+    if (desc->idVendor == GOOGLE_VID && desc->idProduct == STADIA_CONTROLLER_PID) {
+        out->type = CONTROLLER_STADIA;
+        out->vid = desc->idVendor;
+        out->pid = desc->idProduct;
+        if (!detect_stadia_endpoints(dev, out)) {
+            out->interface_num = 0;
+            out->ep_in = 0x81;
+            out->ep_out = 0x01;
+        }
+        return 1;
+    }
+
+    // 6. Generic Descriptor-based detection (Third-Party Xbox 360 / Xbox One)
     if (controller_detect_by_descriptor(dev, out)) {
         out->generic = 1;
         out->vid = desc->idVendor;
