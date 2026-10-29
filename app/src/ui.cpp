@@ -320,7 +320,8 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
                 const char* toastMsg,
                 bool hidConnected, const HidStatus* hidStatus,
                 const HidProfile* hidProfile, int remapSelectedRow,
-                bool remapTestMode) {
+                bool remapTestMode,
+                const PkgUpdater* updater) {
     if (!scene) return;
 
     // 1. Blit clean native background (pure wallpaper)
@@ -528,32 +529,90 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
     } else {
         // --- INFO VIEW ---
         // Info Card 1: Overview & Version
-        draw_rounded_rect(scene, CARD_X, 280, CARD_W, 160, 12, COLOR_CARD_BG);
-        draw_rounded_outline(scene, CARD_X, 280, CARD_W, 160, 12, COLOR_CARD_BORDER, 1);
-        draw_image(scene, iconInfo, CARD_X + 24, 305);
-        draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 318, COLOR_WHITE);
-        draw_text(scene, "Version: v1.1.5 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 350, COLOR_BLUE_BRIGHT);
-        draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 380, COLOR_TEXT_DIM);
-        draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 410, COLOR_TEXT_DIM);
+        draw_rounded_rect(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BG);
+        draw_rounded_outline(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BORDER, 1);
+        draw_image(scene, iconInfo, CARD_X + 24, 298);
+        draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 312, COLOR_WHITE);
+        draw_text(scene, "Version: v1.1.5 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 372, COLOR_TEXT_DIM);
+        draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 400, COLOR_TEXT_DIM);
 
-        // Info Card 2: Supported Controllers & Connectivity
-        draw_rounded_rect(scene, CARD_X, 460, CARD_W, 160, 12, COLOR_CARD_BG);
-        draw_rounded_outline(scene, CARD_X, 460, CARD_W, 160, 12, COLOR_CARD_BORDER, 1);
-        draw_image(scene, iconMode, CARD_X + 24, 485);
-        draw_text(scene, "Supported Hardware & Connection", fontCardTitle, CARD_X + 90, 498, COLOR_WHITE);
-        draw_text(scene, "- Compatible with Xbox One, Series X|S, 360, Switch, PS3, Stadia & Generic HID.", fontCardDesc, CARD_X + 90, 530, COLOR_TEXT_DIM);
-        draw_text(scene, "- Connect to any USB port on your PS4 console using a standard USB cable.", fontCardDesc, CARD_X + 90, 560, COLOR_TEXT_DIM);
-        draw_text(scene, "- Plug-and-play: recognized immediately by GoldHEN with on-screen popups.", fontCardDesc, CARD_X + 90, 590, COLOR_TEXT_DIM);
+        // Info Card 2: Online Update Status Card
+        UpdaterState upState = updater ? updater->get_state() : UPDATER_IDLE;
+        Color updateBg = COLOR_CARD_BG;
+        Color updateBorder = COLOR_CARD_BORDER;
 
-        // Info Card 3: Modes & Shortcuts
-        draw_rounded_rect(scene, CARD_X, 640, CARD_W, 190, 12, COLOR_CARD_BG);
-        draw_rounded_outline(scene, CARD_X, 640, CARD_W, 190, 12, COLOR_CARD_BORDER, 1);
-        draw_image(scene, iconGuide, CARD_X + 24, 665);
-        draw_text(scene, "Virtual Pad Architecture (No Plugins Needed)", fontCardTitle, CARD_X + 90, 678, COLOR_WHITE);
-        draw_text(scene, "- Native XMB & Dashboard control: works on Login screen, Home, and games.", fontCardDesc, CARD_X + 90, 710, COLOR_TEXT_DIM);
-        draw_text(scene, "- Central Guide / Home: Always acts as native PS Button (tap = Home, hold = Quick Menu).", fontCardDesc, CARD_X + 90, 740, COLOR_TEXT_DIM);
-        draw_text(scene, "- Shortcuts: Back + D-Pad Down = PS Button | Back + Start = Touchpad Click.", fontCardDesc, CARD_X + 90, 770, COLOR_TEXT_DIM);
-        draw_text(scene, "- Hot-Reloading: changes saved in this app apply in real-time within 1 second.", fontCardDesc, CARD_X + 90, 800, COLOR_BLUE_BRIGHT);
+        if (upState == UPDATER_UPDATE_AVAILABLE) {
+            updateBg = Color{ 15, 35, 60 };
+            updateBorder = COLOR_BLUE_BRIGHT;
+        } else if (upState == UPDATER_DOWNLOAD_SUCCESS) {
+            updateBg = Color{ 15, 60, 40 };
+            updateBorder = Color{ 0, 255, 150 };
+        } else if (upState == UPDATER_DOWNLOADING) {
+            updateBg = Color{ 15, 45, 75 };
+            updateBorder = COLOR_BLUE_MAIN;
+        }
+
+        draw_rounded_rect(scene, CARD_X, 436, CARD_W, 130, 12, updateBg);
+        draw_rounded_outline(scene, CARD_X, 436, CARD_W, 130, 12, updateBorder, (upState == UPDATER_UPDATE_AVAILABLE || upState == UPDATER_DOWNLOAD_SUCCESS) ? 2 : 1);
+        draw_image(scene, iconSave, CARD_X + 24, 454);
+
+        if (upState == UPDATER_UPDATE_AVAILABLE) {
+            std::string titleStr = "New Update Available: " + updater->get_latest_version();
+            draw_text(scene, titleStr, fontCardTitle, CARD_X + 90, 468, Color{ 0, 255, 150 });
+            draw_text(scene, "Press [TRIANGLE] to download onefamily_companion.pkg into /data/pkg/", fontCardDesc, CARD_X + 90, 498, COLOR_WHITE);
+            draw_text(scene, "Download size: ~8.5 MB - Package will be ready for GoldHEN Package Installer", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        } else if (upState == UPDATER_DOWNLOADING) {
+            UpdaterProgress prog = updater->get_progress();
+            char dlTitle[128];
+            snprintf(dlTitle, sizeof(dlTitle), "Downloading Update: %d%% (%ld MB / %ld MB)",
+                     prog.percent, prog.bytesReceived / (1024 * 1024), prog.totalBytes / (1024 * 1024));
+            draw_text(scene, dlTitle, fontCardTitle, CARD_X + 90, 468, COLOR_BLUE_BRIGHT);
+
+            // Progress bar
+            int barX = CARD_X + 90;
+            int barY = 486;
+            int barW = 1200;
+            int barH = 14;
+            draw_rounded_rect(scene, barX, barY, barW, barH, 4, Color{ 20, 32, 50 });
+            int fillW = (barW * prog.percent) / 100;
+            if (fillW > 0) {
+                draw_rounded_rect(scene, barX, barY, fillW, barH, 4, COLOR_BLUE_BRIGHT);
+            }
+            draw_text(scene, "Saving to /data/pkg/onefamily_companion.pkg.download...", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        } else if (upState == UPDATER_DOWNLOAD_SUCCESS) {
+            draw_text(scene, "Download Complete! Update Package Saved", fontCardTitle, CARD_X + 90, 468, Color{ 0, 255, 150 });
+            draw_text(scene, "Package saved to: /data/pkg/onefamily_companion.pkg", fontCardDesc, CARD_X + 90, 498, COLOR_WHITE);
+            draw_text(scene, "Open PS4 Settings -> GoldHEN -> Package Installer and press (X) to install!", fontCardDesc, CARD_X + 90, 526, Color{ 0, 255, 150 });
+        } else if (upState == UPDATER_UP_TO_DATE) {
+            draw_text(scene, "OneFamily Companion is Up to Date", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
+            draw_text(scene, "You are running the latest official version (v1.1.5). Checked online.", fontCardDesc, CARD_X + 90, 498, COLOR_BLUE_BRIGHT);
+            draw_text(scene, "GitHub Releases: https://github.com/ChiricoG/OneFamily/releases", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        } else if (upState == UPDATER_CHECKING) {
+            draw_text(scene, "Checking for Updates...", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
+            draw_text(scene, "Connecting to GitHub Releases API...", fontCardDesc, CARD_X + 90, 498, COLOR_TEXT_DIM);
+            draw_text(scene, "https://api.github.com/repos/ChiricoG/OneFamily/releases/latest", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        } else {
+            draw_text(scene, "Online Update Service", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
+            draw_text(scene, updater ? updater->get_status_message() : "Offline (no internet connection)", fontCardDesc, CARD_X + 90, 498, COLOR_TEXT_DIM);
+            draw_text(scene, "Release Page: https://github.com/ChiricoG/OneFamily/releases", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        }
+
+        // Info Card 3: Supported Controllers & Connectivity
+        draw_rounded_rect(scene, CARD_X, 582, CARD_W, 120, 12, COLOR_CARD_BG);
+        draw_rounded_outline(scene, CARD_X, 582, CARD_W, 120, 12, COLOR_CARD_BORDER, 1);
+        draw_image(scene, iconMode, CARD_X + 24, 600);
+        draw_text(scene, "Supported Hardware & Connection", fontCardTitle, CARD_X + 90, 614, COLOR_WHITE);
+        draw_text(scene, "- Compatible with Xbox One, Series X|S, 360, Switch, PS3, Stadia & Generic HID.", fontCardDesc, CARD_X + 90, 642, COLOR_TEXT_DIM);
+        draw_text(scene, "- Connect to any USB port on your PS4 console using a standard USB cable.", fontCardDesc, CARD_X + 90, 670, COLOR_TEXT_DIM);
+
+        // Info Card 4: Modes & Shortcuts
+        draw_rounded_rect(scene, CARD_X, 718, CARD_W, 126, 12, COLOR_CARD_BG);
+        draw_rounded_outline(scene, CARD_X, 718, CARD_W, 126, 12, COLOR_CARD_BORDER, 1);
+        draw_image(scene, iconGuide, CARD_X + 24, 736);
+        draw_text(scene, "Virtual Pad Shortcuts & System Integration", fontCardTitle, CARD_X + 90, 750, COLOR_WHITE);
+        draw_text(scene, "- Central Guide / Home: Always acts as native PS Button (tap = Home, hold = Quick Menu).", fontCardDesc, CARD_X + 90, 778, COLOR_TEXT_DIM);
+        draw_text(scene, "- Shortcuts: Back + Start or Share + Down = PS Button | Share + Up = Touchpad Click.", fontCardDesc, CARD_X + 90, 806, COLOR_TEXT_DIM);
 
         // 5. Footer for Info
         scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);
@@ -563,6 +622,11 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_text(scene, "Press [L1] / [R1] to navigate tabs", fontFooter, 120, 938, COLOR_TEXT_DIM);
 
         // Navigation Hints
+        if (upState == UPDATER_UPDATE_AVAILABLE) {
+            draw_image(scene, btnTriangle, 1060, 897);
+            draw_text(scene, "Download PKG", fontFooter, 1105, 922, Color{ 0, 255, 150 });
+        }
+
         draw_image(scene, btnSquare, 1260, 897);
         draw_text(scene, "Reinstall Payload", fontFooter, 1305, 922, COLOR_BLUE_BRIGHT);
 

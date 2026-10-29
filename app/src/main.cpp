@@ -14,6 +14,7 @@
 #include "installer.h"
 #include "ui.h"
 #include "hid_profile.h"
+#include "pkg_updater.h"
 
 static void send_vibe_to_daemon(uint8_t lgMotor, uint8_t smMotor) {
     if (lgMotor == 0 && smMotor == 0) {
@@ -124,6 +125,10 @@ int main() {
     bool hidLoaded = false;
     int remapSelectedRow = 0;
     bool remapTestMode = false;
+
+    // Start background check for online PKG updates
+    PkgUpdater& updater = PkgUpdater::instance();
+    updater.start_check();
 
     // Main Interaction Loop
     for (;;) {
@@ -369,6 +374,13 @@ int main() {
                 }
             }
         } else {
+            // In Info tab: TRIANGLE triggers PKG download if update is available
+            if ((justPressed & ORBIS_PAD_BUTTON_TRIANGLE) && updater.get_state() == UPDATER_UPDATE_AVAILABLE) {
+                updater.start_download();
+                toastText = "Download started: onefamily_companion.pkg -> /data/pkg/";
+                toastFrames = 180;
+            }
+
             // In Info tab: SQUARE re-runs installation & ensures files/autoboot are up-to-date
             if (justPressed & ORBIS_PAD_BUTTON_SQUARE) {
                 Installer::runInstallation();
@@ -388,7 +400,7 @@ int main() {
 
         // Render UI
         ui->render(scene, cfg, activeTab, selectedCard, toastFrames, padData, tester, toastText.c_str(),
-                   hasHid, &hidStatus, &hidProfile, remapSelectedRow, remapTestMode);
+                   hasHid, &hidStatus, &hidProfile, remapSelectedRow, remapTestMode, &updater);
 
         // Flip & VSync
         scene->SubmitFlip(frameID);
