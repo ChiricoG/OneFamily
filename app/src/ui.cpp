@@ -533,7 +533,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_rounded_outline(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BORDER, 1);
         draw_image(scene, iconInfo, CARD_X + 24, 298);
         draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 312, COLOR_WHITE);
-        draw_text(scene, "Version: v1.1.5 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Version: v1.1.5-beta5 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
         draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 372, COLOR_TEXT_DIM);
         draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 400, COLOR_TEXT_DIM);
 

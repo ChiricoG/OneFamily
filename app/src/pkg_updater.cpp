@@ -18,7 +18,7 @@ extern "C" {
 }
 
 #define GITHUB_API_LATEST_RELEASE "https://api.github.com/repos/ChiricoG/OneFamily/releases/latest"
-#define HTTP_USER_AGENT "OneFamily-Companion/1.1.5 PS4"
+#define HTTP_USER_AGENT "OneFamily-Companion/1.1.5-beta5 PS4"
 
 #define ONEFAMILY_NET_POOLSIZE    (32 * 1024)
 #define ONEFAMILY_HTTP_POOLSIZE   (128 * 1024)
