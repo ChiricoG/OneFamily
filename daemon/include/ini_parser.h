@@ -10,8 +10,9 @@
 #include "translator.h"
 
 // Configuration file path on PS4
-#define ONEFAMILY_CONFIG_PATH   "/data/GoldHEN/onefamily.ini"
-#define XBOX_CONFIG_PATH        "/data/GoldHEN/xbox_controller.ini"
+#define ONEFAMILY_CONFIG_PATH          "/data/onefamily/onefamily.ini"
+#define ONEFAMILY_LEGACY_CONFIG_PATH   "/data/GoldHEN/onefamily.ini"
+#define XBOX_CONFIG_PATH               "/data/GoldHEN/xbox_controller.ini"
 #define ONEFAMILY_CONFIG_BUFFER_SIZE 4096
 #define XBOX_CONFIG_BUFFER_SIZE 4096
 

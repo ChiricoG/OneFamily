@@ -13,6 +13,7 @@ typedef struct {
     int device_handle;
     int endpoint_in;
     int endpoint_out;
+    bool is_wireless;
 } UsbControllerState;
 
 extern UsbControllerState g_usb_state;

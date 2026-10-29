@@ -52,6 +52,14 @@ int daemon_sys_close(int fd) {
     return (int)daemon_syscall(6, fd);
 }
 
+int daemon_sys_unlink(const char *path) {
+    return (int)daemon_syscall(10, path);
+}
+
+int daemon_sys_mkdir(const char *path, int mode) {
+    return (int)daemon_syscall(136, path, mode);
+}
+
 int daemon_sys_nanosleep(uint64_t ns) {
     struct {
         int64_t tv_sec;

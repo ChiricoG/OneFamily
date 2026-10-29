@@ -90,6 +90,9 @@ void daemon_config_load(DaemonConfig *cfg) {
 
     int fd = daemon_sys_open(ONEFAMILY_CONFIG_PATH, O_RDONLY, 0);
     if (fd < 0) {
+        fd = daemon_sys_open(ONEFAMILY_LEGACY_CONFIG_PATH, O_RDONLY, 0);
+    }
+    if (fd < 0) {
         fd = daemon_sys_open(XBOX_CONFIG_PATH, O_RDONLY, 0);
     }
     if (fd < 0) {

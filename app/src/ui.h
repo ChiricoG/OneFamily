@@ -3,6 +3,7 @@
 #include "common/graphics.h"
 #include "config_manager.h"
 #include "installer.h"
+#include "hid_profile.h"
 #include <orbis/Pad.h>
 #include <string>
 
@@ -41,7 +42,10 @@ public:
     bool init(Scene2D* scene);
     void render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selectedCard,
                 int toastFrames, const OrbisPadData& padData, const TesterState& tester,
-                const char* toastMsg = NULL);
+                const char* toastMsg = NULL,
+                bool hidConnected = false, const HidStatus* hidStatus = NULL,
+                const HidProfile* hidProfile = NULL, int remapSelectedRow = 0,
+                bool remapTestMode = false);
     void render_wizard(Scene2D* scene, const InstallResult& res, int frameID);
 
 private:
@@ -65,13 +69,22 @@ private:
     ImageRGBA iconDeadzone;
     ImageRGBA iconSwap;
     ImageRGBA iconRumble;
+    ImageRGBA iconRemap;
     ImageRGBA btnArrows;
     ImageRGBA btnCross;
+    ImageRGBA btnCircle;
     ImageRGBA btnSquare;
     ImageRGBA btnTriangle;
     ImageRGBA btnOptions;
+    ImageRGBA btnShare;
+    ImageRGBA btnPs;
+    ImageRGBA btnTouchpad;
     ImageRGBA btnL1;
     ImageRGBA btnR1;
+    ImageRGBA btnL2;
+    ImageRGBA btnR2;
+    ImageRGBA btnL3;
+    ImageRGBA btnR3;
 
     ImageRGBA load_icon(const char* path);
     void free_icon(ImageRGBA& img);
@@ -86,4 +99,6 @@ private:
     void draw_text_centered(Scene2D* scene, const std::string& text, FT_Face face, int centerX, int baselineY, Color color);
 
     void render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData& padData, const TesterState& tester);
+    void render_remap(Scene2D* scene, const HidStatus& status, const HidProfile& profile,
+                      int selectedRow, const OrbisPadData& padData, bool testMode = false);
 };

@@ -10,6 +10,7 @@
 #include "xboxone.h"
 #include "switch_controller.h"
 #include "ps_controllers.h"
+#include "stadia.h"
 #include "ds4.h"
 #include "config.h"
 
@@ -23,7 +24,9 @@ typedef enum {
     CONTROLLER_SWITCH,
     CONTROLLER_DS3,
     CONTROLLER_DUALSENSE,
-    CONTROLLER_SWITCH_PRO
+    CONTROLLER_SWITCH_PRO,
+    CONTROLLER_STADIA,
+    CONTROLLER_GENERIC_HID
 } ControllerType;
 
 /*
@@ -108,5 +111,10 @@ void translator_convert_dualsense(const DualSenseReport* ps5, OrbisPadData* ds4,
  * Translate Switch Pro Controller full report (0x30, 0x21, 0x31) to OrbisPadData
  */
 void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4, const TranslatorConfig* config);
+
+/*
+ * Translate Google Stadia Controller report to OrbisPadData
+ */
+void translator_convert_stadia(const StadiaInputReport* stadia, OrbisPadData* ds4, const TranslatorConfig* config);
 
 #endif // TRANSLATOR_H
