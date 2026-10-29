@@ -552,6 +552,13 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
     if (ctrl_transfer) {
         // GET_DESCRIPTOR: type 0x22 (HID Report Descriptor), bmRequestType 0x81 (Standard, In, Interface)
         desc_len = ctrl_transfer(h, 0x81, 0x06, 0x2200, (uint16_t)iface, report_desc, sizeof(report_desc), 500);
+        if (desc_len <= 0) {
+            // Fallback: bmRequestType 0x80 (Standard, In, Device), wIndex = 0
+            desc_len = ctrl_transfer(h, 0x80, 0x06, 0x2200, 0, report_desc, sizeof(report_desc), 500);
+        }
+        // Universal HID Wake-up: Send SET_IDLE (bmRequestType: 0x21, bRequest: 0x0A, wValue: 0, wIndex: iface)
+        // Many microcontroller pads/dongles stay in low-power idle until a SET_IDLE arrives
+        ctrl_transfer(h, 0x21, 0x0A, 0x0000, (uint16_t)iface, NULL, 0, 100);
     }
 
     if (desc_len > 0) {

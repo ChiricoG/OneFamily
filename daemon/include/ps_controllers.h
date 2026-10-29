@@ -13,6 +13,20 @@
 // DualShock 3 / Sixaxis
 #define SONY_DS3_PID                    0x0268
 
+// DualShock 4 PIDs (Handled natively by PS4 Orbis OS, daemon ignores these)
+#define SONY_DS4_V1_PID                 0x05C4
+#define SONY_DS4_V2_PID                 0x09CC
+#define SONY_DS4_DONGLE_PID             0x0BA0
+
+static inline int is_native_ps4_controller(uint16_t vid, uint16_t pid) {
+    if (vid == SONY_VID) {
+        if (pid == SONY_DS4_V1_PID || pid == SONY_DS4_V2_PID || pid == 0x05C5 || pid == SONY_DS4_DONGLE_PID) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // DualSense (PS5) & DualSense Edge
 #define SONY_DUALSENSE_PID              0x0CE6
 #define SONY_DUALSENSE_EDGE_PID         0x0DF2

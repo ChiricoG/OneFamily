@@ -277,7 +277,15 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
     memset(out, 0, sizeof(*out));
     out->kbd_interface_num = 0xFF;
 
+    // 0. Native PlayStation 4 controllers: skip completely so the PS4 OS handles them natively!
+    if (is_native_ps4_controller(desc->idVendor, desc->idProduct)) {
+        daemon_log(LOG_LEVEL_INFO, "Skipping native PS4 controller (VID=0x%04x, PID=0x%04x) for Orbis OS driver",
+                   desc->idVendor, desc->idProduct);
+        return 0;
+    }
+
     // 1. Sony DualShock 3 & DualSense
+
     if (desc->idVendor == SONY_VID) {
         if (desc->idProduct == SONY_DS3_PID) {
             out->type = CONTROLLER_DS3;
@@ -315,9 +323,12 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->type = CONTROLLER_XBOXONE;
             out->vid = desc->idVendor;
             out->pid = desc->idProduct;
-            out->interface_num = 0;
-            out->ep_in = 0x82;
-            out->ep_out = 0x02;
+            if (!controller_detect_by_descriptor(dev, out)) {
+                out->interface_num = 0;
+                out->alt_setting = 1; // Explicitly activate alternate setting 1 for GIP interrupt endpoints!
+                out->ep_in = 0x82;
+                out->ep_out = 0x02;
+            }
             return 1;
         }
     } else if (desc->idVendor == PDP_VID) {
@@ -327,6 +338,7 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->pid = desc->idProduct;
             if (!controller_detect_by_descriptor(dev, out)) {
                 out->interface_num = 0;
+                out->alt_setting = 1;
                 out->ep_in = 0x82;
                 out->ep_out = 0x02;
             }

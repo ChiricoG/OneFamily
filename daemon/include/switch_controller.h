@@ -16,10 +16,13 @@
 
 // Official Nintendo Switch IDs
 #define SWITCH_PRO_VID                 0x057E
+#define SWITCH_JOYCON_L_PID            0x2006
+#define SWITCH_JOYCON_R_PID            0x2007
 #define SWITCH_PRO_PID                 0x2009
 #define SWITCH_JOYCON_GRIP_PID         0x200E
 #define SWITCH_SNES_PID                0x2017
 #define SWITCH_GENESIS_PID             0x2019
+#define SWITCH_MD_2_PID                0x201A
 #define SWITCH_N64_PID                 0x201E
 
 // Report size
@@ -103,7 +106,9 @@ typedef struct __attribute__((packed)) {
 static inline int is_switch_pro_controller(uint16_t vid, uint16_t pid) {
     if (vid == SWITCH_PRO_VID) {
         if (pid == SWITCH_PRO_PID || pid == SWITCH_JOYCON_GRIP_PID ||
-            pid == SWITCH_SNES_PID || pid == SWITCH_GENESIS_PID || pid == SWITCH_N64_PID) {
+            pid == SWITCH_JOYCON_L_PID || pid == SWITCH_JOYCON_R_PID ||
+            pid == SWITCH_SNES_PID || pid == SWITCH_GENESIS_PID ||
+            pid == SWITCH_MD_2_PID || pid == SWITCH_N64_PID) {
             return 1;
         }
     }

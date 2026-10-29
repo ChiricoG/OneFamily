@@ -211,21 +211,30 @@ static int send_init_packet(const uint8_t* pkt, int len) {
 
 static void init_gip_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Sending GIP initialization handshake...");
-    const uint8_t start_cmd[] = { 0x05, 0x20, 0x00, 0x01, 0x00 };
+    static uint8_t s_gip_init_seq = 1;
+
+    // 1. Power On / Host connection request (Generic Xbox One baseline)
+    uint8_t start_cmd[] = { 0x05, 0x20, s_gip_init_seq++, 0x01, 0x00 };
     send_init_packet(start_cmd, sizeof(start_cmd));
     daemon_sys_usleep(10000);
 
-    const uint8_t powera_init[] = { 0x01, 0x20, 0x00, 0x09, 0x00, 0x04, 0x20, 0x3a, 0x00, 0x00, 0x00, 0x80, 0x00 };
+    // 2. Mode switch / host wake-up packet for Xbox One S / Elite Series 2
+    uint8_t s_init[] = { 0x05, 0x20, s_gip_init_seq++, 0x0F, 0x06 };
+    send_init_packet(s_init, sizeof(s_init));
+    daemon_sys_usleep(10000);
+
+    // 3. Hori & Titanfall 2 identify/stick-ack sequence (PowerA / Hori / Clones)
+    uint8_t powera_init[] = { 0x01, 0x20, s_gip_init_seq++, 0x09, 0x00, 0x04, 0x20, 0x3a, 0x00, 0x00, 0x00, 0x80, 0x00 };
     send_init_packet(powera_init, sizeof(powera_init));
     daemon_sys_usleep(10000);
 
-    // PDP / Victrix / Turtle Beach handshake packet 1 (LED on / handshake)
-    const uint8_t pdp_init1[] = { 0x0a, 0x20, 0x00, 0x03, 0x00, 0x01, 0x14 };
+    // 4. PDP / Victrix / Turtle Beach handshake packet 1 (LED on / handshake)
+    uint8_t pdp_init1[] = { 0x0a, 0x20, s_gip_init_seq++, 0x03, 0x00, 0x01, 0x14 };
     send_init_packet(pdp_init1, sizeof(pdp_init1));
     daemon_sys_usleep(10000);
 
-    // PDP / Victrix / Turtle Beach handshake packet 2 (Input mode unlock)
-    const uint8_t pdp_init2[] = { 0x06, 0x20, 0x00, 0x02, 0x01, 0x00 };
+    // 5. PDP / Victrix / Turtle Beach handshake packet 2 (Input mode unlock)
+    uint8_t pdp_init2[] = { 0x06, 0x20, s_gip_init_seq++, 0x02, 0x01, 0x00 };
     send_init_packet(pdp_init2, sizeof(pdp_init2));
     daemon_sys_usleep(10000);
 }
@@ -252,7 +261,21 @@ static void init_dualsense_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Initializing DualSense controller (EP_IN:0x%02X, EP_OUT:0x%02X, IF:%d)...",
                g_usb_state.endpoint_in, g_usb_state.endpoint_out, g_claimed_interface);
 
-    // Full 64-byte DualSense USB output report (Report ID 0x02 + 63 bytes payload)
+    // 1. SET_IDLE on Interface (standard HID periodic streaming activation)
+    if (p_sceUsbdControlTransfer && g_dev_handle) {
+        int sir = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x0A, 0, (uint16_t)g_claimed_interface, NULL, 0, 100);
+        daemon_log(LOG_LEVEL_INFO, "DualSense SET_IDLE (IF=%d) returned 0x%08X", g_claimed_interface, sir);
+    }
+
+    // 2. Query Calibration Feature Report 0x05 via GET_REPORT
+    if (p_sceUsbdControlTransfer && g_dev_handle) {
+        uint8_t feat_buf[64];
+        memset(feat_buf, 0, sizeof(feat_buf));
+        int f_ret = p_sceUsbdControlTransfer(g_dev_handle, 0xA1, 0x01, 0x0305, (uint16_t)g_claimed_interface, feat_buf, sizeof(feat_buf), 100);
+        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Feature 0x05 returned 0x%08X", f_ret);
+    }
+
+    // 3. Full DualSense USB output report (Report ID 0x02)
     // Matches endpoint wMaxPacketSize (64) and Linux hid-playstation DS_OUTPUT_REPORT_USB_SIZE specification
     uint8_t init_pkt[64];
     memset(init_pkt, 0, sizeof(init_pkt));
@@ -269,12 +292,21 @@ static void init_dualsense_controller(void) {
     init_pkt[47] = 0xFF;       // Blue (PlayStation Blue Lightbar)
 
     int r = send_init_packet(init_pkt, sizeof(init_pkt));
-    daemon_log(LOG_LEVEL_INFO, "DualSense init output report sent via Interrupt OUT (ret=0x%08X)", r);
+    daemon_log(LOG_LEVEL_INFO, "DualSense init output report (64B) sent via Interrupt OUT (ret=0x%08X)", r);
+    if (r != 0) {
+        // Try 48-byte report (matches SDL2 DS5EffectsState_t & descriptor report count 0x2F = 47)
+        r = send_init_packet(init_pkt, 48);
+        daemon_log(LOG_LEVEL_INFO, "DualSense init output report (48B) sent via Interrupt OUT (ret=0x%08X)", r);
+    }
 
-    // Fallback: If Interrupt OUT transfer failed or returned error, also send via Control Transfer SET_REPORT
+    // Fallback: If Interrupt OUT transfer failed or returned error, send via Control Transfer SET_REPORT
     if (r != 0 && p_sceUsbdControlTransfer && g_dev_handle) {
-        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, g_claimed_interface, init_pkt, sizeof(init_pkt), 100);
-        daemon_log(LOG_LEVEL_INFO, "DualSense init SET_REPORT control transfer sent (ret=0x%08X)", cr);
+        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, g_claimed_interface, init_pkt, 64, 100);
+        daemon_log(LOG_LEVEL_INFO, "DualSense init SET_REPORT (64B) control transfer returned 0x%08X", cr);
+        if (cr <= 0) {
+            cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, g_claimed_interface, init_pkt, 48, 100);
+            daemon_log(LOG_LEVEL_INFO, "DualSense init SET_REPORT (48B) control transfer returned 0x%08X", cr);
+        }
     }
 }
 
@@ -313,65 +345,42 @@ static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expec
 }
 
 static void init_switch_pro_controller(void) {
-    daemon_log(LOG_LEVEL_INFO, "Starting synchronous Switch Pro USB handshake...");
+    daemon_log(LOG_LEVEL_INFO, "Starting Switch Pro / Clone wake-up sequence...");
 
     uint8_t pkt[64];
     uint8_t rx[64];
     int transferred = 0;
 
     // Drain any leftover input in the USB FIFO first
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 3; i++) {
         transferred = 0;
         int dr = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 10);
         if (dr != 0 || transferred == 0) break;
-        daemon_log(LOG_LEVEL_INFO, "Drained initial Switch packet [%d bytes]: 0x%02X", transferred, rx[0]);
     }
 
-    // Step 1: Handshake (0x80, 0x02) - with up to 3 attempts
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x80;
-        pkt[1] = 0x02;
-        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 100);
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro Handshake (0x80, 0x02) attempt %d ret=%d", attempt, r);
-        if (r == 0) break;
-        daemon_sys_usleep(10000);
-    }
+    // Official Switch Pro USB Handshake (0x80 commands) - non-blocking short timeout (clones don't support 0x80)
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x80; pkt[1] = 0x02; // Handshake
+    switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 30);
+    daemon_sys_usleep(5000);
 
-    // Step 2: High Speed baudrate (0x80, 0x03)
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x80;
-        pkt[1] = 0x03;
-        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x03, 100);
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro HighSpeed (0x80, 0x03) attempt %d ret=%d", attempt, r);
-        if (r == 0) break;
-        daemon_sys_usleep(10000);
-    }
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x80; pkt[1] = 0x03; // HighSpeed baudrate
+    switch_pro_send_and_wait(pkt, sizeof(pkt), 0x03, 30);
+    daemon_sys_usleep(5000);
 
-    // Step 3: Handshake repeat (0x80, 0x02)
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x80;
-        pkt[1] = 0x02;
-        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 100);
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro Handshake 2 (0x80, 0x02) attempt %d ret=%d", attempt, r);
-        if (r == 0) break;
-        daemon_sys_usleep(10000);
-    }
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x80; pkt[1] = 0x02; // Handshake repeat
+    switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 30);
+    daemon_sys_usleep(5000);
 
-    // Step 4: Force USB (0x80, 0x04)
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x80;
-        pkt[1] = 0x04;
-        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x04, 100);
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro ForceUSB (0x80, 0x04) attempt %d ret=%d", attempt, r);
-        if (r == 0) break;
-        daemon_sys_usleep(10000);
-    }
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x80; pkt[1] = 0x04; // Force USB
+    switch_pro_send_and_wait(pkt, sizeof(pkt), 0x04, 30);
+    daemon_sys_usleep(5000);
 
-    // Step 5: Subcommand 0x03 (Set Input Report Mode to 0x30 Full Mode)
+    // Standard Switch Subcommands (AnyPad / Linux hid-nintendo model): Works on ALL official and clone controllers!
+    // Step 1: Subcommand 0x03 (Set Input Report Mode to 0x30 Full Mode)
     for (int attempt = 1; attempt <= 3; attempt++) {
         memset(pkt, 0, sizeof(pkt));
         pkt[0] = 0x01; // Output report ID
@@ -380,21 +389,44 @@ static void init_switch_pro_controller(void) {
         pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40; // Neutral rumble R
         pkt[10] = 0x03; // Subcommand: Set Input Mode
         pkt[11] = 0x30; // 0x30 = Standard full report mode
-        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 150); // wait for 0x21 or 0x30
+        int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 100);
         daemon_log(LOG_LEVEL_INFO, "Switch Pro SetInputMode 0x30 attempt %d ret=%d", attempt, r);
+        if (r != 0 && p_sceUsbdControlTransfer && g_dev_handle) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0201, g_claimed_interface, pkt, sizeof(pkt), 50);
+        }
         if (r == 0) break;
         daemon_sys_usleep(10000);
     }
 
-    // Step 6: Subcommand 0x30 (Player 1 LED)
+    // Step 2: Subcommand 0x40 (Enable IMU / Motion Sensors)
     memset(pkt, 0, sizeof(pkt));
     pkt[0] = 0x01;
     pkt[1] = 0x04;
     pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
     pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
+    pkt[10] = 0x40; // Subcommand: Enable IMU
+    pkt[11] = 0x01;
+    switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 50);
+
+    // Step 3: Subcommand 0x48 (Enable Vibration)
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x01;
+    pkt[1] = 0x05;
+    pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
+    pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
+    pkt[10] = 0x48; // Subcommand: Enable Vibration
+    pkt[11] = 0x01;
+    switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 50);
+
+    // Step 4: Subcommand 0x30 (Player 1 LED)
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x01;
+    pkt[1] = 0x06;
+    pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
+    pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
     pkt[10] = 0x30; // Subcommand: Set Player Lights
     pkt[11] = 0x01; // LED 1 ON
-    switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 100);
+    switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 50);
 
     daemon_log(LOG_LEVEL_INFO, "Switch Pro initialization sequence completed");
 }
@@ -450,8 +482,6 @@ static int scan_and_open(void) {
     }
 
     int found = 0;
-    static int s_dualsense_notified = 0;
-    int dualsense_seen = 0;
 
     for (ssize_t i = 0; i < count && !found; i++) {
         libusb_device* dev = list[i];
@@ -467,18 +497,6 @@ static int scan_and_open(void) {
         DetectedController det;
         memset(&det, 0, sizeof(det));
         if (controller_identify(dev, &desc, &det)) {
-            // DualSense support is currently inhibited / in development
-            if (det.type == CONTROLLER_DUALSENSE) {
-                dualsense_seen = 1;
-                if (!s_dualsense_notified) {
-                    daemon_notify("OneFamily: DualSense support is in development");
-                    daemon_log(LOG_LEVEL_INFO, "DualSense detected (VID:0x%04X PID:0x%04X) - Support is in development, skipping virtual pad instantiation",
-                               desc.idVendor, desc.idProduct);
-                    s_dualsense_notified = 1;
-                }
-                continue;
-            }
-
             libusb_device_handle* h = NULL;
             if (p_sceUsbdOpen(dev, &h) == 0 && h != NULL) {
                 if (det.type == CONTROLLER_DUALSENSE) {
@@ -567,39 +585,38 @@ static int scan_and_open(void) {
                     s_last_ds4.connected = 1;
                     s_last_ds4.count = 1;
 
-                    if (det.type != CONTROLLER_DUALSENSE) {
-                        // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer
-                        vpad_init();
-                        vpad_send_data(&s_last_ds4);
+                    // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer
+                    vpad_init();
+                    vpad_send_data(&s_last_ds4);
 
-                        if (det.type == CONTROLLER_XBOX360) {
-                            init_xbox360_controller(h, det.interface_num, det.ep_out);
-                        } else if (det.type == CONTROLLER_XBOXONE) {
-                            init_gip_controller();
-                        } else if (det.type == CONTROLLER_DS3) {
-                            uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
-                            if (p_sceUsbdControlTransfer) {
-                                int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 1000);
-                                daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational handshake sent (ret=%d)", cret);
-                            }
-                        } else if (det.type == CONTROLLER_SWITCH_PRO) {
-                            init_switch_pro_controller();
+                    if (det.type == CONTROLLER_XBOX360) {
+                        init_xbox360_controller(h, det.interface_num, det.ep_out);
+                    } else if (det.type == CONTROLLER_XBOXONE) {
+                        init_gip_controller();
+                    } else if (det.type == CONTROLLER_DS3) {
+                        uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
+                        if (p_sceUsbdControlTransfer) {
+                            int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 1000);
+                            daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational handshake sent (ret=%d)", cret);
+
+                            // Shanwan / Gasia DS3 clone wake-up: query Feature Report 0xF2 and 0xF5 via GET_REPORT
+                            uint8_t dummy[64];
+                            p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F2, det.interface_num, dummy, 17, 100);
+                            p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F5, det.interface_num, dummy, 8, 100);
                         }
-
-                        daemon_notify("OneFamily: %s Connected",
-                                      controller_type_to_str(det.type));
-                    } else {
-                        daemon_log(LOG_LEVEL_INFO, "DualSense claimed: awaiting first valid input report before activating Virtual DS4");
+                    } else if (det.type == CONTROLLER_SWITCH_PRO) {
+                        init_switch_pro_controller();
+                    } else if (det.type == CONTROLLER_DUALSENSE) {
+                        init_dualsense_controller();
                     }
+
+                    daemon_notify("OneFamily: %s Connected",
+                                  controller_type_to_str(det.type));
                 } else {
                     p_sceUsbdClose(h);
                 }
             }
         }
-    }
-
-    if (!dualsense_seen) {
-        s_dualsense_notified = 0;
     }
 
     p_sceUsbdFreeDeviceList(list);
@@ -738,6 +755,27 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         }
         if (!sent && p_sceUsbdControlTransfer) {
             p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, pkt, sizeof(pkt), 50);
+        }
+    } else if (g_usb_state.type == CONTROLLER_DUALSENSE) {
+        uint8_t pkt[48];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x02;        // DualSense Output Report
+        pkt[1] = 0x01 | 0x02; // Enable compatible rumble & haptics
+        pkt[2] = 0x04 | 0x10; // Lightbar & Player LED keepalive
+        pkt[3] = small_motor;
+        pkt[4] = large_motor;
+        pkt[39] = 0x02;       // valid_flag2: Lightbar setup
+        pkt[42] = 0x02;       // Lightbar normal
+        pkt[44] = 0x04;       // Player 1 LED
+        pkt[47] = 0xFF;       // Blue lightbar
+        int sent = 0;
+        if (ep != 0 && p_sceUsbdInterruptTransfer) {
+            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50) == 0) {
+                sent = 1;
+            }
+        }
+        if (!sent && p_sceUsbdControlTransfer) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, g_claimed_interface, pkt, sizeof(pkt), 50);
         }
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         generic_hid_send_rumble(g_dev_handle, g_usb_state.vid, g_usb_state.pid,

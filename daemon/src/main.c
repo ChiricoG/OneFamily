@@ -52,7 +52,7 @@ int main(int argc, char *argv[]) {
 
     // 1. Initialize Safe Kernel resolution and Logging
     daemon_log_init();
-    daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon v1.1.6 (Native) Starting ===");
+    daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon v1.2.0-beta1 (Native) Starting ===");
     daemon_kernel_init();
 
     // Ensure persistent storage and controller profile directories exist
@@ -69,7 +69,7 @@ int main(int argc, char *argv[]) {
                g_daemon_config.enable_rumble);
 
     // 3. Notify user on screen immediately
-    daemon_notify("OneFamily Daemon v1.1.6 Active");
+    daemon_notify("OneFamily Daemon v1.2.0-beta1 Active");
 
     // 4. Initialize USB Driver Subsystem
     if (usb_driver_init() != 0) {
