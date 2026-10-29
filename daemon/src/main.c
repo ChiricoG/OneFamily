@@ -8,6 +8,7 @@
 #include "config.h"
 #include "log.h"
 #include "daemon_syscalls.h"
+#include "generic_hid.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -19,7 +20,10 @@ static void check_vibe_file(void) {
     static uint8_t s_last_sm = 0;
     static int s_had_file = 0;
 
-    int fd = daemon_sys_open("/data/GoldHEN/onefamily.vibe", 0 /* O_RDONLY */, 0);
+    int fd = daemon_sys_open("/data/onefamily/onefamily.vibe", 0 /* O_RDONLY */, 0);
+    if (fd < 0) {
+        fd = daemon_sys_open("/data/GoldHEN/onefamily.vibe", 0 /* O_RDONLY */, 0);
+    }
     if (fd >= 0) {
         uint8_t vibe[2] = {0, 0};
         int n = daemon_sys_read(fd, vibe, sizeof(vibe));
@@ -48,10 +52,15 @@ int main(int argc, char *argv[]) {
 
     // 1. Initialize Safe Kernel resolution and Logging
     daemon_log_init();
-    daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon v1.1.5-beta3 (Native) Starting ===");
+    daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon v1.1.5 (Native) Starting ===");
     daemon_kernel_init();
 
-    // 2. Load user configuration from /data/GoldHEN/onefamily.ini (fallback: xbox_controller.ini)
+    // Ensure persistent storage and controller profile directories exist
+    daemon_sys_mkdir("/data", 0777);
+    daemon_sys_mkdir("/data/onefamily", 0777);
+    daemon_sys_mkdir("/data/onefamily/controllers", 0777);
+
+    // 2. Load user configuration from /data/onefamily/onefamily.ini (fallback: GoldHEN)
     daemon_config_load(&g_daemon_config);
     daemon_log(LOG_LEVEL_INFO, "Configuration loaded: guide_action=%d, deadzone=%d, trigger=%d, rumble=%d",
                g_daemon_config.guide_action,
@@ -60,7 +69,7 @@ int main(int argc, char *argv[]) {
                g_daemon_config.enable_rumble);
 
     // 3. Notify user on screen immediately
-    daemon_notify("OneFamily Daemon v1.1.5-beta3 Active");
+    daemon_notify("OneFamily Daemon v1.1.5 Active");
 
     // 4. Initialize USB Driver Subsystem
     if (usb_driver_init() != 0) {
@@ -82,6 +91,19 @@ int main(int argc, char *argv[]) {
         // Poll companion app vibration test IPC (~50 Hz = every 5 loops)
         if (++loop_count % 5 == 0) {
             check_vibe_file();
+        }
+
+        // Check if mapping reload was requested by Companion App (~10 Hz = every 25 loops)
+        if (loop_count % 25 == 0) {
+            int reload_fd = daemon_sys_open("/data/onefamily/onefamily.reload", 0 /* O_RDONLY */, 0);
+            if (reload_fd >= 0) {
+                daemon_sys_close(reload_fd);
+                daemon_sys_unlink("/data/onefamily/onefamily.reload");
+                if (g_usb_state.connected && g_usb_state.type == CONTROLLER_GENERIC_HID) {
+                    generic_hid_reload(g_usb_state.vid, g_usb_state.pid);
+                    daemon_notify("OneFamily: HID Profile Reloaded");
+                }
+            }
         }
 
         // Periodically check if configuration INI file was updated (every ~1s = 250 loops)

@@ -54,6 +54,8 @@ $srcFiles = @(
     "$APP_DIR/src/main.cpp",
     "$APP_DIR/src/config_manager.cpp",
     "$APP_DIR/src/installer.cpp",
+    "$APP_DIR/src/hid_profile.cpp",
+    "$APP_DIR/src/pkg_updater.cpp",
     "$APP_DIR/src/ui.cpp",
     "$APP_DIR/src/common/graphics.cpp",
     "$APP_DIR/src/common/controller.cpp",
@@ -92,7 +94,11 @@ $LIBS = @(
     "-lSceFreeType",
     "-lScePad",
     "-lSceUserService",
-    "-lSceSystemService"
+    "-lSceSystemService",
+    "-lSceNet",
+    "-lSceNetCtl",
+    "-lSceSsl",
+    "-lSceHttp"
 )
 
 $ELF = "$APP_DIR/bin/app.elf"

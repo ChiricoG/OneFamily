@@ -55,11 +55,20 @@ UI::~UI() {
     free_icon(iconRumble);
     free_icon(btnArrows);
     free_icon(btnCross);
+    free_icon(btnCircle);
     free_icon(btnSquare);
     free_icon(btnTriangle);
     free_icon(btnOptions);
+    free_icon(btnShare);
+    free_icon(btnPs);
+    free_icon(btnTouchpad);
     free_icon(btnL1);
     free_icon(btnR1);
+    free_icon(btnL2);
+    free_icon(btnR2);
+    free_icon(btnL3);
+    free_icon(btnR3);
+    free_icon(iconRemap);
 }
 
 ImageRGBA UI::load_icon(const char* path) {
@@ -145,11 +154,20 @@ bool UI::init(Scene2D* scene) {
     iconRumble    = load_icon("/app0/assets/icons/card_icon_rumble.png");
     btnArrows     = load_icon("/app0/assets/icons/btn_arrows.png");
     btnCross      = load_icon("/app0/assets/icons/btn_cross_blue.png");
+    btnCircle     = load_icon("/app0/assets/icons/btn_circle.png");
     btnSquare     = load_icon("/app0/assets/icons/btn_square.png");
     btnTriangle   = load_icon("/app0/assets/icons/btn_triangle.png");
     btnOptions    = load_icon("/app0/assets/icons/btn_options.png");
+    btnShare      = load_icon("/app0/assets/icons/btn_share.png");
+    btnPs         = load_icon("/app0/assets/icons/btn_ps.png");
+    btnTouchpad   = load_icon("/app0/assets/icons/btn_touchpad.png");
     btnL1         = load_icon("/app0/assets/icons/btn_l1.png");
     btnR1         = load_icon("/app0/assets/icons/btn_r1.png");
+    btnL2         = load_icon("/app0/assets/icons/btn_l2.png");
+    btnR2         = load_icon("/app0/assets/icons/btn_r2.png");
+    btnL3         = load_icon("/app0/assets/icons/btn_l3.png");
+    btnR3         = load_icon("/app0/assets/icons/btn_r3.png");
+    iconRemap     = load_icon("/app0/assets/icons/card_icon_remap.png");
 
     // 3. Initialize FreeType fonts with legible TV sizes
     scene->InitFont(&fontTitle,     FONT_PATH, 38);
@@ -299,7 +317,11 @@ void UI::draw_btn_badge(Scene2D* scene, int x, int y, int w, int h, const char* 
 
 void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selectedCard,
                 int toastFrames, const OrbisPadData& padData, const TesterState& tester,
-                const char* toastMsg) {
+                const char* toastMsg,
+                bool hidConnected, const HidStatus* hidStatus,
+                const HidProfile* hidProfile, int remapSelectedRow,
+                bool remapTestMode,
+                const PkgUpdater* updater) {
     if (!scene) return;
 
     // 1. Blit clean native background (pure wallpaper)
@@ -313,7 +335,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
     draw_text(scene, "Companion", fontTitle, 175, 188, COLOR_BLUE_BRIGHT);
     draw_text(scene, "No more console war - we are a family!", fontSubtitle, 175, 222, COLOR_TEXT_DIM);
 
-    // 3. Left Sidebar (3 Tabs)
+    // 3. Left Sidebar (3 or 4 Tabs based on HID controller connection)
     // Tab 0: Settings (Y = 280)
     if (activeTab == 0) {
         draw_rounded_rect(scene, SIDEBAR_X, 280, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
@@ -341,19 +363,48 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_text(scene, "Input Tester", fontCardTitle, SIDEBAR_X + 72, 384, COLOR_TEXT_DIM);
     }
 
-    // Tab 2: Info (Y = 416)
-    if (activeTab == 2) {
-        draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
-        draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
-        draw_image(scene, iconInfo, SIDEBAR_X + 16, 421);
-        draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_WHITE);
+    if (hidConnected) {
+        // Tab 2: Remap HID (Y = 416)
+        if (activeTab == 2) {
+            draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
+            draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
+            draw_image(scene, iconRemap, SIDEBAR_X + 16, 427);
+            draw_text(scene, "Remap HID", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_WHITE);
+        } else {
+            draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
+            draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
+            draw_image(scene, iconRemap, SIDEBAR_X + 16, 427);
+            draw_text(scene, "Remap HID", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_TEXT_DIM);
+        }
+
+        // Tab 3: Info (Y = 484)
+        if (activeTab == 3) {
+            draw_rounded_rect(scene, SIDEBAR_X, 484, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
+            draw_rounded_outline(scene, SIDEBAR_X, 484, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
+            draw_image(scene, iconInfo, SIDEBAR_X + 16, 489);
+            draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 520, COLOR_WHITE);
+        } else {
+            draw_rounded_rect(scene, SIDEBAR_X, 484, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
+            draw_rounded_outline(scene, SIDEBAR_X, 484, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
+            draw_image(scene, iconInfo, SIDEBAR_X + 16, 489);
+            draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 520, COLOR_TEXT_DIM);
+        }
+        draw_image(scene, btnR1, SIDEBAR_X + 250, 496);
     } else {
-        draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
-        draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
-        draw_image(scene, iconInfo, SIDEBAR_X + 16, 421);
-        draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_TEXT_DIM);
+        // Tab 2: Info (Y = 416)
+        if (activeTab == 2) {
+            draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
+            draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
+            draw_image(scene, iconInfo, SIDEBAR_X + 16, 421);
+            draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_WHITE);
+        } else {
+            draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
+            draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
+            draw_image(scene, iconInfo, SIDEBAR_X + 16, 421);
+            draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_TEXT_DIM);
+        }
+        draw_image(scene, btnR1, SIDEBAR_X + 250, 428);
     }
-    draw_image(scene, btnR1, SIDEBAR_X + 250, 428);
 
     // 4. Main Content Area
     if (activeTab == 0) {
@@ -455,7 +506,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
 
         draw_image(scene, iconSave, 60, 890);
         draw_text(scene, "Save Settings", fontCardTitle, 120, 912, COLOR_WHITE);
-        draw_text(scene, "Configuration will be written to /data/GoldHEN/onefamily.ini", fontFooter, 120, 938, COLOR_TEXT_DIM);
+        draw_text(scene, "Configuration will be written to /data/onefamily/onefamily.ini", fontFooter, 120, 938, COLOR_TEXT_DIM);
 
         // Navigation Hints
         draw_image(scene, btnArrows, 1370, 901);
@@ -471,35 +522,97 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         // --- INPUT TESTER & CALIBRATION VIEW ---
         render_tester(scene, cfg, padData, tester);
 
+    } else if (activeTab == 2 && hidConnected && hidStatus && hidProfile) {
+        // --- REMAP HID VIEW ---
+        render_remap(scene, *hidStatus, *hidProfile, remapSelectedRow, padData, remapTestMode);
+
     } else {
         // --- INFO VIEW ---
         // Info Card 1: Overview & Version
-        draw_rounded_rect(scene, CARD_X, 280, CARD_W, 160, 12, COLOR_CARD_BG);
-        draw_rounded_outline(scene, CARD_X, 280, CARD_W, 160, 12, COLOR_CARD_BORDER, 1);
-        draw_image(scene, iconInfo, CARD_X + 24, 305);
-        draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 318, COLOR_WHITE);
-        draw_text(scene, "Version: v1.1.5-beta3 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 350, COLOR_BLUE_BRIGHT);
-        draw_text(scene, "Configuration File: /data/GoldHEN/onefamily.ini", fontCardDesc, CARD_X + 90, 380, COLOR_TEXT_DIM);
-        draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 410, COLOR_TEXT_DIM);
+        draw_rounded_rect(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BG);
+        draw_rounded_outline(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BORDER, 1);
+        draw_image(scene, iconInfo, CARD_X + 24, 298);
+        draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 312, COLOR_WHITE);
+        draw_text(scene, "Version: v1.1.5 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 372, COLOR_TEXT_DIM);
+        draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 400, COLOR_TEXT_DIM);
 
-        // Info Card 2: Supported Controllers & Connectivity
-        draw_rounded_rect(scene, CARD_X, 460, CARD_W, 160, 12, COLOR_CARD_BG);
-        draw_rounded_outline(scene, CARD_X, 460, CARD_W, 160, 12, COLOR_CARD_BORDER, 1);
-        draw_image(scene, iconMode, CARD_X + 24, 485);
-        draw_text(scene, "Supported Hardware & Connection", fontCardTitle, CARD_X + 90, 498, COLOR_WHITE);
-        draw_text(scene, "- Compatible with Xbox One, Series X|S, 360, Switch, PS3, PS5, and Stadia.", fontCardDesc, CARD_X + 90, 530, COLOR_TEXT_DIM);
-        draw_text(scene, "- Connect to any USB port on your PS4 console using a standard USB cable.", fontCardDesc, CARD_X + 90, 560, COLOR_TEXT_DIM);
-        draw_text(scene, "- Plug-and-play: recognized immediately by GoldHEN with on-screen popups.", fontCardDesc, CARD_X + 90, 590, COLOR_TEXT_DIM);
+        // Info Card 2: Online Update Status Card
+        UpdaterState upState = updater ? updater->get_state() : UPDATER_IDLE;
+        Color updateBg = COLOR_CARD_BG;
+        Color updateBorder = COLOR_CARD_BORDER;
 
-        // Info Card 3: Modes & Shortcuts
-        draw_rounded_rect(scene, CARD_X, 640, CARD_W, 190, 12, COLOR_CARD_BG);
-        draw_rounded_outline(scene, CARD_X, 640, CARD_W, 190, 12, COLOR_CARD_BORDER, 1);
-        draw_image(scene, iconGuide, CARD_X + 24, 665);
-        draw_text(scene, "Virtual Pad Architecture (No Plugins Needed)", fontCardTitle, CARD_X + 90, 678, COLOR_WHITE);
-        draw_text(scene, "- Native XMB & Dashboard control: works on Login screen, Home, and games.", fontCardDesc, CARD_X + 90, 710, COLOR_TEXT_DIM);
-        draw_text(scene, "- Central Guide / Home: Always acts as native PS Button (tap = Home, hold = Quick Menu).", fontCardDesc, CARD_X + 90, 740, COLOR_TEXT_DIM);
-        draw_text(scene, "- Shortcuts: Back + D-Pad Down = PS Button | Back + Start = Touchpad Click.", fontCardDesc, CARD_X + 90, 770, COLOR_TEXT_DIM);
-        draw_text(scene, "- Hot-Reloading: changes saved in this app apply in real-time within 1 second.", fontCardDesc, CARD_X + 90, 800, COLOR_BLUE_BRIGHT);
+        if (upState == UPDATER_UPDATE_AVAILABLE) {
+            updateBg = Color{ 15, 35, 60 };
+            updateBorder = COLOR_BLUE_BRIGHT;
+        } else if (upState == UPDATER_DOWNLOAD_SUCCESS) {
+            updateBg = Color{ 15, 60, 40 };
+            updateBorder = Color{ 0, 255, 150 };
+        } else if (upState == UPDATER_DOWNLOADING) {
+            updateBg = Color{ 15, 45, 75 };
+            updateBorder = COLOR_BLUE_MAIN;
+        }
+
+        draw_rounded_rect(scene, CARD_X, 436, CARD_W, 130, 12, updateBg);
+        draw_rounded_outline(scene, CARD_X, 436, CARD_W, 130, 12, updateBorder, (upState == UPDATER_UPDATE_AVAILABLE || upState == UPDATER_DOWNLOAD_SUCCESS) ? 2 : 1);
+        draw_image(scene, iconSave, CARD_X + 24, 454);
+
+        if (upState == UPDATER_UPDATE_AVAILABLE) {
+            std::string titleStr = "New Update Available: " + updater->get_latest_version();
+            draw_text(scene, titleStr, fontCardTitle, CARD_X + 90, 468, Color{ 0, 255, 150 });
+            draw_text(scene, "Press [TRIANGLE] to download onefamily_companion.pkg into /data/pkg/", fontCardDesc, CARD_X + 90, 498, COLOR_WHITE);
+            draw_text(scene, "Download size: ~8.5 MB - Package will be ready for GoldHEN Package Installer", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        } else if (upState == UPDATER_DOWNLOADING) {
+            UpdaterProgress prog = updater->get_progress();
+            char dlTitle[128];
+            snprintf(dlTitle, sizeof(dlTitle), "Downloading Update: %d%% (%ld MB / %ld MB)",
+                     prog.percent, prog.bytesReceived / (1024 * 1024), prog.totalBytes / (1024 * 1024));
+            draw_text(scene, dlTitle, fontCardTitle, CARD_X + 90, 468, COLOR_BLUE_BRIGHT);
+
+            // Progress bar
+            int barX = CARD_X + 90;
+            int barY = 486;
+            int barW = 1200;
+            int barH = 14;
+            draw_rounded_rect(scene, barX, barY, barW, barH, 4, Color{ 20, 32, 50 });
+            int fillW = (barW * prog.percent) / 100;
+            if (fillW > 0) {
+                draw_rounded_rect(scene, barX, barY, fillW, barH, 4, COLOR_BLUE_BRIGHT);
+            }
+            draw_text(scene, "Saving to /data/pkg/onefamily_companion.pkg.download...", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        } else if (upState == UPDATER_DOWNLOAD_SUCCESS) {
+            draw_text(scene, "Download Complete! Update Package Saved", fontCardTitle, CARD_X + 90, 468, Color{ 0, 255, 150 });
+            draw_text(scene, "Package saved to: /data/pkg/onefamily_companion.pkg", fontCardDesc, CARD_X + 90, 498, COLOR_WHITE);
+            draw_text(scene, "Open PS4 Settings -> GoldHEN -> Package Installer and press (X) to install!", fontCardDesc, CARD_X + 90, 526, Color{ 0, 255, 150 });
+        } else if (upState == UPDATER_UP_TO_DATE) {
+            draw_text(scene, "OneFamily Companion is Up to Date", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
+            draw_text(scene, "You are running the latest official version (v1.1.5). Checked online.", fontCardDesc, CARD_X + 90, 498, COLOR_BLUE_BRIGHT);
+            draw_text(scene, "GitHub Releases: https://github.com/ChiricoG/OneFamily/releases", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        } else if (upState == UPDATER_CHECKING) {
+            draw_text(scene, "Checking for Updates...", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
+            draw_text(scene, "Connecting to GitHub Releases API...", fontCardDesc, CARD_X + 90, 498, COLOR_TEXT_DIM);
+            draw_text(scene, "https://api.github.com/repos/ChiricoG/OneFamily/releases/latest", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        } else {
+            draw_text(scene, "Online Update Service", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
+            draw_text(scene, updater ? updater->get_status_message() : "Offline (no internet connection)", fontCardDesc, CARD_X + 90, 498, COLOR_TEXT_DIM);
+            draw_text(scene, "Release Page: https://github.com/ChiricoG/OneFamily/releases", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
+        }
+
+        // Info Card 3: Supported Controllers & Connectivity
+        draw_rounded_rect(scene, CARD_X, 582, CARD_W, 120, 12, COLOR_CARD_BG);
+        draw_rounded_outline(scene, CARD_X, 582, CARD_W, 120, 12, COLOR_CARD_BORDER, 1);
+        draw_image(scene, iconMode, CARD_X + 24, 600);
+        draw_text(scene, "Supported Hardware & Connection", fontCardTitle, CARD_X + 90, 614, COLOR_WHITE);
+        draw_text(scene, "- Compatible with Xbox One, Series X|S, 360, Switch, PS3, Stadia & Generic HID.", fontCardDesc, CARD_X + 90, 642, COLOR_TEXT_DIM);
+        draw_text(scene, "- Connect to any USB port on your PS4 console using a standard USB cable.", fontCardDesc, CARD_X + 90, 670, COLOR_TEXT_DIM);
+
+        // Info Card 4: Modes & Shortcuts
+        draw_rounded_rect(scene, CARD_X, 718, CARD_W, 126, 12, COLOR_CARD_BG);
+        draw_rounded_outline(scene, CARD_X, 718, CARD_W, 126, 12, COLOR_CARD_BORDER, 1);
+        draw_image(scene, iconGuide, CARD_X + 24, 736);
+        draw_text(scene, "Virtual Pad Shortcuts & System Integration", fontCardTitle, CARD_X + 90, 750, COLOR_WHITE);
+        draw_text(scene, "- Central Guide / Home: Always acts as native PS Button (tap = Home, hold = Quick Menu).", fontCardDesc, CARD_X + 90, 778, COLOR_TEXT_DIM);
+        draw_text(scene, "- Shortcuts: Back + Start or Share + Down = PS Button | Share + Up = Touchpad Click.", fontCardDesc, CARD_X + 90, 806, COLOR_TEXT_DIM);
 
         // 5. Footer for Info
         scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);
@@ -509,6 +622,11 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_text(scene, "Press [L1] / [R1] to navigate tabs", fontFooter, 120, 938, COLOR_TEXT_DIM);
 
         // Navigation Hints
+        if (upState == UPDATER_UPDATE_AVAILABLE) {
+            draw_image(scene, btnTriangle, 1060, 897);
+            draw_text(scene, "Download PKG", fontFooter, 1105, 922, Color{ 0, 255, 150 });
+        }
+
         draw_image(scene, btnSquare, 1260, 897);
         draw_text(scene, "Reinstall Payload", fontFooter, 1305, 922, COLOR_BLUE_BRIGHT);
 
@@ -522,14 +640,14 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
     // 6. Toast Notification if active
     if (toastFrames > 0) {
         int boxW = 860;
-        int boxH = 56;
+        int boxH = 46;
         int boxX = (1920 - boxW) / 2;
-        int boxY = 800;
+        int boxY = 804;
 
-        draw_rounded_rect(scene, boxX, boxY, boxW, boxH, 10, COLOR_TOAST_BG);
-        draw_rounded_outline(scene, boxX, boxY, boxW, boxH, 10, COLOR_TOAST_BORDER, 2);
-        const char* msg = (toastMsg && toastMsg[0]) ? toastMsg : "Settings saved to /data/GoldHEN/onefamily.ini";
-        draw_text_centered(scene, msg, fontCardTitle, 960, boxY + 36, COLOR_BLUE_BRIGHT);
+        draw_rounded_rect(scene, boxX, boxY, boxW, boxH, 8, COLOR_TOAST_BG);
+        draw_rounded_outline(scene, boxX, boxY, boxW, boxH, 8, COLOR_TOAST_BORDER, 2);
+        const char* msg = (toastMsg && toastMsg[0]) ? toastMsg : "Settings saved to /data/onefamily/onefamily.ini";
+        draw_text_centered(scene, msg, fontCardTitle, 960, boxY + 31, COLOR_BLUE_BRIGHT);
     }
 }
 
@@ -580,7 +698,7 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
     // Item 2: Config
     if (res.configCreated) {
         draw_text(scene, res.isUpdate ? "[OK] Configuration:" : "[OK] Configuration:", fontCardTitle, cardX + 50, lineY, COLOR_BLUE_BRIGHT);
-        draw_text(scene, res.isUpdate ? "Replaced /data/GoldHEN/onefamily.ini with latest version & defaults" : "Initialized /data/GoldHEN/onefamily.ini with optimal settings", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
+        draw_text(scene, res.isUpdate ? "Replaced /data/onefamily/onefamily.ini with latest version & defaults" : "Initialized /data/onefamily/onefamily.ini with optimal settings", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
     } else {
         draw_text(scene, "[FAIL] Configuration:", fontCardTitle, cardX + 50, lineY, Color{ 255, 80, 80 });
         draw_text(scene, "Failed to create configuration file", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
@@ -954,4 +1072,160 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
 
     draw_image(scene, btnOptions, 1630, 900);
     draw_text(scene, "Exit", fontFooter, 1710, 922, COLOR_TEXT_DIM);
+}
+
+void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile& profile,
+                      int selectedRow, const OrbisPadData& padData, bool testMode) {
+    if (!scene) return;
+
+    // Header Area: Sdoppiata in 2 Card affiancate e indipendenti
+    // Card 1: Device info (X = CARD_X, Y = 135, W = 1060, H = 88)
+    draw_rounded_rect(scene, CARD_X, 135, 1060, 88, 10, COLOR_CARD_BG);
+    draw_rounded_outline(scene, CARD_X, 135, 1060, 88, 10, COLOR_CARD_BORDER, 1);
+    draw_image(scene, iconRemap, CARD_X + 20, 135 + (88 - iconRemap.height) / 2);
+
+    char devTitle[128];
+    snprintf(devTitle, sizeof(devTitle), "Generic HID: %s", status.name.c_str());
+    draw_text(scene, devTitle, fontCardTitle, CARD_X + 75, 168, COLOR_WHITE);
+
+    char devSub[256];
+    snprintf(devSub, sizeof(devSub), "Hardware: VID 0x%04X | PID 0x%04X   •   Buttons: %d   •   Profile: %04X_%04X.ini",
+             status.vid, status.pid, status.nbuttons, status.vid, status.pid);
+    draw_text(scene, devSub, fontCardDesc, CARD_X + 75, 198, COLOR_TEXT_DIM);
+
+    // Card 2: Test Mode R3 Badge Card (X = 1500, Y = 135, W = 360, H = 88)
+    int testCardX = CARD_X + 1080;
+    int testCardW = 360;
+    int testCardH = 88;
+
+    if (testMode) {
+        Color badgeBg = Color{ 15, 60, 40 };
+        Color badgeBorder = Color{ 0, 255, 150 };
+        draw_rounded_rect(scene, testCardX, 135, testCardW, testCardH, 10, badgeBg);
+        draw_rounded_outline(scene, testCardX, 135, testCardW, testCardH, 10, badgeBorder, 2);
+        draw_image(scene, btnR3, testCardX + 16, 135 + (testCardH - btnR3.height) / 2);
+        draw_text(scene, "TEST MODE: ACTIVE", fontCardTitle, testCardX + 60, 168, Color{ 0, 255, 150 });
+        draw_text(scene, "Press R3 to return", fontCardDesc, testCardX + 60, 198, COLOR_WHITE);
+    } else {
+        Color badgeBg = Color{ 14, 24, 38 };
+        Color badgeBorder = COLOR_CARD_BORDER;
+        draw_rounded_rect(scene, testCardX, 135, testCardW, testCardH, 10, badgeBg);
+        draw_rounded_outline(scene, testCardX, 135, testCardW, testCardH, 10, badgeBorder, 1);
+        draw_image(scene, btnR3, testCardX + 16, 135 + (testCardH - btnR3.height) / 2);
+        draw_text(scene, "TEST MODE: OFF", fontCardTitle, testCardX + 60, 168, COLOR_WHITE);
+        draw_text(scene, "Press R3 to test buttons", fontCardDesc, testCardX + 60, 198, COLOR_BLUE_BRIGHT);
+    }
+
+    // Grid of 14 actions (2 columns x 7 rows, H = 70, GAP = 10, fine a Y = 788)
+    const int COL_W = 690;
+    const int COL_GAP = 60;
+    const int ROW_H = 70;
+    const int ROW_GAP = 10;
+    const int GRID_Y = 238;
+
+    for (int i = 0; i < ACT_COUNT; i++) {
+        int col = (i < 7) ? 0 : 1;
+        int row = (i < 7) ? i : (i - 7);
+        int itemX = CARD_X + col * (COL_W + COL_GAP);
+        int itemY = GRID_Y + row * (ROW_H + ROW_GAP);
+
+        bool isSelected = (!testMode && selectedRow == i);
+        bool isPressed = (padData.buttons & HidProfile::ACTIONS[i].ds4_bit) != 0;
+
+        Color bg = isPressed ? Color{ 15, 90, 55 } : (isSelected ? COLOR_SIDEBAR_BLUE : COLOR_CARD_BG);
+        Color border = isPressed ? Color{ 0, 255, 150 } : (isSelected ? COLOR_BLUE_BRIGHT : COLOR_CARD_BORDER);
+
+        draw_rounded_rect(scene, itemX, itemY, COL_W, ROW_H, 8, bg);
+        draw_rounded_outline(scene, itemX, itemY, COL_W, ROW_H, 8, border, (isSelected || isPressed) ? 2 : 1);
+
+        // Official Button Icon
+        const ImageRGBA* iconToDraw = &btnCross;
+        switch (i) {
+            case ACT_CROSS:    iconToDraw = &btnCross;    break;
+            case ACT_CIRCLE:   iconToDraw = &btnCircle;   break;
+            case ACT_SQUARE:   iconToDraw = &btnSquare;   break;
+            case ACT_TRIANGLE: iconToDraw = &btnTriangle; break;
+            case ACT_L1:       iconToDraw = &btnL1;       break;
+            case ACT_R1:       iconToDraw = &btnR1;       break;
+            case ACT_L2:       iconToDraw = &btnL2;       break;
+            case ACT_R2:       iconToDraw = &btnR2;       break;
+            case ACT_SHARE:    iconToDraw = &btnShare;    break;
+            case ACT_OPTIONS:  iconToDraw = &btnOptions;  break;
+            case ACT_PS:       iconToDraw = &btnPs;       break;
+            case ACT_TOUCHPAD: iconToDraw = &btnTouchpad; break;
+            case ACT_L3:       iconToDraw = &btnL3;       break;
+            case ACT_R3:       iconToDraw = &btnR3;       break;
+        }
+
+        int iconX = itemX + 18;
+        int iconY = itemY + (ROW_H - iconToDraw->height) / 2;
+        draw_image(scene, *iconToDraw, iconX, iconY);
+
+        // Action Name
+        int textX = iconX + iconToDraw->width + 16;
+        draw_text(scene, HidProfile::ACTIONS[i].display_name, fontCardTitle, textX, itemY + 44, isSelected ? COLOR_WHITE : Color{ 210, 225, 245 });
+
+        // Assigned button pill on the right
+        int assigned = profile.get_assigned_button(i);
+        char btnLabel[32];
+        if (assigned == 0) {
+            snprintf(btnLabel, sizeof(btnLabel), "None");
+        } else {
+            snprintf(btnLabel, sizeof(btnLabel), "Button %d", assigned);
+        }
+
+        int pillW = 180;
+        int pillX = itemX + COL_W - pillW - 16;
+        int pillY = itemY + 16;
+        int pillH = 38;
+
+        Color pillBg = isSelected ? Color{ 20, 50, 90 } : Color{ 14, 24, 38 };
+        Color pillBorder = isSelected ? COLOR_BLUE_BRIGHT : COLOR_BORDER_DIM;
+        draw_rounded_rect(scene, pillX, pillY, pillW, pillH, 6, pillBg);
+        draw_rounded_outline(scene, pillX, pillY, pillW, pillH, 6, pillBorder, 1);
+
+        if (isSelected) {
+            draw_text(scene, "<", fontValue, pillX + 12, pillY + 27, COLOR_BLUE_BRIGHT);
+            draw_text_centered(scene, btnLabel, fontCardTitle, pillX + pillW / 2, pillY + 27, COLOR_WHITE);
+            draw_text(scene, ">", fontValue, pillX + pillW - 22, pillY + 27, COLOR_BLUE_BRIGHT);
+        } else {
+            draw_text_centered(scene, btnLabel, fontCardDesc, pillX + pillW / 2, pillY + 26, (assigned == 0) ? Color{ 110, 130, 150 } : (isPressed ? Color{ 0, 255, 150 } : COLOR_TEXT_DIM));
+        }
+    }
+
+    // Footer with exact PlayStation Button Icons
+    scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);
+
+    if (testMode) {
+        draw_image(scene, iconMode, 60, 890);
+        draw_text(scene, "HID Input Test Mode Active", fontCardTitle, 120, 912, Color{ 0, 255, 150 });
+        draw_text(scene, "UI actions are suspended. Press physical buttons to test their mapping live.", fontFooter, 120, 938, COLOR_WHITE);
+
+        // Footer command icons for Test Mode
+        draw_image(scene, btnR3, 1580, 897);
+        draw_text(scene, "Exit Test Mode", fontFooter, 1630, 922, Color{ 0, 255, 150 });
+    } else {
+        draw_image(scene, iconRemap, 60, 890);
+        draw_text(scene, "HID Button Remapping", fontCardTitle, 120, 912, COLOR_WHITE);
+        draw_text(scene, "Live profile active in /data/onefamily/controllers/", fontFooter, 120, 938, COLOR_BLUE_BRIGHT);
+
+        // Footer command icons for Edit Mode
+        draw_image(scene, btnR3, 980, 897);
+        draw_text(scene, "Test Mode", fontFooter, 1025, 922, COLOR_BLUE_BRIGHT);
+
+        draw_image(scene, btnCross, 1145, 897);
+        draw_text(scene, "Save", fontFooter, 1190, 922, COLOR_BLUE_BRIGHT);
+
+        draw_image(scene, btnSquare, 1260, 897);
+        draw_text(scene, "Defaults", fontFooter, 1305, 922, COLOR_TEXT_DIM);
+
+        draw_image(scene, btnTriangle, 1400, 897);
+        draw_text(scene, "Reload", fontFooter, 1445, 922, COLOR_TEXT_DIM);
+
+        draw_image(scene, btnArrows, 1530, 901);
+        draw_text(scene, "Change Value", fontFooter, 1585, 922, COLOR_TEXT_DIM);
+
+        draw_image(scene, btnOptions, 1720, 900);
+        draw_text(scene, "Exit", fontFooter, 1800, 922, COLOR_TEXT_DIM);
+    }
 }

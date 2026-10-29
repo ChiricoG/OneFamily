@@ -14,6 +14,7 @@
 #include "ps_controllers.h"
 #include "controller_detect.h"
 #include "translator.h"
+#include "generic_hid.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,8 +26,11 @@ static int g_hUsbd = 0;
 static libusb_device_handle *g_dev_handle = NULL;
 static libusb_device *g_cur_dev = NULL;
 static int g_claimed_interface = -1;
+static int s_claimed_kbd_interface = -1;
 static uint8_t s_xboxone_guide = 0;
 static OrbisPadData s_last_ds4;
+static const char* controller_type_to_str(ControllerType type);
+static const char* controller_type_to_id(ControllerType type);
 
 // libSceUsbd dynamic function pointers
 typedef int32_t (*sceUsbdInit_t)(void);
@@ -43,6 +47,13 @@ typedef int32_t (*sceUsbdReleaseInterface_t)(libusb_device_handle*, int32_t);
 typedef int32_t (*sceUsbdInterruptTransfer_t)(libusb_device_handle*, uint8_t, uint8_t*, int32_t, int32_t*, uint32_t);
 typedef int32_t (*sceUsbdControlTransfer_t)(libusb_device_handle*, uint8_t, uint8_t, uint16_t, uint16_t, unsigned char*, uint16_t, uint32_t);
 typedef int32_t (*sceUsbdCheckConnected_t)(libusb_device_handle*);
+typedef int32_t (*sceUsbdClearHalt_t)(libusb_device_handle*, uint8_t);
+typedef int32_t (*sceUsbdDetachKernelDriver_t)(libusb_device_handle*, int32_t);
+typedef int32_t (*sceUsbdKernelDriverActive_t)(libusb_device_handle*, int32_t);
+typedef int32_t (*sceUsbdSetInterfaceAltSetting_t)(libusb_device_handle*, int32_t, int32_t);
+typedef int32_t (*sceUsbdGetConfiguration_t)(libusb_device_handle*, int32_t*);
+typedef int32_t (*sceUsbdSetConfiguration_t)(libusb_device_handle*, int32_t);
+typedef int32_t (*sceUsbdGetConfigDescriptor_t)(libusb_device*, uint8_t, struct libusb_config_descriptor**);
 
 static sceUsbdInit_t                       p_sceUsbdInit = NULL;
 static sceUsbdExit_t                       p_sceUsbdExit = NULL;
@@ -58,10 +69,22 @@ static sceUsbdReleaseInterface_t           p_sceUsbdReleaseInterface = NULL;
 static sceUsbdInterruptTransfer_t          p_sceUsbdInterruptTransfer = NULL;
 static sceUsbdControlTransfer_t            p_sceUsbdControlTransfer = NULL;
 static sceUsbdCheckConnected_t             p_sceUsbdCheckConnected = NULL;
+static sceUsbdClearHalt_t                  p_sceUsbdClearHalt = NULL;
+static sceUsbdDetachKernelDriver_t         p_sceUsbdDetachKernelDriver = NULL;
+static sceUsbdKernelDriverActive_t         p_sceUsbdKernelDriverActive = NULL;
+static sceUsbdSetInterfaceAltSetting_t     p_sceUsbdSetInterfaceAltSetting = NULL;
+static sceUsbdGetConfiguration_t           p_sceUsbdGetConfiguration = NULL;
+static sceUsbdSetConfiguration_t           p_sceUsbdSetConfiguration = NULL;
+static sceUsbdGetConfigDescriptor_t        p_sceUsbdGetConfigDescriptor = NULL;
 
 int32_t usbd_get_active_config_descriptor(libusb_device* dev, struct libusb_config_descriptor** config) {
-    if (!p_sceUsbdGetActiveConfigDescriptor) return -1;
-    return p_sceUsbdGetActiveConfigDescriptor(dev, config);
+    if (p_sceUsbdGetActiveConfigDescriptor && p_sceUsbdGetActiveConfigDescriptor(dev, config) == 0 && *config) {
+        return 0;
+    }
+    if (p_sceUsbdGetConfigDescriptor && p_sceUsbdGetConfigDescriptor(dev, 0, config) == 0 && *config) {
+        return 0;
+    }
+    return -1;
 }
 
 void usbd_free_config_descriptor(struct libusb_config_descriptor* config) {
@@ -96,6 +119,13 @@ static int load_usbd(void) {
     daemon_sys_dlsym(g_hUsbd, "sceUsbdInterruptTransfer", (void**)&p_sceUsbdInterruptTransfer);
     daemon_sys_dlsym(g_hUsbd, "sceUsbdControlTransfer", (void**)&p_sceUsbdControlTransfer);
     daemon_sys_dlsym(g_hUsbd, "sceUsbdCheckConnected", (void**)&p_sceUsbdCheckConnected);
+    daemon_sys_dlsym(g_hUsbd, "sceUsbdClearHalt", (void**)&p_sceUsbdClearHalt);
+    daemon_sys_dlsym(g_hUsbd, "sceUsbdDetachKernelDriver", (void**)&p_sceUsbdDetachKernelDriver);
+    daemon_sys_dlsym(g_hUsbd, "sceUsbdKernelDriverActive", (void**)&p_sceUsbdKernelDriverActive);
+    daemon_sys_dlsym(g_hUsbd, "sceUsbdSetInterfaceAltSetting", (void**)&p_sceUsbdSetInterfaceAltSetting);
+    daemon_sys_dlsym(g_hUsbd, "sceUsbdGetConfiguration", (void**)&p_sceUsbdGetConfiguration);
+    daemon_sys_dlsym(g_hUsbd, "sceUsbdSetConfiguration", (void**)&p_sceUsbdSetConfiguration);
+    daemon_sys_dlsym(g_hUsbd, "sceUsbdGetConfigDescriptor", (void**)&p_sceUsbdGetConfigDescriptor);
 
     if (p_sceUsbdInit) {
         p_sceUsbdInit();
@@ -106,10 +136,44 @@ static int load_usbd(void) {
 
 static int s_logged_first_report = 0;
 static int s_last_guide_pressed = 0;
+static int s_consecutive_disconnects = 0;
+static int s_consecutive_transfer_errors = 0;
+static int s_consecutive_timeouts = 0;
+
+static void write_status_file(bool connected, ControllerType type, uint16_t vid, uint16_t pid, const char* name, int nbuttons) {
+    daemon_sys_mkdir("/data", 0777);
+    daemon_sys_mkdir("/data/onefamily", 0777);
+    int fd = daemon_sys_open("/data/onefamily/onefamily.status", 0x0001 | 0x0200 | 0x0400, 0666);
+    if (fd >= 0) {
+        char buf[256];
+        int len = snprintf(buf, sizeof(buf),
+            "connected = %d\n"
+            "type = %s\n"
+            "vid = 0x%04X\n"
+            "pid = 0x%04X\n"
+            "name = %s\n"
+            "nbuttons = %d\n",
+            connected ? 1 : 0,
+            controller_type_to_id(type),
+            vid, pid,
+            name ? name : "Unknown",
+            nbuttons
+        );
+        daemon_sys_write(fd, buf, len);
+        daemon_sys_close(fd);
+    }
+}
 
 static void close_controller(void) {
+    bool had_vpad = vpad_is_active();
     vpad_shutdown();
+    generic_hid_reset();
+    write_status_file(false, CONTROLLER_NONE, 0, 0, "None", 0);
     if (g_dev_handle) {
+        if (s_claimed_kbd_interface >= 0 && p_sceUsbdReleaseInterface) {
+            p_sceUsbdReleaseInterface(g_dev_handle, s_claimed_kbd_interface);
+            s_claimed_kbd_interface = -1;
+        }
         if (g_claimed_interface >= 0 && p_sceUsbdReleaseInterface) {
             p_sceUsbdReleaseInterface(g_dev_handle, g_claimed_interface);
         }
@@ -118,19 +182,25 @@ static void close_controller(void) {
         }
         g_dev_handle = NULL;
     }
+    s_claimed_kbd_interface = -1;
     g_claimed_interface = -1;
     g_cur_dev = NULL;
     g_usb_state.connected = false;
     s_xboxone_guide = 0;
     s_logged_first_report = 0;
     s_last_guide_pressed = 0;
+    s_consecutive_disconnects = 0;
+    s_consecutive_transfer_errors = 0;
+    s_consecutive_timeouts = 0;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
     s_last_ds4.leftStick.x = 128;
     s_last_ds4.leftStick.y = 128;
     s_last_ds4.rightStick.x = 128;
     s_last_ds4.rightStick.y = 128;
     daemon_log(LOG_LEVEL_INFO, "Controller disconnected from USB");
-    daemon_notify("OneFamily: Controller Disconnected");
+    if (had_vpad) {
+        daemon_notify("OneFamily: Controller Disconnected");
+    }
 }
 
 static int send_init_packet(const uint8_t* pkt, int len) {
@@ -164,9 +234,9 @@ static void init_dualsense_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Initializing DualSense controller (EP_IN:0x%02X, EP_OUT:0x%02X, IF:%d)...",
                g_usb_state.endpoint_in, g_usb_state.endpoint_out, g_claimed_interface);
 
-    // Exact 48-byte DualSense USB output report (Report ID 0x02 + 47 bytes payload)
-    // Matches HID Report Descriptor Report Count (0x2F = 47) and SDL2 DS5EffectsState_t specification
-    uint8_t init_pkt[48];
+    // Full 64-byte DualSense USB output report (Report ID 0x02 + 63 bytes payload)
+    // Matches endpoint wMaxPacketSize (64) and Linux hid-playstation DS_OUTPUT_REPORT_USB_SIZE specification
+    uint8_t init_pkt[64];
     memset(init_pkt, 0, sizeof(init_pkt));
     init_pkt[0] = 0x02;        // Report ID
     init_pkt[1] = 0x01 | 0x02; // valid_flag0: COMPATIBLE_VIBRATION (0x01) | HAPTICS_SELECT (0x02)
@@ -320,7 +390,22 @@ static const char* controller_type_to_str(ControllerType type) {
         case CONTROLLER_DS3:      return "DualShock 3";
         case CONTROLLER_DUALSENSE:return "DualSense";
         case CONTROLLER_STADIA:   return "Google Stadia";
+        case CONTROLLER_GENERIC_HID:return "Generic HID Gamepad";
         default:                  return "Unknown";
+    }
+}
+
+static const char* controller_type_to_id(ControllerType type) {
+    switch (type) {
+        case CONTROLLER_XBOX360:   return "xbox360";
+        case CONTROLLER_XBOXONE:   return "xboxone";
+        case CONTROLLER_SWITCH:    return "switch";
+        case CONTROLLER_SWITCH_PRO:return "switch_pro";
+        case CONTROLLER_DS3:       return "ds3";
+        case CONTROLLER_DUALSENSE: return "dualsense";
+        case CONTROLLER_STADIA:    return "stadia";
+        case CONTROLLER_GENERIC_HID:return "generic_hid";
+        default:                   return "none";
     }
 }
 
@@ -347,6 +432,9 @@ static int scan_and_open(void) {
     }
 
     int found = 0;
+    static int s_dualsense_notified = 0;
+    int dualsense_seen = 0;
+
     for (ssize_t i = 0; i < count && !found; i++) {
         libusb_device* dev = list[i];
         struct libusb_device_descriptor desc;
@@ -361,9 +449,75 @@ static int scan_and_open(void) {
         DetectedController det;
         memset(&det, 0, sizeof(det));
         if (controller_identify(dev, &desc, &det)) {
+            // DualSense support is currently inhibited / in development
+            if (det.type == CONTROLLER_DUALSENSE) {
+                dualsense_seen = 1;
+                if (!s_dualsense_notified) {
+                    daemon_notify("OneFamily: DualSense support is in development");
+                    daemon_log(LOG_LEVEL_INFO, "DualSense detected (VID:0x%04X PID:0x%04X) - Support is in development, skipping virtual pad instantiation",
+                               desc.idVendor, desc.idProduct);
+                    s_dualsense_notified = 1;
+                }
+                continue;
+            }
+
             libusb_device_handle* h = NULL;
             if (p_sceUsbdOpen(dev, &h) == 0 && h != NULL) {
+                if (det.type == CONTROLLER_DUALSENSE) {
+                    int curr_cfg = -1;
+                    if (p_sceUsbdGetConfiguration) {
+                        int gcr = p_sceUsbdGetConfiguration(h, &curr_cfg);
+                        daemon_log(LOG_LEVEL_INFO, "DualSense: GetConfiguration = 0x%08X (curr_cfg=%d)", gcr, curr_cfg);
+                    }
+                    if (curr_cfg <= 0 && p_sceUsbdSetConfiguration) {
+                        int scr = p_sceUsbdSetConfiguration(h, 1);
+                        daemon_log(LOG_LEVEL_INFO, "DualSense: SetConfiguration(1) = 0x%08X", scr);
+                    }
+
+                    // Detach kernel drivers from all interfaces (Audio 0,1,2 + HID 3)
+                    if (p_sceUsbdDetachKernelDriver) {
+                        for (int iface = 0; iface < 4; iface++) {
+                            int dr = p_sceUsbdDetachKernelDriver(h, iface);
+                            daemon_log(LOG_LEVEL_INFO, "DualSense: DetachKernelDriver(IF=%d) = 0x%08X", iface, dr);
+                        }
+                    }
+                }
+
+                // If device exposed a secondary composite boot keyboard interface (e.g. 8BitDo dongles),
+                // detach and claim it so Orbis OS ukbd driver will not recognize it as a keyboard.
+                if (det.kbd_interface_num != 0xFF) {
+                    if (p_sceUsbdDetachKernelDriver) {
+                        int dkr = p_sceUsbdDetachKernelDriver(h, det.kbd_interface_num);
+                        daemon_log(LOG_LEVEL_INFO, "Secondary Keyboard IF %d DetachKernelDriver = 0x%08X", det.kbd_interface_num, dkr);
+                    }
+                    if (p_sceUsbdClaimInterface) {
+                        int ckr = p_sceUsbdClaimInterface(h, det.kbd_interface_num);
+                        daemon_log(LOG_LEVEL_INFO, "Secondary Keyboard IF %d ClaimInterface = 0x%08X", det.kbd_interface_num, ckr);
+                        if (ckr == 0) {
+                            s_claimed_kbd_interface = det.kbd_interface_num;
+                        }
+                    }
+                }
+
+                if (p_sceUsbdDetachKernelDriver && det.type == CONTROLLER_GENERIC_HID) {
+                    p_sceUsbdDetachKernelDriver(h, det.interface_num);
+                }
+
                 if (p_sceUsbdClaimInterface(h, det.interface_num) == 0) {
+                    if (det.alt_setting > 0 && p_sceUsbdSetInterfaceAltSetting) {
+                        int as_ret = p_sceUsbdSetInterfaceAltSetting(h, det.interface_num, det.alt_setting);
+                        daemon_log(LOG_LEVEL_INFO, "SetInterfaceAltSetting(IF=%d, alt=%d) = 0x%08X", det.interface_num, det.alt_setting, as_ret);
+                    }
+
+                    if (p_sceUsbdClearHalt) {
+                        int chr_in = p_sceUsbdClearHalt(h, det.ep_in);
+                        int chr_out = det.ep_out ? p_sceUsbdClearHalt(h, det.ep_out) : 0;
+                        if (det.type == CONTROLLER_DUALSENSE) {
+                            daemon_log(LOG_LEVEL_INFO, "DualSense: ClearHalt IN(0x%02X)=0x%08X, OUT(0x%02X)=0x%08X",
+                                       det.ep_in, chr_in, det.ep_out, chr_out);
+                        }
+                    }
+
                     g_dev_handle = h;
                     g_cur_dev = dev;
                     g_claimed_interface = det.interface_num;
@@ -376,6 +530,14 @@ static int scan_and_open(void) {
                     g_usb_state.is_wireless = det.is_wireless;
                     found = 1;
 
+                    if (det.type == CONTROLLER_GENERIC_HID) {
+                        generic_hid_setup(h, desc.idVendor, desc.idProduct, det.interface_num, p_sceUsbdControlTransfer);
+                    }
+
+                    write_status_file(true, det.type, desc.idVendor, desc.idProduct,
+                                      controller_type_to_str(det.type),
+                                      (det.type == CONTROLLER_GENERIC_HID) ? generic_hid_get_nbuttons() : 16);
+
                     daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X, wireless=%d)",
                                controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in, det.is_wireless);
 
@@ -387,30 +549,37 @@ static int scan_and_open(void) {
                     s_last_ds4.connected = 1;
                     s_last_ds4.count = 1;
 
-                    // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer
-                    vpad_init();
+                    if (det.type != CONTROLLER_DUALSENSE) {
+                        // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer
+                        vpad_init();
+                        vpad_send_data(&s_last_ds4);
 
-                    if (det.type == CONTROLLER_XBOXONE) {
-                        init_gip_controller();
-                    } else if (det.type == CONTROLLER_DS3) {
-                        uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
-                        if (p_sceUsbdControlTransfer) {
-                            int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 1000);
-                            daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational handshake sent (ret=%d)", cret);
+                        if (det.type == CONTROLLER_XBOXONE) {
+                            init_gip_controller();
+                        } else if (det.type == CONTROLLER_DS3) {
+                            uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
+                            if (p_sceUsbdControlTransfer) {
+                                int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 1000);
+                                daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational handshake sent (ret=%d)", cret);
+                            }
+                        } else if (det.type == CONTROLLER_SWITCH_PRO) {
+                            init_switch_pro_controller();
                         }
-                    } else if (det.type == CONTROLLER_DUALSENSE) {
-                        init_dualsense_controller();
-                    } else if (det.type == CONTROLLER_SWITCH_PRO) {
-                        init_switch_pro_controller();
-                    }
 
-                    daemon_notify("OneFamily: %s Connected",
-                                  controller_type_to_str(det.type));
+                        daemon_notify("OneFamily: %s Connected",
+                                      controller_type_to_str(det.type));
+                    } else {
+                        daemon_log(LOG_LEVEL_INFO, "DualSense claimed: awaiting first valid input report before activating Virtual DS4");
+                    }
                 } else {
                     p_sceUsbdClose(h);
                 }
             }
         }
+    }
+
+    if (!dualsense_seen) {
+        s_dualsense_notified = 0;
     }
 
     p_sceUsbdFreeDeviceList(list);
@@ -473,7 +642,8 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         uint8_t pkt[8] = { 0x00, 0xFF, 0x00, (small_motor > 0) ? 1 : 0, large_motor, 0x00, 0x00, 0x00 };
         p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
     } else if (g_usb_state.type == CONTROLLER_DUALSENSE) {
-        uint8_t pkt[48];
+        if (!vpad_is_active()) return;
+        uint8_t pkt[64];
         memset(pkt, 0, sizeof(pkt));
         pkt[0] = 0x02;        // DualSense Output Report
         pkt[1] = 0x01 | 0x02; // Enable compatible rumble & haptics
@@ -484,7 +654,10 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         pkt[42] = 0x02;       // Lightbar normal
         pkt[44] = 0x04;       // Player 1 LED
         pkt[47] = 0xFF;       // Blue lightbar
-        p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+        int r = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+        if (r != 0 && p_sceUsbdControlTransfer) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, g_claimed_interface, pkt, sizeof(pkt), 50);
+        }
     } else if (g_usb_state.type == CONTROLLER_STADIA) {
         // Stadia Rumble Output Report (Report ID 0x05, 5 bytes)
         // [0] = 0x05
@@ -508,6 +681,11 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         if (!sent && p_sceUsbdControlTransfer) {
             p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, pkt, sizeof(pkt), 50);
         }
+    } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
+        generic_hid_send_rumble(g_dev_handle, g_usb_state.vid, g_usb_state.pid,
+                                g_usb_state.endpoint_out, g_claimed_interface,
+                                large_motor, small_motor,
+                                p_sceUsbdInterruptTransfer, p_sceUsbdControlTransfer);
     }
 }
 
@@ -524,6 +702,33 @@ static inline uint32_t get_guide_button_mask(void) {
 
 static TranslatorConfig s_trans_cfg;
 static uint64_t s_last_rescan_us = 0;
+
+static bool is_current_device_present_on_bus(void) {
+    if (!p_sceUsbdGetDeviceList || !p_sceUsbdFreeDeviceList) {
+        return true;
+    }
+    libusb_device** list = NULL;
+    ssize_t count = p_sceUsbdGetDeviceList(&list);
+    if (count <= 0 || !list) {
+        if (list) p_sceUsbdFreeDeviceList(list);
+        return false;
+    }
+    bool found = false;
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        if (p_sceUsbdGetDeviceDescriptor && p_sceUsbdGetDeviceDescriptor(list[i], &desc) == 0) {
+            if (desc.idVendor == g_usb_state.vid && desc.idProduct == g_usb_state.pid) {
+                found = true;
+                break;
+            }
+        } else if (list[i] == g_cur_dev) {
+            found = true;
+            break;
+        }
+    }
+    p_sceUsbdFreeDeviceList(list);
+    return found;
+}
 
 int usb_driver_init(void) {
     if (load_usbd() != 0) {
@@ -551,18 +756,49 @@ void usb_driver_poll_step(void) {
     // 2. Read from connected controller
     uint8_t rx[128];
     int transferred = 0;
-    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 16);
+    int read_len = sizeof(rx);
+    if (g_usb_state.type == CONTROLLER_DUALSENSE || g_usb_state.type == CONTROLLER_GENERIC_HID) {
+        read_len = 64; // DualSense and Generic HID endpoints have wMaxPacketSize <= 64 bytes
+    }
+    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 16);
 
-    static int s_consecutive_disconnects = 0;
-    static int s_consecutive_transfer_errors = 0;
+    // DualSense fallback: If Interrupt IN transfer failed, query via standard USB HID GET_REPORT on control pipe
+    if (g_usb_state.type == CONTROLLER_DUALSENSE && ret != 0 && p_sceUsbdControlTransfer) {
+        // bmRequestType: 0xA1, bRequest: 0x01 (GET_REPORT), wValue: 0x0101 (Report 1, Input), wIndex: g_claimed_interface (3)
+        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0xA1, 0x01, 0x0101, g_claimed_interface, rx, read_len, 20);
+        if (cr >= 10) {
+            ret = 0;
+            transferred = cr;
+            static int s_logged_ds_ctrl_rx = 0;
+            if (s_logged_ds_ctrl_rx < 5) {
+                daemon_log(LOG_LEVEL_INFO, "DualSense input report received via GET_REPORT control transfer (%d bytes)", transferred);
+                s_logged_ds_ctrl_rx++;
+            }
+        } else {
+            static int s_logged_ds_ctrl_err = 0;
+            if (s_logged_ds_ctrl_err < 5) {
+                daemon_log(LOG_LEVEL_WARN, "DualSense GET_REPORT control transfer returned 0x%08X (wIndex=%d)", cr, g_claimed_interface);
+                s_logged_ds_ctrl_err++;
+            }
+        }
+    }
 
     if (ret == 0 && transferred > 0) {
         s_consecutive_disconnects = 0;
         s_consecutive_transfer_errors = 0;
+        s_consecutive_timeouts = 0;
         if (!s_logged_first_report) {
             daemon_log(LOG_LEVEL_INFO, "USB first input report received (%d bytes) from %s",
                        transferred, controller_type_to_str(g_usb_state.type));
             s_logged_first_report = 1;
+        }
+
+        // DualSense: Activate Virtual DS4 and initialize output report once first valid input arrives
+        if (g_usb_state.type == CONTROLLER_DUALSENSE && !vpad_is_active()) {
+            daemon_log(LOG_LEVEL_INFO, "DualSense first valid report received (%d bytes) - Activating Virtual DS4", transferred);
+            vpad_init();
+            init_dualsense_controller();
+            daemon_notify("OneFamily: DualSense Connected");
         }
 
         OrbisPadData ds4;
@@ -845,6 +1081,34 @@ void usb_driver_poll_step(void) {
                 s_last_ds4 = ds4;
                 vpad_send_data(&ds4);
             }
+        } else if (g_usb_state.type == CONTROLLER_GENERIC_HID && transferred > 0) {
+            static int s_logged_generic_report = 0;
+            if (s_logged_generic_report < 10) {
+                daemon_log(LOG_LEVEL_INFO, "Generic HID report [%d bytes]: rx[0]=0x%02X rx[1]=0x%02X rx[2]=0x%02X rx[3]=0x%02X",
+                           transferred, rx[0], (transferred > 1 ? rx[1] : 0), (transferred > 2 ? rx[2] : 0), (transferred > 3 ? rx[3] : 0));
+                s_logged_generic_report++;
+            }
+
+            if (generic_hid_parse_report(rx, transferred, &ds4, &s_trans_cfg)) {
+                // Combo: Share + Options (Back + Start) -> PS Button (Home)
+                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
+                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
+                    ds4.buttons |= DS4_BUTTON_PS;
+                }
+                // Combo: Share + D-Pad Down -> PS Button (Home)
+                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
+                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
+                    ds4.buttons |= DS4_BUTTON_PS;
+                }
+                // Combo: Share + D-Pad Up -> Touchpad Click (Map/Inventory in games)
+                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP)) {
+                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
+                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                }
+
+                s_last_ds4 = ds4;
+                vpad_send_data(&ds4);
+            }
         }
     } else {
         // Check for physical disconnect on any transfer error/timeout
@@ -861,6 +1125,21 @@ void usb_driver_poll_step(void) {
         }
 
         if (ret == 0x80240007 || ret == -7) {
+            s_consecutive_timeouts++;
+            // Active bus presence probe: if device has timed out for ~30 consecutive polls (~500ms),
+            // verify if the device is still physically enumerated on the USB bus.
+            if (s_consecutive_timeouts >= 30) {
+                if (!is_current_device_present_on_bus()) {
+                    daemon_log(LOG_LEVEL_INFO, "USB controller physical disconnect confirmed (device gone from bus)");
+                    s_consecutive_timeouts = 0;
+                    s_consecutive_transfer_errors = 0;
+                    close_controller();
+                    return;
+                }
+                // Controller is still present on the bus, just idle
+                s_consecutive_timeouts = 0;
+            }
+
             if (g_usb_state.type == CONTROLLER_DUALSENSE) {
                 static int s_logged_ds_timeout = 0;
                 if (s_logged_ds_timeout < 5) {
@@ -869,7 +1148,7 @@ void usb_driver_poll_step(void) {
                 }
             }
             // Normal USB interrupt timeout: keep 250 Hz stream alive with last known state
-            if (s_last_ds4.connected) {
+            if (s_last_ds4.connected && vpad_is_active()) {
                 s_last_ds4.timestamp = daemon_sys_time_us();
                 vpad_send_data(&s_last_ds4);
             }
@@ -882,24 +1161,36 @@ void usb_driver_poll_step(void) {
                                ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
                     s_logged_ds_err++;
                 }
+                // If stalled, attempt ClearHalt on input endpoint
+                if ((ret == 0x802400FF || ret == 0x80240009) && p_sceUsbdClearHalt && (s_consecutive_transfer_errors % 50 == 1)) {
+                    p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                }
             } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
                 daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
                            ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
             } else if (g_usb_state.type == CONTROLLER_STADIA) {
                 daemon_log(LOG_LEVEL_WARN, "Stadia interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
                            ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+            } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
+                static int s_logged_gen_err = 0;
+                if (s_logged_gen_err < 10) {
+                    daemon_log(LOG_LEVEL_WARN, "Generic HID interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
+                               ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+                    s_logged_gen_err++;
+                }
             }
 
             // Check if device is physically disconnected or persistent transfer failures occur
+            int max_allowed_errors = (g_usb_state.type == CONTROLLER_DUALSENSE || g_usb_state.type == CONTROLLER_GENERIC_HID) ? 250 : 25;
             int physically_disconnected = (p_sceUsbdCheckConnected != NULL && p_sceUsbdCheckConnected(g_dev_handle) != 0);
-            if (physically_disconnected || s_consecutive_transfer_errors >= 10) {
+            if (physically_disconnected || s_consecutive_transfer_errors >= max_allowed_errors) {
                 daemon_log(LOG_LEVEL_INFO, "Closing controller after persistent transfer failure (ret=0x%08X, err_count=%d)",
                            ret, s_consecutive_transfer_errors);
                 s_consecutive_transfer_errors = 0;
                 close_controller();
             } else {
                 // Keep 250 Hz alive with last known state during transient error recovery
-                if (s_last_ds4.connected) {
+                if (s_last_ds4.connected && vpad_is_active()) {
                     s_last_ds4.timestamp = daemon_sys_time_us();
                     vpad_send_data(&s_last_ds4);
                 }

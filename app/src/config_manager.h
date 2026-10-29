@@ -4,8 +4,9 @@
 #include <string>
 #include <vector>
 
-#define INI_FILE_PATH "/data/GoldHEN/onefamily.ini"
-#define LEGACY_INI_FILE_PATH "/data/GoldHEN/xbox_controller.ini"
+#define INI_FILE_PATH "/data/onefamily/onefamily.ini"
+#define LEGACY_INI_FILE_PATH "/data/GoldHEN/onefamily.ini"
+#define OLD_LEGACY_INI_FILE_PATH "/data/GoldHEN/xbox_controller.ini"
 
 struct AppConfig {
     int deadzone_index;     // 0..7 (0%, 5%, 8%, 10%, 12%, 15%, 20%, 25%)

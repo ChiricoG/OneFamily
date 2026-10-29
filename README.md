@@ -10,6 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/PS4-GoldHEN%20Compatible-0070D1?style=for-the-badge&logo=playstation" alt="GoldHEN Compatible"/>
+  <img src="https://img.shields.io/badge/Version-v1.1.5-blueviolet?style=for-the-badge" alt="Version v1.1.5"/>
   <img src="https://img.shields.io/badge/Polling-250%20Hz%20(4ms)-brightgreen?style=for-the-badge" alt="250 Hz Polling"/>
   <img src="https://img.shields.io/badge/Platform-PlayStation%204-blue?style=for-the-badge" alt="Platform PS4"/>
   <img src="https://img.shields.io/badge/License-MIT-orange?style=for-the-badge" alt="License MIT"/>
@@ -21,7 +22,7 @@
 
 **OneFamily** is a high-performance background daemon and 1080p companion homebrew application for jailbroken PlayStation 4 consoles running **GoldHEN**.
 
-It allows you to connect virtually any USB controller — including **all XInput-compatible PC gamepads**, official and third-party **Xbox controllers** (Xbox 360, Xbox One, Xbox Series X|S), **Nintendo Switch** controllers, and Sony **DualShock 3** / **DualSense** — and play across the entire PS4 operating system and all games with **zero input lag**, full analog precision, and hardware rumble feedback.
+It allows you to connect virtually any USB controller — including **all XInput-compatible PC gamepads**, **Generic USB HID & DirectInput controllers** (Logitech F310/F710, 8BitDo in D-Input mode, etc.), **Google Stadia**, official and third-party **Xbox controllers** (Xbox 360, Xbox One, Xbox Series X|S), **Nintendo Switch** controllers, and Sony **DualShock 3** — and play across the entire PS4 operating system and all games with **zero input lag**, full analog precision, and hardware rumble feedback.
 
 Unlike traditional game-specific hooks that only intercept inputs inside running titles, OneFamily operates as an independent, system-level background daemon. It registers connected gamepads directly into the PlayStation 4 pad subsystem (`libScePad`) as genuine Type 1 DualShock 4 devices. This provides complete OS integration: you can log into any user account, switch profiles on the fly, access the system Quick Menu, navigate the XMB dashboard, and play local multiplayer titles just like an official Sony controller.
 
@@ -57,11 +58,18 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 - **Multi-User Profile Login & Profile Switching:** Fully integrated with the PS4 User Service (`libSceUserService`). When you plug in a controller or press the Guide/PS button, you can assign it to any profile on the console (Player 1, Player 2, or Guest), enabling native local co-op and split-screen multiplayer across different accounts.
 - **Complete Quick Menu & Shell Navigation:** The Guide/PS button provides native PlayStation Home functionality. Tap to return to the XMB dashboard, or hold to open the PlayStation Quick Menu (to adjust audio, manage power options, or suspend applications).
 - **Universal XInput & Third-Party Xbox Support:** Comprehensive hardware descriptor detection supporting official Microsoft controllers as well as licensed and third-party gamepads (PowerA, PDP, 8BitDo, Razer, Hori, Nacon, Thrustmaster, GameSir, Logitech, and generic PC XInput devices).
+- **Generic USB HID & DirectInput Support:** Full support for non-XInput USB gamepads via dynamic HID report descriptor parsing (axes, buttons, and hat-switch D-Pad).
+- **Visual Button Remapping GUI (Remap HID Tab):** A dedicated 4th tab in the companion app when an HID gamepad is plugged in. Remap any physical button to PlayStation actions with authentic icons, and auto-save hardware profiles to `/data/onefamily/controllers/<VID>_<PID>.ini`.
+- **Dedicated R3 Test Mode:** Press R3 to toggle between Edit Mode and Test Mode inside the remapping screen. Test buttons in real-time without triggering UI navigation or accidental saving.
+- **Universal Home / Touchpad Combos:** For 12-button controllers lacking physical PS/Touchpad buttons:
+  - **Back + Start** or **Share + D-Pad Down** = PS Button (Home / Quick Menu)
+  - **Share + D-Pad Up** = Touchpad Click
 - **Ultra-Low Latency (250 Hz Polling):** Operates on an unthrottled 4 ms polling loop for competitive, instantaneous input response with zero latency overhead.
+- **Unified Filesystem (`/data/onefamily`):** Centralized directory for configuration (`onefamily.ini`), custom controller profiles (`controllers/`), and runtime logs.
 - **All-in-One Automated Setup:** The companion app handles full deployment on first launch:
   - Deploys the background daemon payload to `/data/payloads/onefamily.bin`.
   - Configures `/data/GoldHEN/payloads.ini` for automatic boot on system start (`[AutoRun]`).
-  - Initializes `/data/GoldHEN/onefamily.ini` with optimal default settings.
+  - Initializes `/data/onefamily/onefamily.ini` with optimal default settings.
 - **Analog Stick Drift Auto-Calibration:** Measures resting stick noise across 180 frames (~3 seconds) and automatically calculates the minimal ideal deadzone to eliminate drift while preserving responsiveness.
 - **Dual Vibration / Rumble Support:** Full support for large (heavy) and small (light) rumble motors, including a dedicated hardware vibration tester in the companion app.
 - **On-the-Fly USB Hotplugging:** Plug, unplug, or switch controllers anytime without needing to restart the game or console.
@@ -83,9 +91,14 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 | **Microsoft Xbox Series X \| S** | Official Wireless Controller (USB-C cable) | USB | Yes | Yes |
 | **Microsoft Xbox One / S / X / Elite** | Official Wireless Controller (Micro-USB cable) | USB | Yes | Yes |
 | **Microsoft Xbox 360** | Official Wired Controller & third-party clones | USB | Yes | Yes |
+| **Generic USB HID & DirectInput** | Logitech F310, F710, RumblePad 2, 8BitDo (D-Input), generic PC pads | USB | Yes | Yes |
+| **Google Stadia Controller** | Official Stadia Controller (USB-C cable) | USB | Yes | Yes |
 | **Nintendo Switch Pro Controller** | Official Pro Controller & third-party Switch pads | USB | — | Yes |
-| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | USB | Yes | Yes |
 | **Sony PlayStation 3 DualShock 3** | Official DualShock 3 (automatic handshake) | USB | Yes | Yes |
+| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | USB | *In development* | *In development* |
+
+> [!NOTE]
+> **Sony PlayStation 5 DualSense Support:** Support for Sony DualSense and DualSense Edge controllers is currently in active development and will be available in an upcoming release.
 
 ---
 
@@ -105,7 +118,7 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
    - Plug in your USB controller — it works instantly!
 
 4. **Customize & Calibrate:**
-   - Launch **OneFamily Companion** anytime to calibrate stick drift, test vibration, or adjust settings. Changes apply in real time!
+   - Launch **OneFamily Companion** anytime to calibrate stick drift, test vibration, remap HID buttons, or adjust settings. Changes apply in real time!
 
 ---
 
