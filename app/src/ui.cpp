@@ -455,7 +455,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
 
         draw_image(scene, iconSave, 60, 890);
         draw_text(scene, "Save Settings", fontCardTitle, 120, 912, COLOR_WHITE);
-        draw_text(scene, "Configuration will be written to /data/GoldHEN/onefamily.ini", fontFooter, 120, 938, COLOR_TEXT_DIM);
+        draw_text(scene, "Configuration will be written to /data/onefamily/onefamily.ini", fontFooter, 120, 938, COLOR_TEXT_DIM);
 
         // Navigation Hints
         draw_image(scene, btnArrows, 1370, 901);
@@ -479,7 +479,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_image(scene, iconInfo, CARD_X + 24, 305);
         draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 318, COLOR_WHITE);
         draw_text(scene, "Version: v1.1.5-beta3 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 350, COLOR_BLUE_BRIGHT);
-        draw_text(scene, "Configuration File: /data/GoldHEN/onefamily.ini", fontCardDesc, CARD_X + 90, 380, COLOR_TEXT_DIM);
+        draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 380, COLOR_TEXT_DIM);
         draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 410, COLOR_TEXT_DIM);
 
         // Info Card 2: Supported Controllers & Connectivity
@@ -528,7 +528,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
 
         draw_rounded_rect(scene, boxX, boxY, boxW, boxH, 10, COLOR_TOAST_BG);
         draw_rounded_outline(scene, boxX, boxY, boxW, boxH, 10, COLOR_TOAST_BORDER, 2);
-        const char* msg = (toastMsg && toastMsg[0]) ? toastMsg : "Settings saved to /data/GoldHEN/onefamily.ini";
+        const char* msg = (toastMsg && toastMsg[0]) ? toastMsg : "Settings saved to /data/onefamily/onefamily.ini";
         draw_text_centered(scene, msg, fontCardTitle, 960, boxY + 36, COLOR_BLUE_BRIGHT);
     }
 }
@@ -580,7 +580,7 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
     // Item 2: Config
     if (res.configCreated) {
         draw_text(scene, res.isUpdate ? "[OK] Configuration:" : "[OK] Configuration:", fontCardTitle, cardX + 50, lineY, COLOR_BLUE_BRIGHT);
-        draw_text(scene, res.isUpdate ? "Replaced /data/GoldHEN/onefamily.ini with latest version & defaults" : "Initialized /data/GoldHEN/onefamily.ini with optimal settings", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
+        draw_text(scene, res.isUpdate ? "Replaced /data/onefamily/onefamily.ini with latest version & defaults" : "Initialized /data/onefamily/onefamily.ini with optimal settings", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);
     } else {
         draw_text(scene, "[FAIL] Configuration:", fontCardTitle, cardX + 50, lineY, Color{ 255, 80, 80 });
         draw_text(scene, "Failed to create configuration file", fontCardDesc, cardX + 300, lineY, COLOR_WHITE);

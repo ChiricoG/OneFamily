@@ -7,6 +7,8 @@
 #include "ps_controllers.h"
 #include "switch_controller.h"
 #include "stadia.h"
+#include "generic_hid.h"
+#include "log.h"
 #include <string.h>
 
 #define XBOX_VID                    0x045E
@@ -108,7 +110,22 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
             out->ep_in         = ep_in;
             out->ep_out        = ep_out;
             out->is_wireless   = is_wireless;
+            out->kbd_interface_num = 0xFF;
             found = 1;
+        }
+    }
+
+    if (found) {
+        for (int i = 0; i < cfg->bNumInterfaces; i++) {
+            const struct libusb_interface* intf = &cfg->interface[i];
+            for (int a = 0; a < intf->num_altsetting; a++) {
+                const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
+                if (alt->bInterfaceClass == USB_CLASS_HID && alt->bInterfaceSubClass == 1 && alt->bInterfaceProtocol == 1) {
+                    out->kbd_interface_num = alt->bInterfaceNumber;
+                    daemon_log(LOG_LEVEL_INFO, "Composite keyboard interface %d detected on XInput device", out->kbd_interface_num);
+                    break;
+                }
+            }
         }
     }
 
@@ -121,14 +138,19 @@ static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* ou
 
     struct libusb_config_descriptor* cfg = NULL;
     if (usbd_get_active_config_descriptor(dev, &cfg) != 0 || !cfg) {
+        daemon_log(LOG_LEVEL_WARN, "DualSense: usbd_get_active_config_descriptor returned error or NULL");
         return 0;
     }
 
+    daemon_log(LOG_LEVEL_INFO, "DualSense Config: bNumInterfaces=%d", cfg->bNumInterfaces);
     int found = 0;
-    for (int i = 0; i < cfg->bNumInterfaces && !found; i++) {
+    for (int i = 0; i < cfg->bNumInterfaces; i++) {
         const struct libusb_interface* intf = &cfg->interface[i];
-        for (int a = 0; a < intf->num_altsetting && !found; a++) {
+        for (int a = 0; a < intf->num_altsetting; a++) {
             const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
+            daemon_log(LOG_LEVEL_INFO, "DualSense IF %d (alt %d): class=0x%02X subclass=0x%02X proto=0x%02X ep_count=%d",
+                       alt->bInterfaceNumber, alt->bAlternateSetting, alt->bInterfaceClass,
+                       alt->bInterfaceSubClass, alt->bInterfaceProtocol, alt->bNumEndpoints);
 
             if (alt->bInterfaceClass != USB_CLASS_HID) continue;
 
@@ -136,6 +158,8 @@ static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* ou
             uint8_t ep_out = 0;
             for (int k = 0; k < alt->bNumEndpoints; k++) {
                 const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
+                daemon_log(LOG_LEVEL_INFO, "  DualSense HID EP [%d]: addr=0x%02X attr=0x%02X maxPkt=%d",
+                           k, ep->bEndpointAddress, ep->bmAttributes, ep->wMaxPacketSize);
                 if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
                     if (ep->bEndpointAddress & EP_DIR_IN) {
                         if (ep_in == 0) ep_in = ep->bEndpointAddress;
@@ -145,7 +169,7 @@ static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* ou
                 }
             }
 
-            if (ep_in != 0) {
+            if (ep_in != 0 && !found) {
                 out->type          = CONTROLLER_DUALSENSE;
                 out->interface_num = alt->bInterfaceNumber;
                 out->alt_setting   = alt->bAlternateSetting;
@@ -251,6 +275,7 @@ static int detect_stadia_endpoints(libusb_device* dev, DetectedController* out) 
 int controller_identify(libusb_device* dev, const struct libusb_device_descriptor* desc, DetectedController* out) {
     if (!dev || !desc || !out) return 0;
     memset(out, 0, sizeof(*out));
+    out->kbd_interface_num = 0xFF;
 
     // 1. Sony DualShock 3 & DualSense
     if (desc->idVendor == SONY_VID) {
@@ -267,7 +292,7 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->vid = desc->idVendor;
             out->pid = desc->idProduct;
             if (!detect_dualsense_endpoints(dev, out)) {
-                // Fallback to standard DualSense HID interface if descriptor parse failed
+                daemon_log(LOG_LEVEL_WARN, "DualSense descriptor parse failed, using fallback IF=3 EP_IN=0x84 EP_OUT=0x03");
                 out->interface_num = 3;
                 out->ep_in = 0x84;
                 out->ep_out = 0x03;
@@ -348,6 +373,14 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
 
     // 6. Generic Descriptor-based detection (Third-Party Xbox 360 / Xbox One)
     if (controller_detect_by_descriptor(dev, out)) {
+        out->generic = 1;
+        out->vid = desc->idVendor;
+        out->pid = desc->idProduct;
+        return 1;
+    }
+
+    // 7. Generic HID Controller Fallback (AnyPad model: 8BitDo, generic DInput pads, fightsticks)
+    if (generic_hid_detect(dev, out)) {
         out->generic = 1;
         out->vid = desc->idVendor;
         out->pid = desc->idProduct;

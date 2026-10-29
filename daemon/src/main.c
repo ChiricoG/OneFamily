@@ -19,7 +19,10 @@ static void check_vibe_file(void) {
     static uint8_t s_last_sm = 0;
     static int s_had_file = 0;
 
-    int fd = daemon_sys_open("/data/GoldHEN/onefamily.vibe", 0 /* O_RDONLY */, 0);
+    int fd = daemon_sys_open("/data/onefamily/onefamily.vibe", 0 /* O_RDONLY */, 0);
+    if (fd < 0) {
+        fd = daemon_sys_open("/data/GoldHEN/onefamily.vibe", 0 /* O_RDONLY */, 0);
+    }
     if (fd >= 0) {
         uint8_t vibe[2] = {0, 0};
         int n = daemon_sys_read(fd, vibe, sizeof(vibe));
@@ -51,7 +54,12 @@ int main(int argc, char *argv[]) {
     daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon v1.1.5-beta3 (Native) Starting ===");
     daemon_kernel_init();
 
-    // 2. Load user configuration from /data/GoldHEN/onefamily.ini (fallback: xbox_controller.ini)
+    // Ensure persistent storage and controller profile directories exist
+    daemon_sys_mkdir("/data", 0777);
+    daemon_sys_mkdir("/data/onefamily", 0777);
+    daemon_sys_mkdir("/data/onefamily/controllers", 0777);
+
+    // 2. Load user configuration from /data/onefamily/onefamily.ini (fallback: GoldHEN)
     daemon_config_load(&g_daemon_config);
     daemon_log(LOG_LEVEL_INFO, "Configuration loaded: guide_action=%d, deadzone=%d, trigger=%d, rumble=%d",
                g_daemon_config.guide_action,

@@ -105,36 +105,54 @@ static bool update_payloads_ini() {
         return true;
     }
 
-    // If entry is already present, nothing to add
-    if (content.find("onefamily.bin") != std::string::npos) {
-        return true;
-    }
+    bool modified = false;
 
-    // Find [AutoRun] section (case-insensitive)
-    std::string lower = content;
-    for (size_t i = 0; i < lower.size(); i++) {
-        lower[i] = (char)::tolower((unsigned char)lower[i]);
-    }
-
-    size_t pos = lower.find("[autorun]");
-    if (pos != std::string::npos) {
-        // Insert right after the [AutoRun] line
-        size_t eol = content.find('\n', pos);
-        if (eol == std::string::npos) {
-            content += "\n" + entryLine + "\n";
+    // Remove any obsolete legacy xbox_controller.bin autorun lines
+    size_t xpos = 0;
+    while ((xpos = content.find("xbox_controller.bin")) != std::string::npos) {
+        size_t lineStart = content.rfind('\n', xpos);
+        if (lineStart == std::string::npos) lineStart = 0;
+        else lineStart++; // move past '\n'
+        size_t lineEnd = content.find('\n', xpos);
+        if (lineEnd == std::string::npos) {
+            content.erase(lineStart);
         } else {
-            content.insert(eol + 1, entryLine + "\n");
+            content.erase(lineStart, lineEnd - lineStart + 1);
         }
-    } else {
-        // Section not present; append to end
-        if (!content.empty() && content.back() != '\n') {
-            content += "\n";
-        }
-        content += "\n[AutoRun]\n" + entryLine + "\n";
+        modified = true;
     }
 
-    write_text_file(PAYLOADS_INI_PATH, content);
-    write_text_file(PAYLOADS_INI_USER_PATH, content);
+    // Ensure onefamily.bin is present in [AutoRun]
+    if (content.find("onefamily.bin") == std::string::npos) {
+        // Find [AutoRun] section (case-insensitive)
+        std::string lower = content;
+        for (size_t i = 0; i < lower.size(); i++) {
+            lower[i] = (char)::tolower((unsigned char)lower[i]);
+        }
+
+        size_t pos = lower.find("[autorun]");
+        if (pos != std::string::npos) {
+            // Insert right after the [AutoRun] line
+            size_t eol = content.find('\n', pos);
+            if (eol == std::string::npos) {
+                content += "\n" + entryLine + "\n";
+            } else {
+                content.insert(eol + 1, entryLine + "\n");
+            }
+        } else {
+            // Section not present; append to end
+            if (!content.empty() && content.back() != '\n') {
+                content += "\n";
+            }
+            content += "\n[AutoRun]\n" + entryLine + "\n";
+        }
+        modified = true;
+    }
+
+    if (modified) {
+        write_text_file(PAYLOADS_INI_PATH, content);
+        write_text_file(PAYLOADS_INI_USER_PATH, content);
+    }
     return true;
 }
 
@@ -219,6 +237,284 @@ bool Installer::isInstalled() {
     return true;
 }
 
+static const struct {
+    const char* filename;
+    const char* content;
+} k_factory_profiles[] = {
+    {
+        "default.ini",
+        "# OneFamily Generic Controller Profile - Default Template\n"
+        "[Info]\n"
+        "name = Generic Controller (Default)\n"
+        "\n"
+        "[Buttons]\n"
+        "button1 = cross\n"
+        "button2 = circle\n"
+        "button3 = square\n"
+        "button4 = triangle\n"
+        "button5 = l1\n"
+        "button6 = r1\n"
+        "button7 = l2\n"
+        "button8 = r2\n"
+        "button9 = create\n"
+        "button10 = options\n"
+        "button11 = l3\n"
+        "button12 = r3\n"
+        "button13 = ps\n"
+        "button14 = touchpad\n"
+        "\n"
+        "[Axes]\n"
+        "lx = x\n"
+        "ly = y\n"
+        "rx = z\n"
+        "ry = rz\n"
+        "l2 = rx\n"
+        "r2 = ry\n"
+        "\n"
+        "[Invert]\n"
+        "invert_ly = 0\n"
+        "invert_ry = 0\n"
+    },
+    {
+        "2DC8_310B.ini",
+        "# OneFamily Generic Controller Profile\n"
+        "[Info]\n"
+        "name = 8BitDo Ultimate 2 Wireless\n"
+        "vendor_id = 0x2DC8\n"
+        "product_id = 0x310B\n"
+        "\n"
+        "[Buttons]\n"
+        "button1 = cross\n"
+        "button2 = circle\n"
+        "button3 = none\n"
+        "button4 = square\n"
+        "button5 = triangle\n"
+        "button6 = none\n"
+        "button7 = l1\n"
+        "button8 = r1\n"
+        "button9 = l2\n"
+        "button10 = r2\n"
+        "button11 = create\n"
+        "button12 = options\n"
+        "button13 = ps\n"
+        "button14 = l3\n"
+        "button15 = r3\n"
+        "\n"
+        "[Axes]\n"
+        "lx = x\n"
+        "ly = y\n"
+        "rx = z\n"
+        "ry = rz\n"
+        "l2 = rx\n"
+        "r2 = ry\n"
+        "\n"
+        "[Invert]\n"
+        "invert_ly = 0\n"
+        "invert_ry = 0\n"
+    },
+    {
+        "2DC8_3012.ini",
+        "# OneFamily Generic Controller Profile\n"
+        "[Info]\n"
+        "name = 8BitDo Ultimate 2.4G\n"
+        "vendor_id = 0x2DC8\n"
+        "product_id = 0x3012\n"
+        "\n"
+        "[Buttons]\n"
+        "button1 = cross\n"
+        "button2 = circle\n"
+        "button3 = none\n"
+        "button4 = square\n"
+        "button5 = triangle\n"
+        "button6 = none\n"
+        "button7 = l1\n"
+        "button8 = r1\n"
+        "button9 = l2\n"
+        "button10 = r2\n"
+        "button11 = create\n"
+        "button12 = options\n"
+        "button13 = ps\n"
+        "button14 = l3\n"
+        "button15 = r3\n"
+        "\n"
+        "[Axes]\n"
+        "lx = x\n"
+        "ly = y\n"
+        "rx = z\n"
+        "ry = rz\n"
+        "l2 = rx\n"
+        "r2 = ry\n"
+        "\n"
+        "[Invert]\n"
+        "invert_ly = 0\n"
+        "invert_ry = 0\n"
+    },
+    {
+        "2DC8_6012.ini",
+        "# OneFamily Generic Controller Profile\n"
+        "[Info]\n"
+        "name = 8BitDo Ultimate 2C Wireless\n"
+        "vendor_id = 0x2DC8\n"
+        "product_id = 0x6012\n"
+        "\n"
+        "[Buttons]\n"
+        "button1 = cross\n"
+        "button2 = circle\n"
+        "button3 = none\n"
+        "button4 = square\n"
+        "button5 = triangle\n"
+        "button6 = none\n"
+        "button7 = l1\n"
+        "button8 = r1\n"
+        "button9 = l2\n"
+        "button10 = r2\n"
+        "button11 = create\n"
+        "button12 = options\n"
+        "button13 = ps\n"
+        "button14 = l3\n"
+        "button15 = r3\n"
+        "\n"
+        "[Axes]\n"
+        "lx = x\n"
+        "ly = y\n"
+        "rx = z\n"
+        "ry = rz\n"
+        "l2 = rx\n"
+        "r2 = ry\n"
+        "\n"
+        "[Invert]\n"
+        "invert_ly = 0\n"
+        "invert_ry = 0\n"
+    },
+    {
+        "2DC8_2100.ini",
+        "# OneFamily Generic Controller Profile\n"
+        "[Info]\n"
+        "name = 8BitDo SN30 Pro\n"
+        "vendor_id = 0x2DC8\n"
+        "product_id = 0x2100\n"
+        "\n"
+        "[Buttons]\n"
+        "button1 = cross\n"
+        "button2 = circle\n"
+        "button3 = none\n"
+        "button4 = square\n"
+        "button5 = triangle\n"
+        "button6 = none\n"
+        "button7 = l1\n"
+        "button8 = r1\n"
+        "button9 = l2\n"
+        "button10 = r2\n"
+        "button11 = create\n"
+        "button12 = options\n"
+        "button13 = ps\n"
+        "button14 = l3\n"
+        "button15 = r3\n"
+        "\n"
+        "[Axes]\n"
+        "lx = x\n"
+        "ly = y\n"
+        "rx = z\n"
+        "ry = rz\n"
+        "l2 = rx\n"
+        "r2 = ry\n"
+        "\n"
+        "[Invert]\n"
+        "invert_ly = 0\n"
+        "invert_ry = 0\n"
+    },
+    {
+        "3537_1022.ini",
+        "# OneFamily Generic Controller Profile\n"
+        "[Info]\n"
+        "name = GameSir G7\n"
+        "vendor_id = 0x3537\n"
+        "product_id = 0x1022\n"
+        "\n"
+        "[Buttons]\n"
+        "button1 = cross\n"
+        "button2 = circle\n"
+        "button3 = none\n"
+        "button4 = square\n"
+        "button5 = triangle\n"
+        "button6 = none\n"
+        "button7 = l1\n"
+        "button8 = r1\n"
+        "button9 = l2\n"
+        "button10 = r2\n"
+        "button11 = create\n"
+        "button12 = options\n"
+        "button13 = ps\n"
+        "button14 = l3\n"
+        "button15 = r3\n"
+        "\n"
+        "[Axes]\n"
+        "lx = x\n"
+        "ly = y\n"
+        "rx = z\n"
+        "ry = rz\n"
+        "l2 = rx\n"
+        "r2 = ry\n"
+        "\n"
+        "[Invert]\n"
+        "invert_ly = 0\n"
+        "invert_ry = 0\n"
+    },
+    {
+        "FFFF_046E.ini",
+        "# OneFamily Generic Controller Profile\n"
+        "[Info]\n"
+        "name = GameSir G3s\n"
+        "vendor_id = 0xFFFF\n"
+        "product_id = 0x046E\n"
+        "\n"
+        "[Buttons]\n"
+        "button1 = cross\n"
+        "button2 = circle\n"
+        "button3 = none\n"
+        "button4 = square\n"
+        "button5 = triangle\n"
+        "button6 = none\n"
+        "button7 = l1\n"
+        "button8 = r1\n"
+        "button9 = l2\n"
+        "button10 = r2\n"
+        "button11 = create\n"
+        "button12 = options\n"
+        "button13 = ps\n"
+        "button14 = l3\n"
+        "button15 = r3\n"
+        "\n"
+        "[Axes]\n"
+        "lx = x\n"
+        "ly = y\n"
+        "rx = z\n"
+        "ry = rz\n"
+        "l2 = rx\n"
+        "r2 = ry\n"
+        "\n"
+        "[Invert]\n"
+        "invert_ly = 0\n"
+        "invert_ry = 0\n"
+    }
+};
+
+static void install_controller_profiles() {
+    for (size_t i = 0; i < sizeof(k_factory_profiles) / sizeof(k_factory_profiles[0]); i++) {
+        char path[128];
+        snprintf(path, sizeof(path), "/data/onefamily/controllers/%s", k_factory_profiles[i].filename);
+        // If default.ini already exists on disk, do not overwrite user modifications
+        if (strcmp(k_factory_profiles[i].filename, "default.ini") != 0 || !file_exists(path)) {
+            write_text_file(path, k_factory_profiles[i].content);
+        }
+
+        snprintf(path, sizeof(path), "/user/data/onefamily/controllers/%s", k_factory_profiles[i].filename);
+        if (strcmp(k_factory_profiles[i].filename, "default.ini") != 0 || !file_exists(path)) {
+            write_text_file(path, k_factory_profiles[i].content);
+        }
+    }
+}
+
 InstallResult Installer::runInstallation(bool isUpdate) {
     InstallResult res;
     res.isUpdate = isUpdate;
@@ -227,10 +523,14 @@ InstallResult Installer::runInstallation(bool isUpdate) {
     mkdir("/data", 0777);
     mkdir("/data/payloads", 0777);
     mkdir("/data/GoldHEN", 0777);
+    mkdir("/data/onefamily", 0777);
+    mkdir("/data/onefamily/controllers", 0777);
     mkdir("/user", 0777);
     mkdir("/user/data", 0777);
     mkdir("/user/data/payloads", 0777);
     mkdir("/user/data/GoldHEN", 0777);
+    mkdir("/user/data/onefamily", 0777);
+    mkdir("/user/data/onefamily/controllers", 0777);
 
     // 2. Read bundled payload from PKG
     std::vector<uint8_t> payloadData;
@@ -253,11 +553,29 @@ InstallResult Installer::runInstallation(bool isUpdate) {
         return res;
     }
 
-    // 4. Overwrite / replace configuration file with latest version and default layout
+    // 4. Migrate or initialize configuration file with user preferences preserved
     ConfigManager cfgMgr;
-    cfgMgr.getConfig().set_defaults();
-    cfgMgr.save(); // Overwrites /data/GoldHEN/onefamily.ini
-    sceKernelUnlink(LEGACY_INI_FILE_PATH); // Clean up legacy xbox_controller.ini if present
+    cfgMgr.load(); // Loads from /data/onefamily/onefamily.ini, or migrates from GoldHEN legacy paths, or sets defaults
+    cfgMgr.save(); // Writes to /data/onefamily/onefamily.ini
+
+    // Install default generic controller profiles in /data/onefamily/controllers/
+    install_controller_profiles();
+
+    // Clean up legacy files and orphan binaries if present
+    sceKernelUnlink("/data/payloads/xbox_controller.bin");
+    sceKernelUnlink("/user/data/payloads/xbox_controller.bin");
+    sceKernelUnlink(LEGACY_INI_FILE_PATH);      // /data/GoldHEN/onefamily.ini
+    sceKernelUnlink(OLD_LEGACY_INI_FILE_PATH);  // /data/GoldHEN/xbox_controller.ini
+    sceKernelUnlink("/user/data/GoldHEN/onefamily.ini");
+    sceKernelUnlink("/user/data/GoldHEN/xbox_controller.ini");
+    sceKernelUnlink("/data/GoldHEN/onefamily.log");
+    sceKernelUnlink("/data/GoldHEN/xbox_controller.log");
+    sceKernelUnlink("/user/data/GoldHEN/onefamily.log");
+    sceKernelUnlink("/user/data/GoldHEN/xbox_controller.log");
+    sceKernelUnlink("/data/GoldHEN/onefamily.vibe");
+    sceKernelUnlink("/user/data/GoldHEN/onefamily.vibe");
+    rmdir("/data/onefamily/maps");
+    rmdir("/user/data/onefamily/maps");
     res.configCreated = true;
 
     // 5. Update /data/GoldHEN/payloads.ini for permanent autoboot (checked and skipped if already present)

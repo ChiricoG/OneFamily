@@ -16,9 +16,16 @@
 
 static void send_vibe_to_daemon(uint8_t lgMotor, uint8_t smMotor) {
     if (lgMotor == 0 && smMotor == 0) {
+        sceKernelUnlink("/data/onefamily/onefamily.vibe");
+        sceKernelUnlink("/user/data/onefamily/onefamily.vibe");
         sceKernelUnlink("/data/GoldHEN/onefamily.vibe");
     } else {
-        int fd = sceKernelOpen("/data/GoldHEN/onefamily.vibe", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        mkdir("/data", 0777);
+        mkdir("/data/onefamily", 0777);
+        int fd = sceKernelOpen("/data/onefamily/onefamily.vibe", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd < 0) {
+            fd = sceKernelOpen("/user/data/onefamily/onefamily.vibe", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        }
         if (fd >= 0) {
             uint8_t data[2] = { lgMotor, smMotor };
             sceKernelWrite(fd, data, sizeof(data));
@@ -37,7 +44,7 @@ int main() {
     }
 
     // Initialize Config Manager
-    // NOTE: If /data/GoldHEN/xbox_controller.ini does not exist,
+    // NOTE: If /data/onefamily/onefamily.ini does not exist,
     // configMgr.load() automatically creates it with all default settings!
     ConfigManager configMgr;
     configMgr.load();
@@ -105,7 +112,7 @@ int main() {
     int activeTab = 0;
     int selectedCard = 0;
     int toastFrames = 0;
-    std::string toastText = "Settings saved to /data/GoldHEN/onefamily.ini";
+    std::string toastText = "Settings saved to /data/onefamily/onefamily.ini";
     int frameID = 0;
     uint32_t prevButtons = 0;
     TesterState tester;
@@ -199,7 +206,7 @@ int main() {
             // Save on CROSS (X)
             if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
                 if (configMgr.save()) {
-                    toastText = "Settings saved to /data/GoldHEN/onefamily.ini";
+                    toastText = "Settings saved to /data/onefamily/onefamily.ini";
                     toastFrames = 180; // ~3 seconds toast feedback
                 }
             }
