@@ -62,10 +62,10 @@ typedef struct __attribute__((packed)) {
     uint8_t buttons0;          // Y(1), B(2), A(4), X(8), L(16), R(32), ZL(64), ZR(128)
     uint8_t buttons1;          // Minus(1), Plus(2), L3(4), R3(8), Home(16), Capture(32)
     uint8_t hat;               // D-pad (0-7 directions, 8 centered)
-    int16_t left_stick_x;
-    int16_t left_stick_y;
-    int16_t right_stick_x;
-    int16_t right_stick_y;
+    uint16_t left_stick_x;
+    uint16_t left_stick_y;
+    uint16_t right_stick_x;
+    uint16_t right_stick_y;
 } SwitchSimpleReport;
 
 // Button byte 0 masks

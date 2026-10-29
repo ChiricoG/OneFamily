@@ -230,6 +230,24 @@ static void init_gip_controller(void) {
     daemon_sys_usleep(10000);
 }
 
+static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_num, uint8_t ep_out) {
+    daemon_log(LOG_LEVEL_INFO, "Sending Xbox 360 clone wake-up handshake (Shanwan/xpad, IF=%d)...", interface_num);
+    uint8_t dummy[20];
+    memset(dummy, 0, sizeof(dummy));
+    if (p_sceUsbdControlTransfer && h) {
+        // Linux xpad: bmRequestType=0xC1 (Vendor Interface IN), bRequest=0x01, wValue=0x0100, wIndex=interface_num, len=20
+        int ret = p_sceUsbdControlTransfer(h, 0xC1, 0x01, 0x0100, interface_num, dummy, sizeof(dummy), 100);
+        daemon_log(LOG_LEVEL_INFO, "Xbox 360 clone control handshake sent (ret=0x%08X)", ret);
+    }
+
+    if (ep_out && p_sceUsbdInterruptTransfer && h) {
+        int transferred = 0;
+        uint8_t led_pkt[3] = { 0x01, 0x03, 0x02 }; // LED 1 ON (Player 1)
+        int ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 100);
+        daemon_log(LOG_LEVEL_INFO, "Xbox 360 LED 1 command sent (ret=0x%08X)", ir);
+    }
+}
+
 static void init_dualsense_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Initializing DualSense controller (EP_IN:0x%02X, EP_OUT:0x%02X, IF:%d)...",
                g_usb_state.endpoint_in, g_usb_state.endpoint_out, g_claimed_interface);
@@ -554,7 +572,9 @@ static int scan_and_open(void) {
                         vpad_init();
                         vpad_send_data(&s_last_ds4);
 
-                        if (det.type == CONTROLLER_XBOXONE) {
+                        if (det.type == CONTROLLER_XBOX360) {
+                            init_xbox360_controller(h, det.interface_num, det.ep_out);
+                        } else if (det.type == CONTROLLER_XBOXONE) {
                             init_gip_controller();
                         } else if (det.type == CONTROLLER_DS3) {
                             uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
@@ -584,6 +604,31 @@ static int scan_and_open(void) {
 
     p_sceUsbdFreeDeviceList(list);
     return found ? 0 : -1;
+}
+
+static void encode_switch_rumble(uint8_t* out, uint8_t motor_large, uint8_t motor_small) {
+    if (motor_large == 0 && motor_small == 0) {
+        out[0] = 0x00;
+        out[1] = 0x01;
+        out[2] = 0x40;
+        out[3] = 0x40;
+        return;
+    }
+    // High-frequency (small motor): 320 Hz (hf = 0x0074)
+    // Low-frequency (large motor): 160 Hz (lf = 0x3D)
+    uint16_t hf = 0x0074;
+    uint8_t lf = 0x3D;
+
+    // Amplitude encoding:
+    // High amp: 0x00 to 0xC8 (scale motor_small: 0..255 -> 0..0xC8)
+    uint8_t hf_amp = (uint8_t)(((uint32_t)motor_small * 0xC8) / 255);
+    // Low amp: 0x00 to 0x7F (scale motor_large: 0..255 -> 0..0x7F)
+    uint16_t lf_amp = (uint16_t)(((uint32_t)motor_large * 0x7F) / 255);
+
+    out[0] = (uint8_t)(hf & 0xFF);
+    out[1] = (uint8_t)(hf_amp | ((hf >> 8) & 0x01));
+    out[2] = (uint8_t)(lf | ((lf_amp >> 8) & 0x80));
+    out[3] = (uint8_t)(lf_amp & 0xFF);
 }
 
 void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
@@ -641,6 +686,19 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
     } else if (g_usb_state.type == CONTROLLER_DS3) {
         uint8_t pkt[8] = { 0x00, 0xFF, 0x00, (small_motor > 0) ? 1 : 0, large_motor, 0x00, 0x00, 0x00 };
         p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+    } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO || g_usb_state.type == CONTROLLER_SWITCH) {
+        uint8_t pkt[10];
+        static uint8_t s_switch_rumble_cnt = 0;
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x10; // Output report ID: Rumble only
+        pkt[1] = s_switch_rumble_cnt++ & 0x0F;
+        encode_switch_rumble(&pkt[2], large_motor, small_motor); // Left motor
+        encode_switch_rumble(&pkt[6], large_motor, small_motor); // Right motor
+
+        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+        if (ret != 0 && p_sceUsbdControlTransfer) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0210, g_claimed_interface, pkt, sizeof(pkt), 50);
+        }
     } else if (g_usb_state.type == CONTROLLER_DUALSENSE) {
         if (!vpad_is_active()) return;
         uint8_t pkt[64];
@@ -976,10 +1034,10 @@ void usb_driver_poll_step(void) {
                 sw_fallback.buttons0 = simple->buttons0;
                 sw_fallback.buttons1 = simple->buttons1;
                 sw_fallback.hat = simple->hat;
-                sw_fallback.left_stick_x = (uint8_t)(((int32_t)simple->left_stick_x + 32768) >> 8);
-                sw_fallback.left_stick_y = (uint8_t)(((int32_t)simple->left_stick_y + 32768) >> 8);
-                sw_fallback.right_stick_x = (uint8_t)(((int32_t)simple->right_stick_x + 32768) >> 8);
-                sw_fallback.right_stick_y = (uint8_t)(((int32_t)simple->right_stick_y + 32768) >> 8);
+                sw_fallback.left_stick_x = (uint8_t)(simple->left_stick_x >> 8);
+                sw_fallback.left_stick_y = (uint8_t)(simple->left_stick_y >> 8);
+                sw_fallback.right_stick_x = (uint8_t)(simple->right_stick_x >> 8);
+                sw_fallback.right_stick_y = (uint8_t)(simple->right_stick_y >> 8);
 
                 translator_convert_switch(&sw_fallback, &ds4, &s_trans_cfg);
                 if (sw_fallback.buttons1 & SWITCH_BTN_HOME) {

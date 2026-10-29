@@ -411,6 +411,22 @@ static uint32_t switch_hat_to_dpad(uint8_t hat) {
 }
 
 /*
+ * Switch stick normalization helper:
+ * Switch hardware ADCs and uncalibrated 12-bit/16-bit throws span only ~71% of full range
+ * (~800..3300 in 12-bit, ~38..218 in 8-bit space).
+ * Scales stick deflection from center (128) by 1.42 (142/100) to ensure cardinal directions
+ * cleanly reach 0 and 255 (full circular deflection) instead of being restricted to a 71% box.
+ */
+static inline uint8_t scale_switch_stick_axis(uint8_t val) {
+    int32_t diff = (int32_t)val - 128;
+    int32_t scaled = (diff * 142) / 100;
+    int32_t out = 128 + scaled;
+    if (out < 0) out = 0;
+    if (out > 255) out = 255;
+    return (uint8_t)out;
+}
+
+/*
  * Switch Input-Only controller translation function
  */
 void translator_convert_switch(const SwitchInputOnlyReport* sw, OrbisPadData* ds4, const TranslatorConfig* config) {
@@ -428,13 +444,13 @@ void translator_convert_switch(const SwitchInputOnlyReport* sw, OrbisPadData* ds
     memset(ds4, 0, sizeof(OrbisPadData));
 
     // ========================================
-    // ANALOG STICKS (already 8-bit 0-255 format)
+    // ANALOG STICKS (normalized 8-bit 0-255 format)
     // ========================================
 
-    uint8_t lx = sw->left_stick_x;
-    uint8_t ly = sw->left_stick_y;
-    uint8_t rx = sw->right_stick_x;
-    uint8_t ry = sw->right_stick_y;
+    uint8_t lx = scale_switch_stick_axis(sw->left_stick_x);
+    uint8_t ly = scale_switch_stick_axis(sw->left_stick_y);
+    uint8_t rx = scale_switch_stick_axis(sw->right_stick_x);
+    uint8_t ry = scale_switch_stick_axis(sw->right_stick_y);
 
     // Apply Y-axis inversion if configured
     if (config->invert_left_y) {
@@ -586,12 +602,12 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
     uint16_t raw_rx = (uint16_t)sw->right_stick[0] | (((uint16_t)sw->right_stick[1] & 0x0F) << 8);
     uint16_t raw_ry = (uint16_t)(sw->right_stick[1] >> 4) | (((uint16_t)sw->right_stick[2]) << 4);
 
-    // Scale 12-bit (0..4095) to 8-bit (0..255)
+    // Scale 12-bit (0..4095) to 8-bit (0..255) with Switch throw normalization
     // Switch Pro native Y axis matches PlayStation DS4 coordinate space (0 = top, 255 = bottom)
-    uint8_t lx = (uint8_t)(raw_lx >> 4);
-    uint8_t ly = (uint8_t)(raw_ly >> 4);
-    uint8_t rx = (uint8_t)(raw_rx >> 4);
-    uint8_t ry = (uint8_t)(raw_ry >> 4);
+    uint8_t lx = scale_switch_stick_axis((uint8_t)(raw_lx >> 4));
+    uint8_t ly = scale_switch_stick_axis((uint8_t)(raw_ly >> 4));
+    uint8_t rx = scale_switch_stick_axis((uint8_t)(raw_rx >> 4));
+    uint8_t ry = scale_switch_stick_axis((uint8_t)(raw_ry >> 4));
 
     // Apply Y-axis inversion if configured
     if (config->invert_left_y) {
