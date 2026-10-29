@@ -4,6 +4,7 @@
 #include "config_manager.h"
 #include "installer.h"
 #include "hid_profile.h"
+#include "pkg_updater.h"
 #include <orbis/Pad.h>
 #include <string>
 
@@ -45,7 +46,8 @@ public:
                 const char* toastMsg = NULL,
                 bool hidConnected = false, const HidStatus* hidStatus = NULL,
                 const HidProfile* hidProfile = NULL, int remapSelectedRow = 0,
-                bool remapTestMode = false);
+                bool remapTestMode = false,
+                const PkgUpdater* updater = NULL);
     void render_wizard(Scene2D* scene, const InstallResult& res, int frameID);
 
 private:
