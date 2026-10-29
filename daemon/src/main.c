@@ -8,6 +8,7 @@
 #include "config.h"
 #include "log.h"
 #include "daemon_syscalls.h"
+#include "generic_hid.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -90,6 +91,19 @@ int main(int argc, char *argv[]) {
         // Poll companion app vibration test IPC (~50 Hz = every 5 loops)
         if (++loop_count % 5 == 0) {
             check_vibe_file();
+        }
+
+        // Check if mapping reload was requested by Companion App (~10 Hz = every 25 loops)
+        if (loop_count % 25 == 0) {
+            int reload_fd = daemon_sys_open("/data/onefamily/onefamily.reload", 0 /* O_RDONLY */, 0);
+            if (reload_fd >= 0) {
+                daemon_sys_close(reload_fd);
+                daemon_sys_unlink("/data/onefamily/onefamily.reload");
+                if (g_usb_state.connected && g_usb_state.type == CONTROLLER_GENERIC_HID) {
+                    generic_hid_reload(g_usb_state.vid, g_usb_state.pid);
+                    daemon_notify("OneFamily: HID Profile Reloaded");
+                }
+            }
         }
 
         // Periodically check if configuration INI file was updated (every ~1s = 250 loops)

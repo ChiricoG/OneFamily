@@ -14,6 +14,7 @@ int daemon_sys_open(const char *path, int flags, int mode);
 int daemon_sys_read(int fd, void *buf, size_t count);
 int daemon_sys_write(int fd, const void *buf, size_t count);
 int daemon_sys_close(int fd);
+int daemon_sys_unlink(const char *path);
 int daemon_sys_mkdir(const char *path, int mode);
 int daemon_sys_nanosleep(uint64_t ns);
 int daemon_sys_usleep(uint32_t us);

@@ -13,6 +13,7 @@
 #include "config_manager.h"
 #include "installer.h"
 #include "ui.h"
+#include "hid_profile.h"
 
 static void send_vibe_to_daemon(uint8_t lgMotor, uint8_t smMotor) {
     if (lgMotor == 0 && smMotor == 0) {
@@ -117,6 +118,13 @@ int main() {
     uint32_t prevButtons = 0;
     TesterState tester;
 
+    HidStatus hidStatus;
+    HidProfile::read_status(hidStatus);
+    HidProfile hidProfile;
+    bool hidLoaded = false;
+    int remapSelectedRow = 0;
+    bool remapTestMode = false;
+
     // Main Interaction Loop
     for (;;) {
         OrbisPadData padData;
@@ -129,33 +137,60 @@ int main() {
         uint32_t justPressed = curButtons & ~prevButtons;
         prevButtons = curButtons;
 
+        // Poll HID controller status every 20 frames (~3 Hz)
+        if (frameID % 20 == 0) {
+            HidProfile::read_status(hidStatus);
+        }
+        bool isHidType = (hidStatus.type == "generic_hid" ||
+                          hidStatus.type == "Generic HID Gamepad" ||
+                          hidStatus.type.find("hid") != std::string::npos ||
+                          hidStatus.type.find("HID") != std::string::npos);
+        bool hasHid = (hidStatus.connected && isHidType);
+        if (hasHid && !hidLoaded) {
+            hidProfile.load(hidStatus.vid, hidStatus.pid, hidStatus.nbuttons);
+            hidLoaded = true;
+        } else if (!hasHid) {
+            hidLoaded = false;
+        }
+
+        int numTabs = hasHid ? 4 : 3;
+        if (activeTab >= numTabs) {
+            activeTab = numTabs - 1;
+        }
+
         AppConfig& cfg = configMgr.getConfig();
 
-        // Exit on OPTIONS or CIRCLE
-        if ((justPressed & ORBIS_PAD_BUTTON_OPTIONS) || (justPressed & ORBIS_PAD_BUTTON_CIRCLE)) {
+        // Exit on OPTIONS or CIRCLE (suspended during Remap Test Mode)
+        if (!remapTestMode && ((justPressed & ORBIS_PAD_BUTTON_OPTIONS) || (justPressed & ORBIS_PAD_BUTTON_CIRCLE))) {
             break;
         }
 
-        // Tab Switching via L1 / R1 (3 Tabs: 0 = Settings, 1 = Tester & Calibration, 2 = Info)
-        if (justPressed & ORBIS_PAD_BUTTON_L1) {
-            activeTab = (activeTab + 2) % 3;
-            if (activeTab != 1 && tester.rumblePhase != 0) {
-                tester.rumbleFrames = 0;
-                tester.rumblePhase = 0;
-                OrbisPadVibeParam vibe = { 0, 0 };
-                if (padHandle >= 0) scePadSetVibration(padHandle, &vibe);
-                send_vibe_to_daemon(0, 0);
+        // Tab Switching via L1 / R1 (suspended during Remap Test Mode)
+        if (!remapTestMode) {
+            if (justPressed & ORBIS_PAD_BUTTON_L1) {
+                activeTab = (activeTab + numTabs - 1) % numTabs;
+                if (activeTab != 1 && tester.rumblePhase != 0) {
+                    tester.rumbleFrames = 0;
+                    tester.rumblePhase = 0;
+                    OrbisPadVibeParam vibe = { 0, 0 };
+                    if (padHandle >= 0) scePadSetVibration(padHandle, &vibe);
+                    send_vibe_to_daemon(0, 0);
+                }
+            }
+            if (justPressed & ORBIS_PAD_BUTTON_R1) {
+                activeTab = (activeTab + 1) % numTabs;
+                if (activeTab != 1 && tester.rumblePhase != 0) {
+                    tester.rumbleFrames = 0;
+                    tester.rumblePhase = 0;
+                    OrbisPadVibeParam vibe = { 0, 0 };
+                    if (padHandle >= 0) scePadSetVibration(padHandle, &vibe);
+                    send_vibe_to_daemon(0, 0);
+                }
             }
         }
-        if (justPressed & ORBIS_PAD_BUTTON_R1) {
-            activeTab = (activeTab + 1) % 3;
-            if (activeTab != 1 && tester.rumblePhase != 0) {
-                tester.rumbleFrames = 0;
-                tester.rumblePhase = 0;
-                OrbisPadVibeParam vibe = { 0, 0 };
-                if (padHandle >= 0) scePadSetVibration(padHandle, &vibe);
-                send_vibe_to_daemon(0, 0);
-            }
+
+        if (activeTab != 2) {
+            remapTestMode = false;
         }
 
         if (activeTab == 0) {
@@ -296,6 +331,43 @@ int main() {
                     tester.calib.suggestedIndex = bestIdx;
                 }
             }
+        } else if (activeTab == 2 && hasHid) {
+            // --- REMAP HID TAB ---
+            // R3 toggles between Edit Mode and Test Mode (no intrusive toast needed)
+            if (justPressed & ORBIS_PAD_BUTTON_R3) {
+                remapTestMode = !remapTestMode;
+            }
+
+            if (!remapTestMode) {
+                if (justPressed & ORBIS_PAD_BUTTON_UP) {
+                    remapSelectedRow = (remapSelectedRow + ACT_COUNT - 1) % ACT_COUNT;
+                }
+                if (justPressed & ORBIS_PAD_BUTTON_DOWN) {
+                    remapSelectedRow = (remapSelectedRow + 1) % ACT_COUNT;
+                }
+                if (justPressed & ORBIS_PAD_BUTTON_LEFT) {
+                    hidProfile.cycle_button(remapSelectedRow, -1);
+                }
+                if (justPressed & ORBIS_PAD_BUTTON_RIGHT) {
+                    hidProfile.cycle_button(remapSelectedRow, 1);
+                }
+                if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
+                    if (hidProfile.save(hidStatus.vid, hidStatus.pid, hidStatus.name)) {
+                        toastText = "Profile saved & active!";
+                        toastFrames = 180;
+                    }
+                }
+                if (justPressed & ORBIS_PAD_BUTTON_SQUARE) {
+                    hidProfile.reset_defaults(hidStatus.nbuttons);
+                    toastText = "Defaults restored (press X to save)";
+                    toastFrames = 180;
+                }
+                if (justPressed & ORBIS_PAD_BUTTON_TRIANGLE) {
+                    hidProfile.load(hidStatus.vid, hidStatus.pid, hidStatus.nbuttons);
+                    toastText = "Profile reloaded from disk";
+                    toastFrames = 180;
+                }
+            }
         } else {
             // In Info tab: SQUARE re-runs installation & ensures files/autoboot are up-to-date
             if (justPressed & ORBIS_PAD_BUTTON_SQUARE) {
@@ -315,7 +387,8 @@ int main() {
         }
 
         // Render UI
-        ui->render(scene, cfg, activeTab, selectedCard, toastFrames, padData, tester, toastText.c_str());
+        ui->render(scene, cfg, activeTab, selectedCard, toastFrames, padData, tester, toastText.c_str(),
+                   hasHid, &hidStatus, &hidProfile, remapSelectedRow, remapTestMode);
 
         // Flip & VSync
         scene->SubmitFlip(frameID);

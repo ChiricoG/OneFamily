@@ -47,6 +47,16 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
 void generic_hid_reset(void);
 
 /*
+ * Get detected button count for the current generic HID controller.
+ */
+int generic_hid_get_nbuttons(void);
+
+/*
+ * Reload controller .ini mapping for the specified device.
+ */
+void generic_hid_reload(uint16_t vid, uint16_t pid);
+
+/*
  * Parse an incoming USB interrupt report into OrbisPadData.
  *
  * @param rx    Raw USB report buffer

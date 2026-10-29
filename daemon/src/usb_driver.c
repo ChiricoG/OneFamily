@@ -29,6 +29,8 @@ static int g_claimed_interface = -1;
 static int s_claimed_kbd_interface = -1;
 static uint8_t s_xboxone_guide = 0;
 static OrbisPadData s_last_ds4;
+static const char* controller_type_to_str(ControllerType type);
+static const char* controller_type_to_id(ControllerType type);
 
 // libSceUsbd dynamic function pointers
 typedef int32_t (*sceUsbdInit_t)(void);
@@ -134,11 +136,39 @@ static int load_usbd(void) {
 
 static int s_logged_first_report = 0;
 static int s_last_guide_pressed = 0;
+static int s_consecutive_disconnects = 0;
+static int s_consecutive_transfer_errors = 0;
+static int s_consecutive_timeouts = 0;
+
+static void write_status_file(bool connected, ControllerType type, uint16_t vid, uint16_t pid, const char* name, int nbuttons) {
+    daemon_sys_mkdir("/data", 0777);
+    daemon_sys_mkdir("/data/onefamily", 0777);
+    int fd = daemon_sys_open("/data/onefamily/onefamily.status", 0x0001 | 0x0200 | 0x0400, 0666);
+    if (fd >= 0) {
+        char buf[256];
+        int len = snprintf(buf, sizeof(buf),
+            "connected = %d\n"
+            "type = %s\n"
+            "vid = 0x%04X\n"
+            "pid = 0x%04X\n"
+            "name = %s\n"
+            "nbuttons = %d\n",
+            connected ? 1 : 0,
+            controller_type_to_id(type),
+            vid, pid,
+            name ? name : "Unknown",
+            nbuttons
+        );
+        daemon_sys_write(fd, buf, len);
+        daemon_sys_close(fd);
+    }
+}
 
 static void close_controller(void) {
     bool had_vpad = vpad_is_active();
     vpad_shutdown();
     generic_hid_reset();
+    write_status_file(false, CONTROLLER_NONE, 0, 0, "None", 0);
     if (g_dev_handle) {
         if (s_claimed_kbd_interface >= 0 && p_sceUsbdReleaseInterface) {
             p_sceUsbdReleaseInterface(g_dev_handle, s_claimed_kbd_interface);
@@ -159,6 +189,9 @@ static void close_controller(void) {
     s_xboxone_guide = 0;
     s_logged_first_report = 0;
     s_last_guide_pressed = 0;
+    s_consecutive_disconnects = 0;
+    s_consecutive_transfer_errors = 0;
+    s_consecutive_timeouts = 0;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
     s_last_ds4.leftStick.x = 128;
     s_last_ds4.leftStick.y = 128;
@@ -362,6 +395,20 @@ static const char* controller_type_to_str(ControllerType type) {
     }
 }
 
+static const char* controller_type_to_id(ControllerType type) {
+    switch (type) {
+        case CONTROLLER_XBOX360:   return "xbox360";
+        case CONTROLLER_XBOXONE:   return "xboxone";
+        case CONTROLLER_SWITCH:    return "switch";
+        case CONTROLLER_SWITCH_PRO:return "switch_pro";
+        case CONTROLLER_DS3:       return "ds3";
+        case CONTROLLER_DUALSENSE: return "dualsense";
+        case CONTROLLER_STADIA:    return "stadia";
+        case CONTROLLER_GENERIC_HID:return "generic_hid";
+        default:                   return "none";
+    }
+}
+
 static int s_logged_first_scan = 0;
 
 static int scan_and_open(void) {
@@ -483,6 +530,14 @@ static int scan_and_open(void) {
                     g_usb_state.is_wireless = det.is_wireless;
                     found = 1;
 
+                    if (det.type == CONTROLLER_GENERIC_HID) {
+                        generic_hid_setup(h, desc.idVendor, desc.idProduct, det.interface_num, p_sceUsbdControlTransfer);
+                    }
+
+                    write_status_file(true, det.type, desc.idVendor, desc.idProduct,
+                                      controller_type_to_str(det.type),
+                                      (det.type == CONTROLLER_GENERIC_HID) ? generic_hid_get_nbuttons() : 16);
+
                     daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X, wireless=%d)",
                                controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in, det.is_wireless);
 
@@ -494,9 +549,10 @@ static int scan_and_open(void) {
                     s_last_ds4.connected = 1;
                     s_last_ds4.count = 1;
 
-                    if (det.type != CONTROLLER_DUALSENSE && det.type != CONTROLLER_GENERIC_HID) {
+                    if (det.type != CONTROLLER_DUALSENSE) {
                         // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer
                         vpad_init();
+                        vpad_send_data(&s_last_ds4);
 
                         if (det.type == CONTROLLER_XBOXONE) {
                             init_gip_controller();
@@ -512,9 +568,6 @@ static int scan_and_open(void) {
 
                         daemon_notify("OneFamily: %s Connected",
                                       controller_type_to_str(det.type));
-                    } else if (det.type == CONTROLLER_GENERIC_HID) {
-                        generic_hid_setup(h, desc.idVendor, desc.idProduct, det.interface_num, p_sceUsbdControlTransfer);
-                        daemon_log(LOG_LEVEL_INFO, "Generic HID claimed: awaiting first valid input report before activating Virtual DS4");
                     } else {
                         daemon_log(LOG_LEVEL_INFO, "DualSense claimed: awaiting first valid input report before activating Virtual DS4");
                     }
@@ -650,6 +703,33 @@ static inline uint32_t get_guide_button_mask(void) {
 static TranslatorConfig s_trans_cfg;
 static uint64_t s_last_rescan_us = 0;
 
+static bool is_current_device_present_on_bus(void) {
+    if (!p_sceUsbdGetDeviceList || !p_sceUsbdFreeDeviceList) {
+        return true;
+    }
+    libusb_device** list = NULL;
+    ssize_t count = p_sceUsbdGetDeviceList(&list);
+    if (count <= 0 || !list) {
+        if (list) p_sceUsbdFreeDeviceList(list);
+        return false;
+    }
+    bool found = false;
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        if (p_sceUsbdGetDeviceDescriptor && p_sceUsbdGetDeviceDescriptor(list[i], &desc) == 0) {
+            if (desc.idVendor == g_usb_state.vid && desc.idProduct == g_usb_state.pid) {
+                found = true;
+                break;
+            }
+        } else if (list[i] == g_cur_dev) {
+            found = true;
+            break;
+        }
+    }
+    p_sceUsbdFreeDeviceList(list);
+    return found;
+}
+
 int usb_driver_init(void) {
     if (load_usbd() != 0) {
         return -1;
@@ -677,8 +757,8 @@ void usb_driver_poll_step(void) {
     uint8_t rx[128];
     int transferred = 0;
     int read_len = sizeof(rx);
-    if (g_usb_state.type == CONTROLLER_DUALSENSE) {
-        read_len = 64; // DualSense EP 0x84 wMaxPacketSize is strictly 64 bytes
+    if (g_usb_state.type == CONTROLLER_DUALSENSE || g_usb_state.type == CONTROLLER_GENERIC_HID) {
+        read_len = 64; // DualSense and Generic HID endpoints have wMaxPacketSize <= 64 bytes
     }
     int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 16);
 
@@ -703,12 +783,10 @@ void usb_driver_poll_step(void) {
         }
     }
 
-    static int s_consecutive_disconnects = 0;
-    static int s_consecutive_transfer_errors = 0;
-
     if (ret == 0 && transferred > 0) {
         s_consecutive_disconnects = 0;
         s_consecutive_transfer_errors = 0;
+        s_consecutive_timeouts = 0;
         if (!s_logged_first_report) {
             daemon_log(LOG_LEVEL_INFO, "USB first input report received (%d bytes) from %s",
                        transferred, controller_type_to_str(g_usb_state.type));
@@ -1012,21 +1090,20 @@ void usb_driver_poll_step(void) {
             }
 
             if (generic_hid_parse_report(rx, transferred, &ds4, &s_trans_cfg)) {
-                if (!vpad_is_active()) {
-                    daemon_log(LOG_LEVEL_INFO, "Generic HID first valid report received (%d bytes) - Activating Virtual DS4", transferred);
-                    vpad_init();
-                    daemon_notify("OneFamily: Generic Gamepad Connected");
-                }
-
-                // Combo: Share + Options -> Touchpad Click (Map/Inventory in games)
+                // Combo: Share + Options (Back + Start) -> PS Button (Home)
                 if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
                     ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                    ds4.buttons |= DS4_BUTTON_PS;
                 }
                 // Combo: Share + D-Pad Down -> PS Button (Home)
                 if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
                     ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
                     ds4.buttons |= DS4_BUTTON_PS;
+                }
+                // Combo: Share + D-Pad Up -> Touchpad Click (Map/Inventory in games)
+                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP)) {
+                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
+                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
                 }
 
                 s_last_ds4 = ds4;
@@ -1048,6 +1125,21 @@ void usb_driver_poll_step(void) {
         }
 
         if (ret == 0x80240007 || ret == -7) {
+            s_consecutive_timeouts++;
+            // Active bus presence probe: if device has timed out for ~30 consecutive polls (~500ms),
+            // verify if the device is still physically enumerated on the USB bus.
+            if (s_consecutive_timeouts >= 30) {
+                if (!is_current_device_present_on_bus()) {
+                    daemon_log(LOG_LEVEL_INFO, "USB controller physical disconnect confirmed (device gone from bus)");
+                    s_consecutive_timeouts = 0;
+                    s_consecutive_transfer_errors = 0;
+                    close_controller();
+                    return;
+                }
+                // Controller is still present on the bus, just idle
+                s_consecutive_timeouts = 0;
+            }
+
             if (g_usb_state.type == CONTROLLER_DUALSENSE) {
                 static int s_logged_ds_timeout = 0;
                 if (s_logged_ds_timeout < 5) {

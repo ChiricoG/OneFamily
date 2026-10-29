@@ -42,6 +42,19 @@
 		<file targ_path="assets/icons/btn_triangle.png" orig_path="assets/icons/btn_triangle.png" />
 		<file targ_path="assets/icons/btn_l1.png" orig_path="assets/icons/btn_l1.png" />
 		<file targ_path="assets/icons/btn_r1.png" orig_path="assets/icons/btn_r1.png" />
+		<file targ_path="assets/icons/btn_circle.png" orig_path="assets/icons/btn_circle.png" />
+		<file targ_path="assets/icons/btn_l2.png" orig_path="assets/icons/btn_l2.png" />
+		<file targ_path="assets/icons/btn_r2.png" orig_path="assets/icons/btn_r2.png" />
+		<file targ_path="assets/icons/btn_l3.png" orig_path="assets/icons/btn_l3.png" />
+		<file targ_path="assets/icons/btn_r3.png" orig_path="assets/icons/btn_r3.png" />
+		<file targ_path="assets/icons/btn_share.png" orig_path="assets/icons/btn_share.png" />
+		<file targ_path="assets/icons/btn_ps.png" orig_path="assets/icons/btn_ps.png" />
+		<file targ_path="assets/icons/btn_touchpad.png" orig_path="assets/icons/btn_touchpad.png" />
+		<file targ_path="assets/icons/btn_dpad_up.png" orig_path="assets/icons/btn_dpad_up.png" />
+		<file targ_path="assets/icons/btn_dpad_down.png" orig_path="assets/icons/btn_dpad_down.png" />
+		<file targ_path="assets/icons/btn_dpad_left.png" orig_path="assets/icons/btn_dpad_left.png" />
+		<file targ_path="assets/icons/btn_dpad_right.png" orig_path="assets/icons/btn_dpad_right.png" />
+		<file targ_path="assets/icons/card_icon_remap.png" orig_path="assets/icons/card_icon_remap.png" />
 		<file targ_path="assets/payload/onefamily.bin" orig_path="assets/payload/onefamily.bin" />
 	</files>
 	<rootdir>

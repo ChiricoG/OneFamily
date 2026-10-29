@@ -9,6 +9,7 @@
 
 #include "generic_hid.h"
 #include "log.h"
+#include "daemon_syscalls.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -334,7 +335,16 @@ static int parse_ini_line(GenericHidContext *g, char *line) {
     "button6=none\nbutton7=l1\nbutton8=r1\nbutton9=l2\nbutton10=r2\nbutton11=create\n" \
     "button12=options\nbutton13=ps\nbutton14=l3\nbutton15=r3\n"
 
+#define LOGITECH_DINPUT_ORDER \
+    "button1=square\nbutton2=cross\nbutton3=circle\nbutton4=triangle\n" \
+    "button5=l1\nbutton6=r1\nbutton7=l2\nbutton8=r2\n" \
+    "button9=share\nbutton10=options\nbutton11=l3\nbutton12=r3\n" \
+    "lx=x\nly=y\nrx=z\nry=rz\n"
+
 static const struct { uint16_t vid, pid; const char *map; } k_builtin[] = {
+    { 0x046D, 0xC216, LOGITECH_DINPUT_ORDER }, /* Logitech F310 / Dual Action (DirectInput mode) */
+    { 0x046D, 0xC219, LOGITECH_DINPUT_ORDER }, /* Logitech F710 Wireless (DirectInput mode) */
+    { 0x046D, 0xC218, LOGITECH_DINPUT_ORDER }, /* Logitech RumblePad 2 (DirectInput mode) */
     { 0xFFFF, 0x046E, ANDROID_ORDER },      /* GameSir G3s */
     { 0x05AC, 0x022D, ANDROID_ORDER },      /* GameSir G3s, alternate mode */
     { 0xFFFF, 0x046F, ANDROID_ORDER },      /* GameSir G4s */
@@ -400,24 +410,37 @@ static int builtin_map(GenericHidContext *g, uint16_t vid, uint16_t pid) {
 static void load_controller_ini(GenericHidContext *g, uint16_t vid, uint16_t pid, int has_builtin) {
     char path[128];
     snprintf(path, sizeof path, "%s/%04X_%04X.ini", CONTROLLERS_DIR, vid, pid);
-    FILE *f = fopen(path, "r");
-    if (!f) {
+    int fd = daemon_sys_open(path, 0 /* O_RDONLY */, 0);
+    if (fd < 0) {
         snprintf(path, sizeof path, "%s/%04x_%04x.ini", CONTROLLERS_DIR, vid, pid);
-        f = fopen(path, "r");
+        fd = daemon_sys_open(path, 0, 0);
     }
-    if (!f && !has_builtin) {
+    if (fd < 0 && !has_builtin) {
         snprintf(path, sizeof path, "%s/default.ini", CONTROLLERS_DIR);
-        f = fopen(path, "r");
+        fd = daemon_sys_open(path, 0, 0);
     }
-    if (!f) return;
+    if (fd < 0) return;
 
-    char line[256];
+    static char buf[4096];
+    memset(buf, 0, sizeof(buf));
+    int bytes_read = daemon_sys_read(fd, buf, sizeof(buf) - 1);
+    daemon_sys_close(fd);
+
+    if (bytes_read <= 0) return;
+
+    char *line = buf;
+    char *next_line = NULL;
     int line_no = 0;
-    while (fgets(line, sizeof line, f)) {
+    while (line && *line) {
+        next_line = strchr(line, '\n');
+        if (next_line) {
+            *next_line = '\0';
+            next_line++;
+        }
         line_no++;
         parse_ini_line(g, line);
+        line = next_line;
     }
-    fclose(f);
     daemon_log(LOG_LEVEL_INFO, "Generic HID: loaded controller INI %s (%d lines)", path, line_no);
 }
 
@@ -559,6 +582,17 @@ void generic_hid_reset(void) {
     s_state.lx = s_state.ly = s_state.rx = s_state.ry = 128;
 }
 
+int generic_hid_get_nbuttons(void) {
+    return s_ctx.nbuttons > 0 ? s_ctx.nbuttons : 16;
+}
+
+void generic_hid_reload(uint16_t vid, uint16_t pid) {
+    default_mapping(&s_ctx);
+    int has_builtin = builtin_map(&s_ctx, vid, pid);
+    load_controller_ini(&s_ctx, vid, pid, has_builtin);
+    daemon_log(LOG_LEVEL_INFO, "Generic HID: reloaded mapping for 0x%04X:0x%04X", vid, pid);
+}
+
 int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, const TranslatorConfig* cfg) {
     if (!rx || len <= 0 || !out) return 0;
 
@@ -661,12 +695,13 @@ int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, cons
     if (s_ctx.role[ROLE_L2] == AX_NONE && (mask & DS4_BUTTON_L2)) s_state.l2 = (b & DS4_BUTTON_L2) ? 255 : 0;
     if (s_ctx.role[ROLE_R2] == AX_NONE && (mask & DS4_BUTTON_R2)) s_state.r2 = (b & DS4_BUTTON_R2) ? 255 : 0;
 
-    // Output to OrbisPadData with deadzone and invert settings applied
+    // Output to OrbisPadData with deadzone applied
+    // Note: Standard HID already reports Y-axis with 0=UP and 255=DOWN matching PS4 DualShock 4
     uint8_t deadzone = cfg ? cfg->stick_deadzone : 15;
     out->leftStick.x  = translator_apply_deadzone(s_state.lx, deadzone);
-    out->leftStick.y  = translator_apply_deadzone(cfg && cfg->invert_left_y ? (uint8_t)(255 - s_state.ly) : s_state.ly, deadzone);
+    out->leftStick.y  = translator_apply_deadzone(s_state.ly, deadzone);
     out->rightStick.x = translator_apply_deadzone(s_state.rx, deadzone);
-    out->rightStick.y = translator_apply_deadzone(cfg && cfg->invert_right_y ? (uint8_t)(255 - s_state.ry) : s_state.ry, deadzone);
+    out->rightStick.y = translator_apply_deadzone(s_state.ry, deadzone);
     out->analogButtons.l2 = s_state.l2;
     out->analogButtons.r2 = s_state.r2;
     out->buttons = s_state.buttons;
