@@ -316,8 +316,17 @@ static void init_dualsense_controller(void) {
     init_pkt[46] = 0x00;       // Green
     init_pkt[47] = 0xFF;       // Blue (PlayStation Blue Lightbar)
 
-    int r = send_init_packet(init_pkt, sizeof(init_pkt));
-    daemon_log(LOG_LEVEL_INFO, "DualSense init output report (63B) sent via Interrupt OUT (ret=0x%08X)", r);
+    int sent = 0;
+    if (g_usb_state.endpoint_out && p_sceUsbdInterruptTransfer && g_dev_handle) {
+        int transferred = 0;
+        int r = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out, init_pkt, sizeof(init_pkt), &transferred, 100);
+        daemon_log(LOG_LEVEL_INFO, "DualSense init output report (63B) sent via Interrupt OUT (ret=0x%08X)", r);
+        if (r == 0) sent = 1;
+    }
+    if (!sent && p_sceUsbdControlTransfer && g_dev_handle) {
+        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, (uint16_t)g_claimed_interface, init_pkt, sizeof(init_pkt), 100);
+        daemon_log(LOG_LEVEL_INFO, "DualSense init output report sent via Control SET_REPORT (ret=0x%08X)", cr);
+    }
 }
 
 static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expected_ack, int timeout_ms) {
@@ -565,10 +574,9 @@ static int scan_and_open(void) {
                 }
 
                 if (p_sceUsbdClaimInterface(h, det.interface_num) == 0) {
-                    if (p_sceUsbdSetInterfaceAltSetting) {
-                        int alt = (det.alt_setting > 0) ? det.alt_setting : 0;
-                        int as_ret = p_sceUsbdSetInterfaceAltSetting(h, det.interface_num, alt);
-                        daemon_log(LOG_LEVEL_INFO, "SetInterfaceAltSetting(IF=%d, alt=%d) = 0x%08X", det.interface_num, alt, as_ret);
+                    if (det.alt_setting > 0 && p_sceUsbdSetInterfaceAltSetting) {
+                        int as_ret = p_sceUsbdSetInterfaceAltSetting(h, det.interface_num, det.alt_setting);
+                        daemon_log(LOG_LEVEL_INFO, "SetInterfaceAltSetting(IF=%d, alt=%d) = 0x%08X", det.interface_num, det.alt_setting, as_ret);
                     }
 
                     g_dev_handle = h;
@@ -802,8 +810,14 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         pkt[42] = 0x02;       // Lightbar normal
         pkt[44] = 0x04;       // Player 1 LED
         pkt[47] = 0xFF;       // Blue lightbar
+        int sent = 0;
         if (ep != 0 && p_sceUsbdInterruptTransfer) {
-            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50) == 0) {
+                sent = 1;
+            }
+        }
+        if (!sent && p_sceUsbdControlTransfer) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, (uint16_t)g_claimed_interface, pkt, sizeof(pkt), 50);
         }
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         generic_hid_send_rumble(g_dev_handle, g_usb_state.vid, g_usb_state.pid,
