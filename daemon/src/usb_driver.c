@@ -152,12 +152,16 @@ static void write_status_file(bool connected, ControllerType type, uint16_t vid,
             "vid = 0x%04X\n"
             "pid = 0x%04X\n"
             "name = %s\n"
-            "nbuttons = %d\n",
+            "nbuttons = %d\n"
+            "player_slot = %d\n"
+            "user_name = %s\n",
             connected ? 1 : 0,
             controller_type_to_id(type),
             vid, pid,
             name ? name : "Unknown",
-            nbuttons
+            nbuttons,
+            connected ? vpad_get_assigned_slot() : 1,
+            connected ? vpad_get_assigned_user() : "None"
         );
         daemon_sys_write(fd, buf, len);
         daemon_sys_close(fd);
@@ -623,8 +627,18 @@ static int scan_and_open(void) {
                         init_dualsense_controller();
                     }
 
-                    daemon_notify("OneFamily: %s Connected",
-                                  controller_type_to_str(det.type));
+                    // In Auto Mode: Send an automatic PS Button pulse to trigger the native
+                    // Orbis OS "Who is using this controller?" user selection screen!
+                    if (g_daemon_config.mode == CONFIG_MODE_AUTO) {
+                        vpad_pulse_ps_button();
+                    }
+
+                    int slot = vpad_get_assigned_slot();
+                    if (slot == 2) {
+                        daemon_notify("OneFamily: %s (Player 2)", controller_type_to_str(det.type));
+                    } else {
+                        daemon_notify("OneFamily: %s Connected", controller_type_to_str(det.type));
+                    }
                 } else {
                     p_sceUsbdClose(h);
                 }

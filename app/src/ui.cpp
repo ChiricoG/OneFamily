@@ -1089,8 +1089,13 @@ void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile&
     draw_text(scene, devTitle, fontCardTitle, CARD_X + 75, 168, COLOR_WHITE);
 
     char devSub[256];
-    snprintf(devSub, sizeof(devSub), "Hardware: VID 0x%04X | PID 0x%04X   •   Buttons: %d   •   Profile: %04X_%04X.ini",
-             status.vid, status.pid, status.nbuttons, status.vid, status.pid);
+    if (status.player_slot > 0 && !status.user_name.empty()) {
+        snprintf(devSub, sizeof(devSub), "Player %d (%s)   •   Hardware: VID 0x%04X | PID 0x%04X   •   Profile: %04X_%04X.ini",
+                 status.player_slot, status.user_name.c_str(), status.vid, status.pid, status.vid, status.pid);
+    } else {
+        snprintf(devSub, sizeof(devSub), "Hardware: VID 0x%04X | PID 0x%04X   •   Buttons: %d   •   Profile: %04X_%04X.ini",
+                 status.vid, status.pid, status.nbuttons, status.vid, status.pid);
+    }
     draw_text(scene, devSub, fontCardDesc, CARD_X + 75, 198, COLOR_TEXT_DIM);
 
     // Card 2: Test Mode R3 Badge Card (X = 1500, Y = 135, W = 360, H = 88)

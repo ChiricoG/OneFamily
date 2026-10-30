@@ -81,6 +81,11 @@ bool HidProfile::read_status(HidStatus& out) {
                 } else if (k == "nbuttons") {
                     out.nbuttons = atoi(v.c_str());
                     if (out.nbuttons <= 0) out.nbuttons = 16;
+                } else if (k == "player_slot") {
+                    out.player_slot = atoi(v.c_str());
+                    if (out.player_slot <= 0) out.player_slot = 1;
+                } else if (k == "user_name") {
+                    out.user_name = v;
                 }
             }
         }

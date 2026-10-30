@@ -17,11 +17,14 @@
 #define XBOX_CONFIG_BUFFER_SIZE 4096
 
 // Mode selection
+#ifndef CONFIG_MODE_DEFINED
+#define CONFIG_MODE_DEFINED
 typedef enum {
     CONFIG_MODE_AUTO = 0,       // Merge if 1 user, Secondary if >= 2 users (v1.4.0 default)
     CONFIG_MODE_MERGE,          // Force Player 1 (Merge)
     CONFIG_MODE_SECONDARY       // Force Player 2 (Secondary)
 } ConfigMode;
+#endif
 
 // Guide button action
 typedef enum {

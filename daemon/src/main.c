@@ -109,6 +109,7 @@ int main(int argc, char *argv[]) {
         // Periodically check if configuration INI file was updated (every ~1s = 250 loops)
         if (loop_count % 250 == 0) {
             daemon_config_check_reload(&g_daemon_config);
+            vpad_check_user_rebind(g_daemon_config.mode);
         }
 
         daemon_sys_usleep(4000); // 4 ms sleep = 250 Hz

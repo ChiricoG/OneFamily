@@ -11,8 +11,10 @@ struct HidStatus {
     uint16_t pid;
     std::string name;
     int nbuttons;
+    int player_slot;
+    std::string user_name;
 
-    HidStatus() : connected(false), type("none"), vid(0), pid(0), name("Unknown"), nbuttons(16) {}
+    HidStatus() : connected(false), type("none"), vid(0), pid(0), name("Unknown"), nbuttons(16), player_slot(1), user_name("Player 1") {}
 };
 
 enum Ds4ActionId {
