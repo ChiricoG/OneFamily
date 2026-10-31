@@ -847,23 +847,6 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         if (ret != 0 && p_sceUsbdControlTransfer) {
             p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0210, g_claimed_interface, pkt, sizeof(pkt), 50);
         }
-    } else if (g_usb_state.type == CONTROLLER_DUALSENSE) {
-        if (!vpad_is_active()) return;
-        uint8_t pkt[64];
-        memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x02;        // DualSense Output Report
-        pkt[1] = 0x01 | 0x02; // Enable compatible rumble & haptics
-        pkt[2] = 0x04 | 0x10; // Lightbar & Player LED keepalive
-        pkt[3] = small_motor;
-        pkt[4] = large_motor;
-        pkt[39] = 0x02;       // valid_flag2: Lightbar setup
-        pkt[42] = 0x02;       // Lightbar normal
-        pkt[44] = 0x04;       // Player 1 LED
-        pkt[47] = 0xFF;       // Blue lightbar
-        int r = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
-        if (r != 0 && p_sceUsbdControlTransfer) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, g_claimed_interface, pkt, sizeof(pkt), 50);
-        }
     } else if (g_usb_state.type == CONTROLLER_STADIA) {
         // Stadia Rumble Output Report (Report ID 0x05, 5 bytes)
         // [0] = 0x05

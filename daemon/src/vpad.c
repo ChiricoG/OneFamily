@@ -390,6 +390,11 @@ int vpad_init(void) {
     return 0;
 }
 
+// Rumble polling state
+static uint8_t s_last_rumble_lg = 0;
+static uint8_t s_last_rumble_sm = 0;
+static uint64_t s_last_rumble_send_us = 0;
+
 void vpad_shutdown(void) {
     if (g_vpad_active && g_vpad_handle >= 0) {
         daemon_log(LOG_LEVEL_INFO, "Deleting Virtual Pad handle=0x%X", g_vpad_handle);
@@ -404,6 +409,9 @@ void vpad_shutdown(void) {
         s_has_sent_first = false;
         memset(&s_last_sent_data, 0, sizeof(s_last_sent_data));
         s_last_send_time_us = 0;
+        s_last_rumble_lg = 0;
+        s_last_rumble_sm = 0;
+        s_last_rumble_send_us = 0;
     }
 }
 
@@ -491,18 +499,28 @@ void vpad_poll_rumble(void) {
         return;
     }
 
-    static uint8_t s_last_lg = 0;
-    static uint8_t s_last_sm = 0;
-
     uint8_t setting[128];
     memset(setting, 0, sizeof(setting));
     int ret = p_scePadVirtualDeviceGetRemoteSetting(g_vpad_handle, setting);
     if (ret == 0) {
-        uint8_t lg = setting[0];
-        uint8_t sm = setting[1];
-        if (lg != s_last_lg || sm != s_last_sm) {
-            s_last_lg = lg;
-            s_last_sm = sm;
+        // scePadVirtualDeviceGetRemoteSetting buffer layout (DS4 Output Report without Report ID):
+        // [0]    = update flags (bit 0: rumble, bit 1: light bar)
+        // [1..2] = reserved (0x00)
+        // [3]    = large motor (slow/strong, 0..255)
+        // [4]    = small motor (fast/weak, 0..255)
+        // [5..7] = light bar RGB
+        uint8_t lg = setting[3];
+        uint8_t sm = setting[4];
+        uint64_t now = daemon_sys_time_us();
+
+        bool changed = (lg != s_last_rumble_lg || sm != s_last_rumble_sm);
+        // Periodic 100ms keep-alive while rumbling so Switch / 2.4GHz dongles do not time out
+        bool keepalive = ((lg > 0 || sm > 0) && (now - s_last_rumble_send_us >= 100000ULL));
+
+        if (changed || keepalive) {
+            s_last_rumble_lg = lg;
+            s_last_rumble_sm = sm;
+            s_last_rumble_send_us = now;
             g_rumble_cb(lg, sm);
         }
     }
