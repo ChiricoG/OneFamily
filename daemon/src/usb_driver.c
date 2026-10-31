@@ -294,21 +294,34 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
     }
 }
 
+static bool s_ds_use_vibration_v2 = true;
+
+static void dualsense_send_output_report(const uint8_t* pkt, size_t len, int timeout_ms) {
+    int sent = 0;
+    if (g_usb_state.endpoint_out && p_sceUsbdInterruptTransfer) {
+        int transferred = 0;
+        int r = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out,
+                                           (uint8_t*)pkt, (int)len, &transferred, timeout_ms);
+        daemon_log(LOG_LEVEL_INFO, "DualSense output report (%dB) via Interrupt OUT (ret=0x%08X)", (int)len, r);
+        if (r == 0) sent = 1;
+    }
+    if (!sent && p_sceUsbdControlTransfer) {
+        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202,
+                                          (uint16_t)g_claimed_interface, (uint8_t*)pkt, (uint16_t)len, timeout_ms);
+        daemon_log(LOG_LEVEL_INFO, "DualSense output report via Control SET_REPORT (ret=0x%08X)", cr);
+    }
+}
+
 static void init_dualsense_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Initializing DualSense controller (EP_IN:0x%02X, EP_OUT:0x%02X, IF:%d)...",
                g_usb_state.endpoint_in, g_usb_state.endpoint_out, g_claimed_interface);
 
     if (!p_sceUsbdControlTransfer || !g_dev_handle) return;
 
-    // === PHASE 1: Full Linux hid-playstation.c probe sequence ===
-    // The DualSense does NOT activate interrupt endpoints until the host
-    // completes this exact 3-step GET_REPORT handshake (per dualsense_probe()).
-    // Without 0x09 + 0x20, the controller treats the host as incompatible
-    // and refuses to stream HID data on EP IN / EP OUT.
+    s_ds_use_vibration_v2 = (g_usb_state.pid == SONY_DUALSENSE_EDGE_PID);
 
-    // Step 1a: GET_REPORT 0x09 — Pairing Info (20 bytes)
-    // DS_FEATURE_REPORT_PAIRING_INFO in hid-playstation.c
-    // Provides MAC address + host authentication token — THIS is what "wakes up" endpoints
+    // === PHASE 1: Exact Linux hid-playstation.c dualsense_create() feature report sequence ===
+    // 1a. dualsense_get_mac_address(): GET_REPORT 0x09 — Pairing Info (20 bytes)
     {
         uint8_t pair_buf[20];
         memset(pair_buf, 0, sizeof(pair_buf));
@@ -318,28 +331,32 @@ static void init_dualsense_controller(void) {
                    pr, pair_buf[0], pair_buf[1], pair_buf[2], pair_buf[3], pair_buf[4], pair_buf[5], pair_buf[6]);
     }
 
-    // Step 1b: GET_REPORT 0x20 — Firmware Info (64 bytes)
-    // DS_FEATURE_REPORT_FIRMWARE_INFO in hid-playstation.c
-    // Provides hardware version + feature capability flags
+    // 1b. dualsense_get_firmware_info(): GET_REPORT 0x20 — Firmware Info (64 bytes)
+    // Offsets per hid-playstation.c: hw_version = le32(&buf[24]), fw_version = le32(&buf[28]), update_version = le16(&buf[44])
     {
         uint8_t fw_buf[64];
         memset(fw_buf, 0, sizeof(fw_buf));
         int fr = p_sceUsbdControlTransfer(g_dev_handle, 0xA1, 0x01, 0x0320,
                                           (uint16_t)g_claimed_interface, fw_buf, sizeof(fw_buf), 200);
-        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Firmware 0x20 = 0x%08X (id=0x%02X hw=%d.%d fw=%d.%d)",
-                   fr, fw_buf[0],
-                   fw_buf[20], fw_buf[21],
-                   fw_buf[24] | (fw_buf[25] << 8), fw_buf[26] | (fw_buf[27] << 8));
+        uint32_t hw_ver = (uint32_t)fw_buf[24] | ((uint32_t)fw_buf[25] << 8) | ((uint32_t)fw_buf[26] << 16) | ((uint32_t)fw_buf[27] << 24);
+        uint32_t fw_ver = (uint32_t)fw_buf[28] | ((uint32_t)fw_buf[29] << 8) | ((uint32_t)fw_buf[30] << 16) | ((uint32_t)fw_buf[31] << 24);
+        uint16_t update_ver = (uint16_t)fw_buf[44] | ((uint16_t)fw_buf[45] << 8);
+        if (fr >= 46 && g_usb_state.pid == SONY_DUALSENSE_PID) {
+            s_ds_use_vibration_v2 = (update_ver >= 0x0221); // DS_FEATURE_VERSION(2, 21)
+        } else if (fr < 46) {
+            s_ds_use_vibration_v2 = true; // Safe default for modern DualSense firmware
+        }
+        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Firmware 0x20 = 0x%08X (id=0x%02X hw=0x%08X fw=0x%08X upd=0x%04X vib_v2=%d)",
+                   fr, fw_buf[0], hw_ver, fw_ver, update_ver, s_ds_use_vibration_v2 ? 1 : 0);
     }
 
-    // Step 1c: GET_REPORT 0x05 — Calibration data (41 bytes)
-    // DS_FEATURE_REPORT_CALIBRATION in hid-playstation.c — gyro/accel factory trims
+    // 1c. dualsense_get_calibration_data(): GET_REPORT 0x05 — Calibration data (exact 41 bytes)
     {
-        uint8_t cal_buf[64];
+        uint8_t cal_buf[41];
         memset(cal_buf, 0, sizeof(cal_buf));
         int cr = p_sceUsbdControlTransfer(g_dev_handle, 0xA1, 0x01, 0x0305,
                                           (uint16_t)g_claimed_interface, cal_buf, sizeof(cal_buf), 200);
-        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Calibration 0x05 = 0x%08X (size_hint=0x%02X)", cr, cal_buf[0]);
+        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Calibration 0x05 (41B) = 0x%08X (id=0x%02X)", cr, cal_buf[0]);
     }
 
     // === PHASE 2: SET_IDLE — activate HID periodic interrupt streaming ===
@@ -349,46 +366,29 @@ static void init_dualsense_controller(void) {
         daemon_log(LOG_LEVEL_INFO, "DualSense SET_IDLE (IF=%d) = 0x%08X", g_claimed_interface, sir);
     }
 
-    // === PHASE 3: ClearHalt on EP IN — reset endpoint toggle to DATA0 ===
-    // After ClaimInterface + probe sequence, reset data toggle so first
-    // InterruptTransfer on 0x84 starts clean (no residual STALL).
-    if (p_sceUsbdClearHalt) {
-        int ch_in  = p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
-        int ch_out = p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_out);
-        daemon_log(LOG_LEVEL_INFO, "DualSense ClearHalt: EP_IN=0x%02X ret=0x%08X, EP_OUT=0x%02X ret=0x%08X",
-                   g_usb_state.endpoint_in, ch_in, g_usb_state.endpoint_out, ch_out);
-        daemon_sys_usleep(30000); // 30ms: let DualSense firmware stabilize endpoints
+    // === PHASE 3: Replicate dualsense_reset_leds() + dualsense_output_worker() ===
+    // Step 3a: dualsense_reset_leds() — sends LIGHTBAR_SETUP_LIGHT_OUT (0x02) alone to unlock software LED control
+    {
+        uint8_t reset_pkt[63];
+        memset(reset_pkt, 0, sizeof(reset_pkt));
+        reset_pkt[0]  = 0x02; // DS_OUTPUT_REPORT_USB
+        reset_pkt[39] = 0x02; // valid_flag2: DS_OUTPUT_VALID_FLAG2_LIGHTBAR_SETUP_CONTROL_ENABLE
+        reset_pkt[42] = 0x02; // lightbar_setup: DS_OUTPUT_LIGHTBAR_SETUP_LIGHT_OUT
+        dualsense_send_output_report(reset_pkt, sizeof(reset_pkt), 150);
     }
 
-    // === PHASE 4: Output report — lightbar, player LED, initial state ===
-    // Only attempt after full probe sequence; controller should now accept output.
-    // Report ID 0x02, exactly 63 bytes — DS_OUTPUT_REPORT_USB_SIZE (hid-playstation)
-    uint8_t init_pkt[63];
-    memset(init_pkt, 0, sizeof(init_pkt));
-    init_pkt[0] = 0x02;        // Report ID
-    init_pkt[1] = 0x01 | 0x02; // valid_flag0: COMPATIBLE_VIBRATION | HAPTICS_SELECT
-    init_pkt[2] = 0x04 | 0x10; // valid_flag1: LIGHTBAR_CONTROL_ENABLE | PLAYER_INDICATOR_CONTROL_ENABLE
-    init_pkt[3] = 0x00;        // Small motor (off)
-    init_pkt[4] = 0x00;        // Large motor (off)
-    init_pkt[39] = 0x02;       // valid_flag2: LIGHTBAR_SETUP_CONTROL_ENABLE
-    init_pkt[42] = 0x02;       // lightbar_setup: normal mode
-    init_pkt[44] = 0x04;       // player_leds: Player 1 center dot ON
-    init_pkt[45] = 0x00;       // Red channel
-    init_pkt[46] = 0x00;       // Green channel
-    init_pkt[47] = 0xFF;       // Blue channel (PlayStation Blue)
-
-    int sent = 0;
-    if (g_usb_state.endpoint_out && p_sceUsbdInterruptTransfer) {
-        int transferred = 0;
-        int r = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out,
-                                           init_pkt, sizeof(init_pkt), &transferred, 150);
-        daemon_log(LOG_LEVEL_INFO, "DualSense init output report (63B) via Interrupt OUT (ret=0x%08X)", r);
-        if (r == 0) sent = 1;
-    }
-    if (!sent) {
-        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202,
-                                          (uint16_t)g_claimed_interface, init_pkt, sizeof(init_pkt), 150);
-        daemon_log(LOG_LEVEL_INFO, "DualSense init output report via Control SET_REPORT (ret=0x%08X)", cr);
+    // Step 3b: dualsense_set_lightbar(0, 0, 128) + dualsense_set_player_leds(BIT(2))
+    // Note: valid_flag2 and lightbar_setup are 0 here so the lightbar stays ON!
+    {
+        uint8_t led_pkt[63];
+        memset(led_pkt, 0, sizeof(led_pkt));
+        led_pkt[0]  = 0x02;        // DS_OUTPUT_REPORT_USB
+        led_pkt[2]  = 0x04 | 0x10; // valid_flag1: LIGHTBAR_CONTROL_ENABLE | PLAYER_INDICATOR_CONTROL_ENABLE
+        led_pkt[44] = 0x04;        // player_leds: BIT(2) (Player 1 center LED)
+        led_pkt[45] = 0x00;        // lightbar_red
+        led_pkt[46] = 0x00;        // lightbar_green
+        led_pkt[47] = 128;         // lightbar_blue (128, exact Linux default)
+        dualsense_send_output_report(led_pkt, sizeof(led_pkt), 150);
     }
 }
 
@@ -874,15 +874,18 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         if (!vpad_is_active()) return;
         uint8_t pkt[63];
         memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x02;        // DualSense Output Report
-        pkt[1] = 0x01 | 0x02; // Enable compatible rumble & haptics
-        pkt[2] = 0x04 | 0x10; // Lightbar & Player LED keepalive
-        pkt[3] = small_motor;
-        pkt[4] = large_motor;
-        pkt[39] = 0x02;       // valid_flag2: Lightbar setup
-        pkt[42] = 0x02;       // Lightbar normal
-        pkt[44] = 0x04;       // Player 1 LED
-        pkt[47] = 0xFF;       // Blue lightbar
+        pkt[0] = 0x02;        // DS_OUTPUT_REPORT_USB (63 bytes)
+        pkt[1] = 0x02;        // valid_flag0: DS_OUTPUT_VALID_FLAG0_HAPTICS_SELECT
+        if (s_ds_use_vibration_v2) {
+            pkt[39] = 0x04;   // valid_flag2: DS_OUTPUT_VALID_FLAG2_COMPATIBLE_VIBRATION2
+        } else {
+            pkt[1] |= 0x01;   // valid_flag0: DS_OUTPUT_VALID_FLAG0_COMPATIBLE_VIBRATION
+        }
+        pkt[2] = 0x04 | 0x10; // valid_flag1: LIGHTBAR_CONTROL_ENABLE | PLAYER_INDICATOR_CONTROL_ENABLE
+        pkt[3] = small_motor; // motor_right (weak)
+        pkt[4] = large_motor; // motor_left (strong)
+        pkt[44] = 0x04;       // player_leds: BIT(2) (Player 1 center LED)
+        pkt[47] = 128;        // lightbar_blue (128, Linux default)
         int sent = 0;
         if (ep != 0 && p_sceUsbdInterruptTransfer) {
             if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50) == 0) {
