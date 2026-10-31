@@ -97,6 +97,7 @@ bool HidProfile::read_status(HidStatus& out) {
 
 void HidProfile::reset_defaults(int nbuttons) {
     max_buttons = (nbuttons >= 14 && nbuttons <= 32) ? nbuttons : 16;
+    custom_rumble = "";
     for (int i = 0; i < ACT_COUNT; i++) {
         assignments[i] = 0;
     }
@@ -181,6 +182,9 @@ bool HidProfile::load(uint16_t vid, uint16_t pid, int nbuttons) {
                             assignments[a] = (int)btn;
                         }
                     }
+                } else if (strcasecmp(k.c_str(), "rumble") == 0 ||
+                           strcasecmp(k.c_str(), "rumble_report") == 0) {
+                    custom_rumble = v;
                 }
             }
         }
@@ -238,6 +242,14 @@ bool HidProfile::save(uint16_t vid, uint16_t pid, const std::string& name) {
         "invert_ly = 0\n"
         "invert_ry = 0\n"
     );
+
+    if (!custom_rumble.empty() && len < (int)sizeof(out) - 128) {
+        len += snprintf(out + len, sizeof(out) - len,
+            "\n[Rumble]\n"
+            "rumble = %s\n",
+            custom_rumble.c_str()
+        );
+    }
 
     if (len > 0) {
         sceKernelWrite(fd, out, (size_t)len);

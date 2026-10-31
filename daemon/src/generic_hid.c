@@ -30,7 +30,23 @@ enum {
 
 #define MAX_BUTTONS 32
 #define MAX_REPORT_BITS (512 * 8)
+#define MAX_RUMBLE_TEMPLATE 16
 #define CONTROLLERS_DIR "/data/onefamily/controllers"
+
+enum {
+    RUMBLE_TOKEN_CONST = 0,
+    RUMBLE_TOKEN_LARGE,      /* 'L'   : large_motor (0..255) */
+    RUMBLE_TOKEN_SMALL,      /* 'R'   : small_motor (0..255) */
+    RUMBLE_TOKEN_LARGE_HALF, /* 'l'   : large_motor >> 1 (0..127) */
+    RUMBLE_TOKEN_SMALL_HALF, /* 'r'   : small_motor >> 1 (0..127) */
+    RUMBLE_TOKEN_LARGE_16LE, /* 'L16' : 2 bytes (large_motor * 257) LE */
+    RUMBLE_TOKEN_SMALL_16LE  /* 'R16' : 2 bytes (small_motor * 257) LE */
+};
+
+typedef struct {
+    uint8_t type;
+    uint8_t val;
+} RumbleToken;
 
 typedef struct {
     uint8_t present, rid;
@@ -48,6 +64,18 @@ typedef struct {
     uint8_t role[ROLE_N];               /* AX_* per role */
     uint8_t invert[ROLE_N];
     uint32_t button_map[MAX_BUTTONS];
+
+    /* Auto-discovered HID Output Report metadata (Main Item tag == 9) */
+    uint8_t  out_present;
+    uint8_t  out_has_ids;
+    uint8_t  out_rid;
+    uint16_t out_bits;
+    uint16_t out_data_bit_off;
+    uint8_t  out_field_size;
+
+    /* Custom INI rumble override (`rumble = ...`, 0xFF = disabled) */
+    uint8_t     custom_rumble_len;
+    RumbleToken custom_rumble[MAX_RUMBLE_TEMPLATE];
 } GenericHidContext;
 
 typedef struct {
@@ -110,9 +138,11 @@ static int parse_descriptor(GenericHidContext *g, const uint8_t *d, int n) {
     uint32_t usages[64], umin = 0, umax = 0;
     int nusages = 0, has_range = 0;
     uint16_t offset[256];
+    uint16_t out_offset[256];
 
     memset(&gl, 0, sizeof gl);
     memset(offset, 0, sizeof offset);
+    memset(out_offset, 0, sizeof out_offset);
 
     while (i < n) {
         uint8_t p = d[i];
@@ -174,6 +204,26 @@ static int parse_descriptor(GenericHidContext *g, const uint8_t *d, int n) {
                     }
                 }
                 *off = (uint16_t)(*off + bits);
+            } else if (tag == 9) { /* output (force-feedback / rumble / LEDs) */
+                uint16_t *off = &out_offset[gl.rid];
+                uint32_t bits = gl.size * gl.count;
+                if (*off + bits <= MAX_REPORT_BITS && bits > 0) {
+                    if (!g->out_present) {
+                        g->out_present = 1;
+                        g->out_has_ids = (gl.rid != 0);
+                        g->out_rid = gl.rid;
+                        g->out_data_bit_off = *off;
+                        g->out_field_size = (gl.size == 16) ? 16 : 8;
+                    } else if (g->out_rid == gl.rid && !(val & 1)) {
+                        if (gl.size == 16) {
+                            g->out_field_size = 16;
+                        }
+                    }
+                    *off = (uint16_t)(*off + bits);
+                    if (g->out_rid == gl.rid) {
+                        g->out_bits = *off;
+                    }
+                }
             }
             nusages = 0;
             has_range = 0;
@@ -325,6 +375,65 @@ static int parse_ini_line(GenericHidContext *g, char *line) {
             if (iequals(val, k_axes[a])) { g->role[i] = (uint8_t)a; return 1; }
         }
         return 0;
+    }
+
+    // 4. rumble = preset or hex template (e.g. "rumble = 05 L R 00 00")
+    if (iequals(key, "rumble") || iequals(key, "rumble_report")) {
+        if (iequals(val, "none") || iequals(val, "off") || strcmp(val, "0") == 0) {
+            g->custom_rumble_len = 0xFF;
+            return 1;
+        }
+        if (iequals(val, "auto") || iequals(val, "default")) {
+            g->custom_rumble_len = 0;
+            return 1;
+        }
+
+        char tpl_buf[128];
+        if (iequals(val, "logitech")) {
+            snprintf(tpl_buf, sizeof(tpl_buf), "51 00 L 00 R 00 00");
+        } else if (iequals(val, "dragonrise")) {
+            snprintf(tpl_buf, sizeof(tpl_buf), "FA FE L R 00 00 00");
+        } else if (iequals(val, "greenasia")) {
+            snprintf(tpl_buf, sizeof(tpl_buf), "51 00 r l");
+        } else if (iequals(val, "betop") || iequals(val, "shanwan")) {
+            snprintf(tpl_buf, sizeof(tpl_buf), "00 00 L R");
+        } else if (iequals(val, "8bitdo")) {
+            snprintf(tpl_buf, sizeof(tpl_buf), "81 11 04 08 00 04 L R");
+        } else if (iequals(val, "dinput05")) {
+            snprintf(tpl_buf, sizeof(tpl_buf), "05 L R 00 00");
+        } else {
+            snprintf(tpl_buf, sizeof(tpl_buf), "%s", val);
+        }
+
+        g->custom_rumble_len = 0;
+        char *p = tpl_buf;
+        while (*p && g->custom_rumble_len < MAX_RUMBLE_TEMPLATE) {
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            if (!*p) break;
+            char *tok = p;
+            while (*p && *p != ' ' && *p != '\t' && *p != ',') p++;
+            if (*p) *p++ = '\0';
+
+            RumbleToken rt = { RUMBLE_TOKEN_CONST, 0 };
+            if (strcmp(tok, "L") == 0) {
+                rt.type = RUMBLE_TOKEN_LARGE;
+            } else if (strcmp(tok, "R") == 0) {
+                rt.type = RUMBLE_TOKEN_SMALL;
+            } else if (strcmp(tok, "l") == 0) {
+                rt.type = RUMBLE_TOKEN_LARGE_HALF;
+            } else if (strcmp(tok, "r") == 0) {
+                rt.type = RUMBLE_TOKEN_SMALL_HALF;
+            } else if (iequals(tok, "L16")) {
+                rt.type = RUMBLE_TOKEN_LARGE_16LE;
+            } else if (iequals(tok, "R16")) {
+                rt.type = RUMBLE_TOKEN_SMALL_16LE;
+            } else {
+                rt.type = RUMBLE_TOKEN_CONST;
+                rt.val = (uint8_t)strtoul(tok, NULL, 16);
+            }
+            g->custom_rumble[g->custom_rumble_len++] = rt;
+        }
+        return 1;
     }
 
     return 0;
@@ -570,6 +679,10 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
                        s_ctx.axis[AX_X].present, s_ctx.axis[AX_Y].present, s_ctx.axis[AX_Z].present,
                        s_ctx.axis[AX_RX].present, s_ctx.axis[AX_RY].present, s_ctx.axis[AX_RZ].present,
                        s_ctx.axis[AX_HAT].present);
+            if (s_ctx.out_present) {
+                daemon_log(LOG_LEVEL_INFO, "Generic HID (0x%04X:0x%04X): discovered Output Report (rid=0x%02X, has_id=%d, bits=%u, data_off=%u, field_bits=%u)",
+                           vid, pid, s_ctx.out_rid, s_ctx.out_has_ids, s_ctx.out_bits, s_ctx.out_data_bit_off, s_ctx.out_field_size);
+            }
             s_configured = 1;
         }
     } else {
@@ -594,6 +707,7 @@ int generic_hid_get_nbuttons(void) {
 }
 
 void generic_hid_reload(uint16_t vid, uint16_t pid) {
+    s_ctx.custom_rumble_len = 0;
     default_mapping(&s_ctx);
     int has_builtin = builtin_map(&s_ctx, vid, pid);
     load_controller_ini(&s_ctx, vid, pid, has_builtin);
@@ -717,6 +831,26 @@ int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, cons
     return 1;
 }
 
+static void send_hid_output_packet(libusb_device_handle* h, uint8_t ep_out, uint8_t iface,
+                                   uint8_t report_id, uint8_t* pkt, int len,
+                                   int (*intr_transfer)(libusb_device_handle*, uint8_t, uint8_t*, int32_t, int32_t*, uint32_t),
+                                   int (*ctrl_transfer)(libusb_device_handle*, uint8_t, uint8_t, uint16_t, uint16_t, unsigned char*, uint16_t, uint32_t)) {
+    if (!h || !pkt || len <= 0) return;
+
+    int transferred = 0;
+    int sent = 0;
+    if (ep_out != 0 && intr_transfer) {
+        if (intr_transfer(h, ep_out, pkt, len, &transferred, 50) == 0) {
+            sent = 1;
+        }
+    }
+    if (!sent && ctrl_transfer) {
+        // HID Class-Specific Request: SET_REPORT (bRequest=0x09), Report Type: Output (0x02)
+        uint16_t wValue = (uint16_t)(0x0200 | report_id);
+        ctrl_transfer(h, 0x21, 0x09, wValue, (uint16_t)iface, pkt, (uint16_t)len, 50);
+    }
+}
+
 void generic_hid_send_rumble(libusb_device_handle* h, uint16_t vid, uint16_t pid,
                              uint8_t ep_out, uint8_t iface,
                              uint8_t large_motor, uint8_t small_motor,
@@ -724,25 +858,165 @@ void generic_hid_send_rumble(libusb_device_handle* h, uint16_t vid, uint16_t pid
                              int (*ctrl_transfer)(libusb_device_handle*, uint8_t, uint8_t, uint16_t, uint16_t, unsigned char*, uint16_t, uint32_t)) {
     if (!h) return;
 
-    int transferred = 0;
-
-    // 8BitDo Vendor Rumble Report
-    if (vid == 0x2DC8) {
-        // 81 11 04 08 <dur16 LE> <left> <right> (duration: 0x0400 = 1024 ms)
-        uint8_t pkt[8] = { 0x81, 0x11, 0x04, 0x08, 0x00, 0x04, large_motor, small_motor };
-        if (ep_out != 0 && intr_transfer) {
-            intr_transfer(h, ep_out, pkt, sizeof(pkt), &transferred, 50);
+    // 1. Level 1: User-defined custom rumble template in /data/onefamily/controllers/VVVV_PPPP.ini
+    if (s_ctx.custom_rumble_len == 0xFF) {
+        return; // Explicitly disabled via `rumble = none`
+    }
+    if (s_ctx.custom_rumble_len > 0) {
+        uint8_t pkt[32];
+        int len = 0;
+        for (int i = 0; i < s_ctx.custom_rumble_len && len < (int)sizeof(pkt) - 2; i++) {
+            switch (s_ctx.custom_rumble[i].type) {
+                case RUMBLE_TOKEN_LARGE:
+                    pkt[len++] = large_motor;
+                    break;
+                case RUMBLE_TOKEN_SMALL:
+                    pkt[len++] = small_motor;
+                    break;
+                case RUMBLE_TOKEN_LARGE_HALF:
+                    pkt[len++] = (uint8_t)(large_motor >> 1);
+                    break;
+                case RUMBLE_TOKEN_SMALL_HALF:
+                    pkt[len++] = (uint8_t)(small_motor >> 1);
+                    break;
+                case RUMBLE_TOKEN_LARGE_16LE: {
+                    uint16_t v = (uint16_t)large_motor * 257;
+                    pkt[len++] = (uint8_t)(v & 0xFF);
+                    pkt[len++] = (uint8_t)(v >> 8);
+                    break;
+                }
+                case RUMBLE_TOKEN_SMALL_16LE: {
+                    uint16_t v = (uint16_t)small_motor * 257;
+                    pkt[len++] = (uint8_t)(v & 0xFF);
+                    pkt[len++] = (uint8_t)(v >> 8);
+                    break;
+                }
+                default:
+                    pkt[len++] = s_ctx.custom_rumble[i].val;
+                    break;
+            }
         }
-        if (ctrl_transfer) {
-            // SET_REPORT: bmRequestType: 0x21, bRequest: 0x09, wValue: 0x0281 (Output Report 0x81), wIndex: iface
-            ctrl_transfer(h, 0x21, 0x09, 0x0281, (uint16_t)iface, pkt, sizeof(pkt), 50);
+        if (len > 0) {
+            send_hid_output_packet(h, ep_out, iface, pkt[0], pkt, len, intr_transfer, ctrl_transfer);
         }
         return;
     }
 
-    // Generic standard HID force-feedback output report
-    if (ep_out != 0 && intr_transfer) {
-        uint8_t pkt[8] = { 0x00, large_motor, small_motor, 0x00, 0x00, 0x00, 0x00, 0x00 };
-        intr_transfer(h, ep_out, pkt, sizeof(pkt), &transferred, 50);
+    // 2. Level 2: Known Linux Kernel hid-*ff.c Hardware Chipset Protocols
+    // 2a. 8BitDo (VID 0x2DC8): Vendor Report 0x81 + D-Input Report 0x05
+    if (vid == 0x2DC8) {
+        int transferred = 0;
+        // 81 11 04 08 <dur16 LE> <left> <right> (duration: 0x0400 = 1024 ms)
+        uint8_t pkt81[8] = { 0x81, 0x11, 0x04, 0x08, 0x00, 0x04, large_motor, small_motor };
+        if (ep_out != 0 && intr_transfer) {
+            intr_transfer(h, ep_out, pkt81, sizeof(pkt81), &transferred, 50);
+        }
+        if (ctrl_transfer) {
+            ctrl_transfer(h, 0x21, 0x09, 0x0281, (uint16_t)iface, pkt81, sizeof(pkt81), 50);
+        }
+        if (s_ctx.out_present && s_ctx.out_rid == 0x05) {
+            uint8_t pkt05[5] = { 0x05, large_motor, small_motor, 0x00, 0x00 };
+            send_hid_output_packet(h, ep_out, iface, 0x05, pkt05, sizeof(pkt05), intr_transfer, ctrl_transfer);
+        }
+        return;
     }
+
+    // 2b. Logitech DirectInput (VID 0x046D — F310, F710, RumblePad 2, Dual Action) [Linux hid-lgff.c]
+    if (vid == 0x046D) {
+        uint8_t pkt[7];
+        if (large_motor == 0 && small_motor == 0) {
+            uint8_t stop[7] = { 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            memcpy(pkt, stop, sizeof(pkt));
+        } else {
+            uint8_t play[7] = { 0x51, 0x00, large_motor, 0x00, small_motor, 0x00, 0x00 };
+            memcpy(pkt, play, sizeof(pkt));
+        }
+        send_hid_output_packet(h, ep_out, iface, 0x00, pkt, sizeof(pkt), intr_transfer, ctrl_transfer);
+        return;
+    }
+
+    // 2c. DragonRise / Microntek (VID 0x0079) [Linux hid-dr.c]
+    if (vid == 0x0079) {
+        uint8_t pkt1[7] = { 0xFA, 0xFE, large_motor, small_motor, 0x00, 0x00, 0x00 };
+        uint8_t pkt2[7] = { 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        send_hid_output_packet(h, ep_out, iface, 0x00, pkt1, sizeof(pkt1), intr_transfer, ctrl_transfer);
+        send_hid_output_packet(h, ep_out, iface, 0x00, pkt2, sizeof(pkt2), intr_transfer, ctrl_transfer);
+        return;
+    }
+
+    // 2d. GreenAsia / Pantherlord (VID 0x0E8F) [Linux hid-gaff.c / hid-pl.c]
+    if (vid == 0x0E8F) {
+        uint8_t pkt1[4] = { 0x51, 0x00, (uint8_t)(small_motor >> 1), (uint8_t)(large_motor >> 1) };
+        uint8_t pkt2[4] = { 0xFA, 0xFE, 0x00, 0x00 };
+        send_hid_output_packet(h, ep_out, iface, 0x00, pkt1, sizeof(pkt1), intr_transfer, ctrl_transfer);
+        send_hid_output_packet(h, ep_out, iface, 0x00, pkt2, sizeof(pkt2), intr_transfer, ctrl_transfer);
+        return;
+    }
+
+    // 2e. Betop / ShanWan (VID 0x20BC, 0x2563) [Linux hid-betopff.c]
+    if (vid == 0x20BC || vid == 0x2563) {
+        uint8_t pkt[4] = { 0x00, 0x00, large_motor, small_motor };
+        send_hid_output_packet(h, ep_out, iface, 0x00, pkt, sizeof(pkt), intr_transfer, ctrl_transfer);
+        return;
+    }
+
+    // 2f. ZeroPlus / Thrustmaster / Mega World (VID 0x0C12, 0x044F, 0x07B5) [Linux hid-zpff.c / hid-tmff.c]
+    if (vid == 0x0C12 || vid == 0x044F || vid == 0x07B5) {
+        uint8_t pkt[4] = { 0x00, small_motor, large_motor, 0x00 };
+        send_hid_output_packet(h, ep_out, iface, 0x00, pkt, sizeof(pkt), intr_transfer, ctrl_transfer);
+        return;
+    }
+
+    // 2g. SmartJoy / WiseGroup (VID 0x0925, 0x6666) [Linux hid-sjoy.c]
+    if (vid == 0x0925 || vid == 0x6666) {
+        uint8_t pkt[3] = { 0x01, large_motor, small_motor };
+        send_hid_output_packet(h, ep_out, iface, 0x01, pkt, sizeof(pkt), intr_transfer, ctrl_transfer);
+        return;
+    }
+
+    // 2h. Holtek (VID 0x1241) [Linux hid-holtekff.c]
+    if (vid == 0x1241) {
+        uint8_t pkt[7] = { 0x00, 0x01, 0x00, 0x00, large_motor, small_motor, 0x00 };
+        send_hid_output_packet(h, ep_out, iface, 0x00, pkt, sizeof(pkt), intr_transfer, ctrl_transfer);
+        return;
+    }
+
+    // 3. Level 3: Auto-Discovered Output Report from HID Report Descriptor (tag == 9)
+    if (s_ctx.out_present && s_ctx.out_bits >= 16) {
+        uint8_t pkt[64];
+        memset(pkt, 0, sizeof(pkt));
+
+        int body_bytes = (s_ctx.out_bits + 7) / 8;
+        if (body_bytes < 2) body_bytes = 2;
+        if (body_bytes > 62) body_bytes = 62;
+
+        int pos = 0;
+        if (s_ctx.out_has_ids) {
+            pkt[pos++] = s_ctx.out_rid;
+        }
+
+        int data_off = pos + (s_ctx.out_data_bit_off / 8);
+        int total_len = pos + body_bytes;
+
+        if (s_ctx.out_field_size == 16 && data_off + 4 <= total_len) {
+            uint16_t strong = (uint16_t)large_motor * 257;
+            uint16_t weak   = (uint16_t)small_motor * 257;
+            pkt[data_off + 0] = (uint8_t)(strong & 0xFF);
+            pkt[data_off + 1] = (uint8_t)(strong >> 8);
+            pkt[data_off + 2] = (uint8_t)(weak & 0xFF);
+            pkt[data_off + 3] = (uint8_t)(weak >> 8);
+        } else if (data_off + 2 <= total_len) {
+            pkt[data_off + 0] = large_motor;
+            pkt[data_off + 1] = small_motor;
+        }
+
+        send_hid_output_packet(h, ep_out, iface, s_ctx.out_rid, pkt, total_len, intr_transfer, ctrl_transfer);
+        return;
+    }
+
+    // 4. Level 4: Universal Fallback (Standard D-Input Report 0x05 + Generic 8-byte Output Report)
+    uint8_t pkt05[5] = { 0x05, large_motor, small_motor, 0x00, 0x00 };
+    uint8_t pkt00[8] = { 0x00, large_motor, small_motor, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    send_hid_output_packet(h, ep_out, iface, 0x05, pkt05, sizeof(pkt05), intr_transfer, ctrl_transfer);
+    send_hid_output_packet(h, ep_out, iface, 0x00, pkt00, sizeof(pkt00), intr_transfer, ctrl_transfer);
 }

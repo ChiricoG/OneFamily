@@ -64,6 +64,7 @@ private:
     int assignments[ACT_COUNT]; // Stores button number (0 = none, 1 = button1, etc.)
     int max_buttons;
     std::string current_path;
+    std::string custom_rumble;
 
     static bool file_exists(const char* path);
 };
