@@ -286,46 +286,97 @@ static void init_dualsense_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Initializing DualSense controller (EP_IN:0x%02X, EP_OUT:0x%02X, IF:%d)...",
                g_usb_state.endpoint_in, g_usb_state.endpoint_out, g_claimed_interface);
 
-    // 1. SET_IDLE on Interface (standard HID periodic streaming activation)
-    if (p_sceUsbdControlTransfer && g_dev_handle) {
-        int sir = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x0A, 0, (uint16_t)g_claimed_interface, NULL, 0, 100);
-        daemon_log(LOG_LEVEL_INFO, "DualSense SET_IDLE (IF=%d) returned 0x%08X", g_claimed_interface, sir);
+    if (!p_sceUsbdControlTransfer || !g_dev_handle) return;
+
+    // === PHASE 1: Full Linux hid-playstation.c probe sequence ===
+    // The DualSense does NOT activate interrupt endpoints until the host
+    // completes this exact 3-step GET_REPORT handshake (per dualsense_probe()).
+    // Without 0x09 + 0x20, the controller treats the host as incompatible
+    // and refuses to stream HID data on EP IN / EP OUT.
+
+    // Step 1a: GET_REPORT 0x09 — Pairing Info (20 bytes)
+    // DS_FEATURE_REPORT_PAIRING_INFO in hid-playstation.c
+    // Provides MAC address + host authentication token — THIS is what "wakes up" endpoints
+    {
+        uint8_t pair_buf[20];
+        memset(pair_buf, 0, sizeof(pair_buf));
+        int pr = p_sceUsbdControlTransfer(g_dev_handle, 0xA1, 0x01, 0x0309,
+                                          (uint16_t)g_claimed_interface, pair_buf, sizeof(pair_buf), 200);
+        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Pairing 0x09 = 0x%08X (id=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X)",
+                   pr, pair_buf[0], pair_buf[1], pair_buf[2], pair_buf[3], pair_buf[4], pair_buf[5], pair_buf[6]);
     }
 
-    // 2. Query Calibration Feature Report 0x05 via GET_REPORT
-    if (p_sceUsbdControlTransfer && g_dev_handle) {
-        uint8_t feat_buf[64];
-        memset(feat_buf, 0, sizeof(feat_buf));
-        int f_ret = p_sceUsbdControlTransfer(g_dev_handle, 0xA1, 0x01, 0x0305, (uint16_t)g_claimed_interface, feat_buf, sizeof(feat_buf), 100);
-        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Feature 0x05 returned 0x%08X", f_ret);
+    // Step 1b: GET_REPORT 0x20 — Firmware Info (64 bytes)
+    // DS_FEATURE_REPORT_FIRMWARE_INFO in hid-playstation.c
+    // Provides hardware version + feature capability flags
+    {
+        uint8_t fw_buf[64];
+        memset(fw_buf, 0, sizeof(fw_buf));
+        int fr = p_sceUsbdControlTransfer(g_dev_handle, 0xA1, 0x01, 0x0320,
+                                          (uint16_t)g_claimed_interface, fw_buf, sizeof(fw_buf), 200);
+        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Firmware 0x20 = 0x%08X (id=0x%02X hw=%d.%d fw=%d.%d)",
+                   fr, fw_buf[0],
+                   fw_buf[20], fw_buf[21],
+                   fw_buf[24] | (fw_buf[25] << 8), fw_buf[26] | (fw_buf[27] << 8));
     }
 
-    // 3. Full DualSense USB output report (Report ID 0x02, exactly 63 bytes)
-    // Matches Linux hid-playstation DS_OUTPUT_REPORT_USB_SIZE = 63 specification
+    // Step 1c: GET_REPORT 0x05 — Calibration data (41 bytes)
+    // DS_FEATURE_REPORT_CALIBRATION in hid-playstation.c — gyro/accel factory trims
+    {
+        uint8_t cal_buf[64];
+        memset(cal_buf, 0, sizeof(cal_buf));
+        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0xA1, 0x01, 0x0305,
+                                          (uint16_t)g_claimed_interface, cal_buf, sizeof(cal_buf), 200);
+        daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Calibration 0x05 = 0x%08X (size_hint=0x%02X)", cr, cal_buf[0]);
+    }
+
+    // === PHASE 2: SET_IDLE — activate HID periodic interrupt streaming ===
+    {
+        int sir = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x0A, 0,
+                                           (uint16_t)g_claimed_interface, NULL, 0, 100);
+        daemon_log(LOG_LEVEL_INFO, "DualSense SET_IDLE (IF=%d) = 0x%08X", g_claimed_interface, sir);
+    }
+
+    // === PHASE 3: ClearHalt on EP IN — reset endpoint toggle to DATA0 ===
+    // After ClaimInterface + probe sequence, reset data toggle so first
+    // InterruptTransfer on 0x84 starts clean (no residual STALL).
+    if (p_sceUsbdClearHalt) {
+        int ch_in  = p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+        int ch_out = p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_out);
+        daemon_log(LOG_LEVEL_INFO, "DualSense ClearHalt: EP_IN=0x%02X ret=0x%08X, EP_OUT=0x%02X ret=0x%08X",
+                   g_usb_state.endpoint_in, ch_in, g_usb_state.endpoint_out, ch_out);
+        daemon_sys_usleep(30000); // 30ms: let DualSense firmware stabilize endpoints
+    }
+
+    // === PHASE 4: Output report — lightbar, player LED, initial state ===
+    // Only attempt after full probe sequence; controller should now accept output.
+    // Report ID 0x02, exactly 63 bytes — DS_OUTPUT_REPORT_USB_SIZE (hid-playstation)
     uint8_t init_pkt[63];
     memset(init_pkt, 0, sizeof(init_pkt));
     init_pkt[0] = 0x02;        // Report ID
-    init_pkt[1] = 0x01 | 0x02; // valid_flag0: COMPATIBLE_VIBRATION (0x01) | HAPTICS_SELECT (0x02)
-    init_pkt[2] = 0x04 | 0x10; // valid_flag1: LIGHTBAR_CONTROL_ENABLE (0x04) | PLAYER_INDICATOR_CONTROL_ENABLE (0x10)
-    init_pkt[3] = 0x00;        // Small motor
-    init_pkt[4] = 0x00;        // Large motor
-    init_pkt[39] = 0x02;       // valid_flag2: LIGHTBAR_SETUP_CONTROL_ENABLE (0x02)
-    init_pkt[42] = 0x02;       // lightbar_setup: Lightbar normal mode
-    init_pkt[44] = 0x04;       // player_leds: Player 1 center dot LED ON
-    init_pkt[45] = 0x00;       // Red
-    init_pkt[46] = 0x00;       // Green
-    init_pkt[47] = 0xFF;       // Blue (PlayStation Blue Lightbar)
+    init_pkt[1] = 0x01 | 0x02; // valid_flag0: COMPATIBLE_VIBRATION | HAPTICS_SELECT
+    init_pkt[2] = 0x04 | 0x10; // valid_flag1: LIGHTBAR_CONTROL_ENABLE | PLAYER_INDICATOR_CONTROL_ENABLE
+    init_pkt[3] = 0x00;        // Small motor (off)
+    init_pkt[4] = 0x00;        // Large motor (off)
+    init_pkt[39] = 0x02;       // valid_flag2: LIGHTBAR_SETUP_CONTROL_ENABLE
+    init_pkt[42] = 0x02;       // lightbar_setup: normal mode
+    init_pkt[44] = 0x04;       // player_leds: Player 1 center dot ON
+    init_pkt[45] = 0x00;       // Red channel
+    init_pkt[46] = 0x00;       // Green channel
+    init_pkt[47] = 0xFF;       // Blue channel (PlayStation Blue)
 
     int sent = 0;
-    if (g_usb_state.endpoint_out && p_sceUsbdInterruptTransfer && g_dev_handle) {
+    if (g_usb_state.endpoint_out && p_sceUsbdInterruptTransfer) {
         int transferred = 0;
-        int r = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out, init_pkt, sizeof(init_pkt), &transferred, 100);
-        daemon_log(LOG_LEVEL_INFO, "DualSense init output report (63B) sent via Interrupt OUT (ret=0x%08X)", r);
+        int r = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out,
+                                           init_pkt, sizeof(init_pkt), &transferred, 150);
+        daemon_log(LOG_LEVEL_INFO, "DualSense init output report (63B) via Interrupt OUT (ret=0x%08X)", r);
         if (r == 0) sent = 1;
     }
-    if (!sent && p_sceUsbdControlTransfer && g_dev_handle) {
-        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, (uint16_t)g_claimed_interface, init_pkt, sizeof(init_pkt), 100);
-        daemon_log(LOG_LEVEL_INFO, "DualSense init output report sent via Control SET_REPORT (ret=0x%08X)", cr);
+    if (!sent) {
+        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202,
+                                          (uint16_t)g_claimed_interface, init_pkt, sizeof(init_pkt), 150);
+        daemon_log(LOG_LEVEL_INFO, "DualSense init output report via Control SET_REPORT (ret=0x%08X)", cr);
     }
 }
 
@@ -610,9 +661,14 @@ static int scan_and_open(void) {
                     s_last_ds4.connected = 1;
                     s_last_ds4.count = 1;
 
-                    // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer
-                    vpad_init();
-                    vpad_send_data(&s_last_ds4);
+                    // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer.
+                    // NOTE: For DualSense, vpad is deferred to first valid IN report (see poll_step).
+                    //       This avoids writing to USB endpoints before the controller has completed
+                    //       its probe handshake (would cause STALL on EP IN/OUT).
+                    if (det.type != CONTROLLER_DUALSENSE) {
+                        vpad_init();
+                        vpad_send_data(&s_last_ds4);
+                    }
 
                     if (det.type == CONTROLLER_XBOX360) {
                         init_xbox360_controller(h, det.interface_num, det.ep_out);
@@ -632,12 +688,16 @@ static int scan_and_open(void) {
                     } else if (det.type == CONTROLLER_SWITCH_PRO) {
                         init_switch_pro_controller();
                     } else if (det.type == CONTROLLER_DUALSENSE) {
+                        // DualSense: run the full hid-playstation probe sequence (GET_REPORT 0x09, 0x20, 0x05
+                        // + ClearHalt + 30ms delay) so the controller activates its interrupt endpoints.
+                        // vpad_init() and the PS button pulse will follow at the first valid IN report.
                         init_dualsense_controller();
                     }
 
                     // In Auto Mode: Send an automatic PS Button pulse to trigger the native
                     // Orbis OS "Who is using this controller?" user selection screen!
-                    if (g_daemon_config.mode == CONFIG_MODE_AUTO) {
+                    // NOTE: For DualSense, the pulse is deferred to the first valid IN report.
+                    if (g_daemon_config.mode == CONFIG_MODE_AUTO && det.type != CONTROLLER_DUALSENSE) {
                         vpad_pulse_ps_button();
                     }
 
@@ -910,12 +970,18 @@ void usb_driver_poll_step(void) {
             s_logged_first_report = 1;
         }
 
-        // DualSense: Activate Virtual DS4 and initialize output report once first valid input arrives
+        // DualSense: Activate Virtual DS4 on first valid input report.
+        // NOTE: init_dualsense_controller() (probe sequence + ClearHalt) was already called
+        // in scan_and_open() before the first interrupt transfer. Do NOT call it again here —
+        // that would re-run GET_REPORT 0x09/0x20/0x05 mid-stream and re-stall the endpoints.
         if (g_usb_state.type == CONTROLLER_DUALSENSE && !vpad_is_active()) {
             daemon_log(LOG_LEVEL_INFO, "DualSense first valid report received (%d bytes) - Activating Virtual DS4", transferred);
             vpad_init();
-            init_dualsense_controller();
             daemon_notify("OneFamily: DualSense Connected");
+            // PS button pulse deferred here because vpad must be active first
+            if (g_daemon_config.mode == CONFIG_MODE_AUTO) {
+                vpad_pulse_ps_button();
+            }
         }
 
         OrbisPadData ds4;
@@ -1278,9 +1344,15 @@ void usb_driver_poll_step(void) {
                                ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
                     s_logged_ds_err++;
                 }
-                // If stalled (PIPE error 0x80240009), attempt ClearHalt on input endpoint
-                if (ret == 0x80240009 && p_sceUsbdClearHalt && (s_consecutive_transfer_errors % 50 == 1)) {
+                // If stalled (PIPE error 0x80240009 or fatal 0x802400FF on EP IN),
+                // attempt ClearHalt to reset the endpoint data toggle and retry.
+                // 0x802400FF after probe sequence likely means toggle desync, not a true STALL.
+                int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors % 50 == 1)) {
+                    daemon_log(LOG_LEVEL_WARN, "DualSense EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
+                               ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(20000);
                 }
             } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
                 daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
