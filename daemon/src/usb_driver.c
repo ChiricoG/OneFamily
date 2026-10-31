@@ -139,6 +139,7 @@ static int s_last_guide_pressed = 0;
 static int s_consecutive_disconnects = 0;
 static int s_consecutive_transfer_errors = 0;
 static int s_consecutive_timeouts = 0;
+static int s_x360_ep_out_stalls = 0;
 
 static void write_status_file(bool connected, ControllerType type, uint16_t vid, uint16_t pid, const char* name, int nbuttons) {
     daemon_sys_mkdir("/data", 0777);
@@ -215,6 +216,7 @@ static void close_controller(void) {
     s_consecutive_disconnects = 0;
     s_consecutive_transfer_errors = 0;
     s_consecutive_timeouts = 0;
+    s_x360_ep_out_stalls = 0;
     s_awaiting_user_pick = false;
     s_picker_cancel_sent = false;
     s_picker_cancel_time_us = 0;
@@ -291,6 +293,10 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
         uint8_t led_pkt[3] = { 0x01, 0x03, 0x02 }; // LED 1 ON (Player 1)
         int ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 100);
         daemon_log(LOG_LEVEL_INFO, "Xbox 360 LED 1 command sent (ret=0x%08X)", ir);
+        if (ir != 0 && p_sceUsbdClearHalt) {
+            daemon_log(LOG_LEVEL_WARN, "Xbox 360 LED command rejected (0x%08X), executing ClearHalt on ep_out=0x%02X", ir, ep_out);
+            p_sceUsbdClearHalt(h, ep_out);
+        }
     }
 }
 
@@ -823,11 +829,28 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
             };
             p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt12, sizeof(pkt12), &transferred, 50);
         } else {
+            if (s_x360_ep_out_stalls >= 5) {
+                // If endpoint OUT is permanently stalled on this controller, avoid flooding
+                return;
+            }
             uint8_t pkt[8] = { 0x00, 0x08, 0x00, large_motor, small_motor, 0x00, 0x00, 0x00 };
             int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
             if (ret != 0) {
+                if ((ret == 0x802400FF || ret == 0x80240009) && p_sceUsbdClearHalt) {
+                    p_sceUsbdClearHalt(g_dev_handle, ep);
+                }
                 uint8_t pkt4[4] = { 0x00, 0x04, large_motor, small_motor };
-                p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, 50);
+                int ret4 = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, 50);
+                if (ret4 != 0) {
+                    if ((ret4 == 0x802400FF || ret4 == 0x80240009) && p_sceUsbdClearHalt) {
+                        p_sceUsbdClearHalt(g_dev_handle, ep);
+                    }
+                    s_x360_ep_out_stalls++;
+                } else {
+                    s_x360_ep_out_stalls = 0;
+                }
+            } else {
+                s_x360_ep_out_stalls = 0;
             }
         }
     } else if (g_usb_state.type == CONTROLLER_XBOXONE) {
@@ -1452,6 +1475,20 @@ void usb_driver_poll_step(void) {
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
                     daemon_sys_usleep(20000);
                 }
+            } else if (g_usb_state.type == CONTROLLER_XBOX360 || g_usb_state.type == CONTROLLER_XBOXONE) {
+                static int s_logged_xb_err = 0;
+                if (s_logged_xb_err < 10) {
+                    daemon_log(LOG_LEVEL_WARN, "%s interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
+                               controller_type_to_str(g_usb_state.type), ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+                    s_logged_xb_err++;
+                }
+                int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors % 25 == 1)) {
+                    daemon_log(LOG_LEVEL_WARN, "%s EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
+                               controller_type_to_str(g_usb_state.type), ret, s_consecutive_transfer_errors);
+                    p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(10000);
+                }
             } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
                 daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
                            ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
@@ -1467,13 +1504,13 @@ void usb_driver_poll_step(void) {
                 }
             }
 
-            // Check if device is physically disconnected or persistent transfer failures occur
-            int max_allowed_errors = (g_usb_state.type == CONTROLLER_DUALSENSE || g_usb_state.type == CONTROLLER_GENERIC_HID) ? 250 : 25;
-            int physically_disconnected = (p_sceUsbdCheckConnected != NULL && p_sceUsbdCheckConnected(g_dev_handle) != 0);
-            if (physically_disconnected || s_consecutive_transfer_errors >= max_allowed_errors) {
+            // Check if device has persistent transfer failures
+            int max_allowed_errors = (g_usb_state.type == CONTROLLER_DUALSENSE || g_usb_state.type == CONTROLLER_GENERIC_HID) ? 250 : 100;
+            if (s_consecutive_transfer_errors >= max_allowed_errors) {
                 daemon_log(LOG_LEVEL_INFO, "Closing controller after persistent transfer failure (ret=0x%08X, err_count=%d)",
                            ret, s_consecutive_transfer_errors);
                 s_consecutive_transfer_errors = 0;
+                s_consecutive_disconnects = 0;
                 close_controller();
             } else {
                 // Keep 250 Hz alive with last known state during transient error recovery

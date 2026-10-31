@@ -258,7 +258,7 @@ static void default_mapping(GenericHidContext *g) {
     };
     static const uint32_t dinput[14] = {
         DS4_BUTTON_SQUARE, DS4_BUTTON_CROSS, DS4_BUTTON_CIRCLE, DS4_BUTTON_TRIANGLE, DS4_BUTTON_L1, DS4_BUTTON_R1,
-        DS4_BUTTON_L2, DS4_BUTTON_R2, DS4_BUTTON_SHARE, DS4_BUTTON_OPTIONS, DS4_BUTTON_L3, DS4_BUTTON_R3, DS4_BUTTON_PS, DS4_BUTTON_TOUCHPAD,
+        DS4_BUTTON_L2, DS4_BUTTON_R2, DS4_BUTTON_SHARE, DS4_BUTTON_OPTIONS, DS4_BUTTON_L3, DS4_BUTTON_R3, 0, 0,
     };
     const hid_field *a = g->axis;
 
@@ -450,7 +450,18 @@ static int parse_ini_line(GenericHidContext *g, char *line) {
     "button9=share\nbutton10=options\nbutton11=l3\nbutton12=r3\n" \
     "lx=x\nly=y\nrx=z\nry=rz\n"
 
+#define SHANWAN_ORDER \
+    "button1=square\nbutton2=cross\nbutton3=circle\nbutton4=triangle\n" \
+    "button5=l1\nbutton6=r1\nbutton7=l2\nbutton8=r2\n" \
+    "button9=create\nbutton10=options\nbutton11=l3\nbutton12=r3\n" \
+    "button13=none\nbutton14=none\n" \
+    "lx=x\nly=y\nrx=z\nry=rz\n" \
+    "rumble=none\n"
+
 static const struct { uint16_t vid, pid; const char *map; } k_builtin[] = {
+    { 0x2563, 0x0119, SHANWAN_ORDER }, /* ShanWan 2.4G Wireless Dongle / BSP-G6 */
+    { 0x2563, 0x0523, SHANWAN_ORDER }, /* ShanWan PS3/PC Gamepad */
+    { 0x2563, 0x0575, SHANWAN_ORDER }, /* ShanWan Wireless Gamepad */
     { 0x046D, 0xC216, LOGITECH_DINPUT_ORDER }, /* Logitech F310 / Dual Action (DirectInput mode) */
     { 0x046D, 0xC219, LOGITECH_DINPUT_ORDER }, /* Logitech F710 Wireless (DirectInput mode) */
     { 0x046D, 0xC218, LOGITECH_DINPUT_ORDER }, /* Logitech RumblePad 2 (DirectInput mode) */
@@ -799,7 +810,12 @@ int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, cons
         if (hat < 8) b |= dirs[hat];
         if (len >= off + 7) {
             uint16_t btns = (uint16_t)rx[off + 5] | ((uint16_t)rx[off + 6] << 8);
-            for (int i = 0; i < 14; i++) {
+            int max_fallback_btns = (s_ctx.nbuttons > 0 && s_ctx.nbuttons <= 14) ? s_ctx.nbuttons : 12;
+            for (int i = 0; i < max_fallback_btns; i++) {
+                // In unconfigured raw fallback, ignore phantom PS / Touchpad bindings from telemetry bits
+                if (!s_configured && (s_ctx.button_map[i] & (DS4_BUTTON_PS | DS4_BUTTON_TOUCHPAD))) {
+                    continue;
+                }
                 mask |= s_ctx.button_map[i];
                 if (btns & (1 << i)) b |= s_ctx.button_map[i];
             }
