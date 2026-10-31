@@ -30,11 +30,25 @@ typedef int (*scePadVirtualDeviceAddDevice_t)(const ScePadVirtualDeviceParam *pa
 typedef int (*scePadVirtualDeviceInsertData_t)(int handle, const void *data);
 typedef int (*scePadVirtualDeviceDeleteDevice_t)(int handle);
 typedef int (*scePadVirtualDeviceGetRemoteSetting_t)(int handle, void *out_setting);
+typedef int32_t (*scePadGetHandle_t)(int32_t userId, uint32_t type, uint32_t index);
+typedef int32_t (*scePadOpen_t)(int32_t userId, int32_t type, int32_t index, void *param);
+typedef int32_t (*scePadClose_t)(int32_t handle);
+typedef int32_t (*scePadGetDeviceId_t)(int32_t handle, int64_t *outDeviceId);
+typedef int32_t (*scePadDisconnectPort_t)(int32_t handle);
+typedef int32_t (*scePadDisconnectDevice_t)(int32_t handle_or_devId);
 
 // libSceMbus APIs
 typedef int (*sceMbusInit_t)(void);
 typedef int (*sceMbusBindDeviceWithUserId_t)(int deviceId, int32_t userId);
 typedef int (*sceMbusDisconnectDevice_t)(int deviceId);
+typedef int32_t (*sceMbusResolveByHandle_t)(int32_t handle, int64_t *outDeviceId);
+
+// libSceHidControl APIs
+typedef int32_t (*sceHidControlInit_t)(void);
+typedef int32_t (*sceHidControlGetDeviceId_t)(int32_t handle, int64_t *outDeviceId);
+typedef int32_t (*sceHidControlDisconnectPort_t)(int32_t handle);
+typedef int32_t (*sceHidControlDisconnectDevice_t)(int32_t deviceId);
+typedef int32_t (*sceHidControlDisconnectHandle_t)(int32_t handle);
 
 // libSceUserService APIs
 #define SCE_USER_SERVICE_MAX_LOGIN_USERS 4
@@ -54,6 +68,7 @@ typedef int (*sceUserServiceGetUserName_t)(SceUserServiceUserId userId, char *us
 static int g_hMbus = 0;
 static int g_hPad = 0;
 static int g_hUserService = 0;
+static int g_hHidControl = 0;
 static int g_vpad_handle = -1;
 static bool g_vpad_active = false;
 static vpad_rumble_cb_t g_rumble_cb = NULL;
@@ -66,10 +81,23 @@ static scePadVirtualDeviceAddDevice_t        p_scePadVirtualDeviceAddDevice = NU
 static scePadVirtualDeviceInsertData_t       p_scePadVirtualDeviceInsertData = NULL;
 static scePadVirtualDeviceDeleteDevice_t     p_scePadVirtualDeviceDeleteDevice = NULL;
 static scePadVirtualDeviceGetRemoteSetting_t p_scePadVirtualDeviceGetRemoteSetting = NULL;
+static scePadGetHandle_t                     p_scePadGetHandle = NULL;
+static scePadOpen_t                          p_scePadOpen = NULL;
+static scePadClose_t                         p_scePadClose = NULL;
+static scePadGetDeviceId_t                   p_scePadGetDeviceId = NULL;
+static scePadDisconnectPort_t                p_scePadDisconnectPort = NULL;
+static scePadDisconnectDevice_t              p_scePadDisconnectDevice = NULL;
 
 static sceMbusInit_t                         p_sceMbusInit = NULL;
 static sceMbusBindDeviceWithUserId_t         p_sceMbusBindDeviceWithUserId = NULL;
 static sceMbusDisconnectDevice_t             p_sceMbusDisconnectDevice = NULL;
+static sceMbusResolveByHandle_t              p_sceMbusResolveByHandle = NULL;
+
+static sceHidControlInit_t                   p_sceHidControlInit = NULL;
+static sceHidControlGetDeviceId_t            p_sceHidControlGetDeviceId = NULL;
+static sceHidControlDisconnectPort_t         p_sceHidControlDisconnectPort = NULL;
+static sceHidControlDisconnectDevice_t       p_sceHidControlDisconnectDevice = NULL;
+static sceHidControlDisconnectHandle_t       p_sceHidControlDisconnectHandle = NULL;
 
 static sceUserServiceInitialize_t           p_sceUserServiceInitialize = NULL;
 static sceUserServiceGetInitialUser_t       p_sceUserServiceGetInitialUser = NULL;
@@ -125,6 +153,125 @@ static void init_user_service(void) {
         } else {
             daemon_log(LOG_LEVEL_WARN, "Failed to load libSceUserService.sprx");
         }
+    }
+}
+
+static void init_hid_control(void) {
+    if (g_hHidControl == 0) {
+        if (load_prx("libSceHidControl.sprx", &g_hHidControl) == 0 && g_hHidControl != 0) {
+            daemon_log(LOG_LEVEL_INFO, "libSceHidControl.sprx loaded successfully (handle=0x%X)", g_hHidControl);
+            daemon_sys_dlsym(g_hHidControl, "sceHidControlInit", (void**)&p_sceHidControlInit);
+            daemon_sys_dlsym(g_hHidControl, "sceHidControlGetDeviceId", (void**)&p_sceHidControlGetDeviceId);
+            daemon_sys_dlsym(g_hHidControl, "sceHidControlDisconnectPort", (void**)&p_sceHidControlDisconnectPort);
+            daemon_sys_dlsym(g_hHidControl, "sceHidControlDisconnectDevice", (void**)&p_sceHidControlDisconnectDevice);
+            daemon_sys_dlsym(g_hHidControl, "sceHidControlDisconnectHandle", (void**)&p_sceHidControlDisconnectHandle);
+            if (p_sceHidControlInit) {
+                int r = p_sceHidControlInit();
+                daemon_log(LOG_LEVEL_INFO, "sceHidControlInit() = 0x%08X", r);
+            }
+        }
+    }
+}
+
+static void vpad_poweroff_physical_ds4(void) {
+    if (g_daemon_config.mode == CONFIG_MODE_SECONDARY) {
+        daemon_log(LOG_LEVEL_INFO, "Skipping physical DS4 power-off (CONFIG_MODE_SECONDARY active for Player 2 co-op)");
+        return;
+    }
+
+    init_user_service();
+    init_hid_control();
+
+    SceUserServiceLoginUserIdList list;
+    memset(&list, 0, sizeof(list));
+    for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
+        list.userId[i] = SCE_USER_SERVICE_USER_ID_INVALID;
+    }
+
+    if (p_sceUserServiceGetLoginUserIdList) {
+        p_sceUserServiceGetLoginUserIdList(&list);
+    }
+    if (list.userId[0] == SCE_USER_SERVICE_USER_ID_INVALID && p_sceUserServiceGetInitialUser) {
+        p_sceUserServiceGetInitialUser(&list.userId[0]);
+    }
+
+    bool any_disconnected = false;
+    for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
+        SceUserServiceUserId uid = list.userId[i];
+        if (uid == SCE_USER_SERVICE_USER_ID_INVALID || uid == 0 || (uint32_t)uid == 0xFFFFFFFF) {
+            continue;
+        }
+
+        int32_t pad_handle = -1;
+        bool opened_temp = false;
+        if (p_scePadGetHandle) {
+            pad_handle = p_scePadGetHandle(uid, 0, 0);
+        }
+        if (pad_handle < 0 && p_scePadOpen) {
+            pad_handle = p_scePadOpen(uid, 0, 0, NULL);
+            if (pad_handle >= 0) {
+                opened_temp = true;
+            }
+        }
+
+        if (pad_handle >= 0 && pad_handle != g_vpad_handle) {
+            int64_t dev_id[4] = {0, 0, 0, 0};
+            if (p_scePadGetDeviceId) {
+                int r_id = p_scePadGetDeviceId(pad_handle, dev_id);
+                daemon_log(LOG_LEVEL_INFO, "Physical DS4 [user=0x%X, handle=0x%X]: scePadGetDeviceId() = 0x%08X, dev_id=0x%llX",
+                           uid, pad_handle, r_id, (unsigned long long)dev_id[0]);
+            }
+            if (dev_id[0] == 0 && p_sceHidControlGetDeviceId) {
+                p_sceHidControlGetDeviceId(pad_handle, dev_id);
+            }
+            if (dev_id[0] == 0 && p_sceMbusResolveByHandle) {
+                p_sceMbusResolveByHandle(pad_handle, dev_id);
+            }
+
+            daemon_log(LOG_LEVEL_INFO, "Powering off physical DS4 for user 0x%X (handle=0x%X, dev_id=0x%X)...",
+                       uid, pad_handle, (int32_t)dev_id[0]);
+
+            if (p_scePadDisconnectPort) {
+                int r = p_scePadDisconnectPort(pad_handle);
+                daemon_log(LOG_LEVEL_INFO, "scePadDisconnectPort(0x%X) = 0x%08X", pad_handle, r);
+            }
+            if (dev_id[0] > 0) {
+                if (p_sceMbusDisconnectDevice) {
+                    int r = p_sceMbusDisconnectDevice((int32_t)dev_id[0]);
+                    daemon_log(LOG_LEVEL_INFO, "sceMbusDisconnectDevice(0x%X) = 0x%08X", (int32_t)dev_id[0], r);
+                }
+                if (p_sceHidControlDisconnectDevice) {
+                    int r = p_sceHidControlDisconnectDevice((int32_t)dev_id[0]);
+                    daemon_log(LOG_LEVEL_INFO, "sceHidControlDisconnectDevice(0x%X) = 0x%08X", (int32_t)dev_id[0], r);
+                }
+                if (p_scePadDisconnectDevice) {
+                    int r = p_scePadDisconnectDevice((int32_t)dev_id[0]);
+                    daemon_log(LOG_LEVEL_INFO, "scePadDisconnectDevice(dev_id=0x%X) = 0x%08X", (int32_t)dev_id[0], r);
+                }
+            }
+            if (p_sceHidControlDisconnectPort) {
+                int r = p_sceHidControlDisconnectPort(pad_handle);
+                daemon_log(LOG_LEVEL_INFO, "sceHidControlDisconnectPort(0x%X) = 0x%08X", pad_handle, r);
+            }
+            if (p_sceHidControlDisconnectHandle) {
+                int r = p_sceHidControlDisconnectHandle(pad_handle);
+                daemon_log(LOG_LEVEL_INFO, "sceHidControlDisconnectHandle(0x%X) = 0x%08X", pad_handle, r);
+            }
+            if (p_scePadDisconnectDevice) {
+                int r = p_scePadDisconnectDevice(pad_handle);
+                daemon_log(LOG_LEVEL_INFO, "scePadDisconnectDevice(handle=0x%X) = 0x%08X", pad_handle, r);
+            }
+
+            if (opened_temp && p_scePadClose) {
+                p_scePadClose(pad_handle);
+            }
+            any_disconnected = true;
+        }
+    }
+
+    if (any_disconnected) {
+        // Wait 100ms for Bluetooth/Mbus stack to complete physical DS4 power-off
+        daemon_sys_usleep(100000);
     }
 }
 
@@ -296,6 +443,7 @@ int vpad_init(void) {
             daemon_sys_dlsym(g_hMbus, "sceMbusInit", (void**)&p_sceMbusInit);
             daemon_sys_dlsym(g_hMbus, "sceMbusBindDeviceWithUserId", (void**)&p_sceMbusBindDeviceWithUserId);
             daemon_sys_dlsym(g_hMbus, "sceMbusDisconnectDevice", (void**)&p_sceMbusDisconnectDevice);
+            daemon_sys_dlsym(g_hMbus, "sceMbusResolveByHandle", (void**)&p_sceMbusResolveByHandle);
             if (p_sceMbusInit) {
                 int r = p_sceMbusInit();
                 daemon_log(LOG_LEVEL_INFO, "sceMbusInit() = 0x%08X", r);
@@ -320,6 +468,12 @@ int vpad_init(void) {
         daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceInsertData", (void**)&p_scePadVirtualDeviceInsertData);
         daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceDeleteDevice", (void**)&p_scePadVirtualDeviceDeleteDevice);
         daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceGetRemoteSetting", (void**)&p_scePadVirtualDeviceGetRemoteSetting);
+        daemon_sys_dlsym(g_hPad, "scePadGetHandle", (void**)&p_scePadGetHandle);
+        daemon_sys_dlsym(g_hPad, "scePadOpen", (void**)&p_scePadOpen);
+        daemon_sys_dlsym(g_hPad, "scePadClose", (void**)&p_scePadClose);
+        daemon_sys_dlsym(g_hPad, "scePadGetDeviceId", (void**)&p_scePadGetDeviceId);
+        daemon_sys_dlsym(g_hPad, "scePadDisconnectPort", (void**)&p_scePadDisconnectPort);
+        daemon_sys_dlsym(g_hPad, "scePadDisconnectDevice", (void**)&p_scePadDisconnectDevice);
 
         // Fallback: check if sceMbusBindDeviceWithUserId is exported from libScePad
         if (!p_sceMbusBindDeviceWithUserId) {
@@ -344,6 +498,10 @@ int vpad_init(void) {
         daemon_log(LOG_LEVEL_ERROR, "VirtualDevice APIs not exported by libScePad");
         return -2;
     }
+
+    // 3b. Power off / disconnect any active physical DualShock 4 before registering Virtual DS4
+    //     so its Bluetooth link drops cleanly (LED turns off) and never gets stuck in an unbound state
+    vpad_poweroff_physical_ds4();
 
     // 4. Register Virtual DualShock 4 as Device Type 1
     // Type 1 is the official PS4 virtual DualShock 4 device type recognized by games & OS
