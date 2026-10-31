@@ -174,6 +174,15 @@ static uint16_t s_failed_cooldown_vid = 0;
 static uint16_t s_failed_cooldown_pid = 0;
 static uint64_t s_failed_cooldown_until_us = 0;
 
+// User picker cancellation state (applies to ALL controllers in AUTO mode)
+static bool     s_awaiting_user_pick = false;
+static bool     s_picker_cancel_sent = false;
+static uint64_t s_picker_cancel_time_us = 0;
+
+// Wait-for-physical-replug state after user cancels picker with B/Circle
+static uint16_t s_replug_vid = 0;
+static uint16_t s_replug_pid = 0;
+
 static void close_controller(void) {
     bool had_vpad = vpad_is_active();
     uint16_t closing_vid = g_usb_state.vid;
@@ -206,6 +215,9 @@ static void close_controller(void) {
     s_consecutive_disconnects = 0;
     s_consecutive_transfer_errors = 0;
     s_consecutive_timeouts = 0;
+    s_awaiting_user_pick = false;
+    s_picker_cancel_sent = false;
+    s_picker_cancel_time_us = 0;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
     s_last_ds4.leftStick.x = 128;
     s_last_ds4.leftStick.y = 128;
@@ -553,6 +565,7 @@ static int scan_and_open(void) {
 
     int found = 0;
     int cooldown_seen = 0;
+    int replug_seen = 0;
 
     for (ssize_t i = 0; i < count && !found; i++) {
         libusb_device* dev = list[i];
@@ -561,6 +574,12 @@ static int scan_and_open(void) {
 
         daemon_log(LOG_LEVEL_INFO, "USB Device [%d]: VID:0x%04X PID:0x%04X (Class:0x%02X)",
                    (int)i, desc.idVendor, desc.idProduct, desc.bDeviceClass);
+
+        // Skip device if user cancelled the account selection menu (B/Circle) and hasn't unplugged it yet
+        if (s_replug_vid != 0 && desc.idVendor == s_replug_vid && desc.idProduct == s_replug_pid) {
+            replug_seen = 1;
+            continue;
+        }
 
         // Skip device if currently under failure cooldown to prevent notification loops
         if (s_failed_cooldown_vid != 0 && desc.idVendor == s_failed_cooldown_vid && desc.idProduct == s_failed_cooldown_pid) {
@@ -699,6 +718,10 @@ static int scan_and_open(void) {
                     // NOTE: For DualSense, the pulse is deferred to the first valid IN report.
                     if (g_daemon_config.mode == CONFIG_MODE_AUTO && det.type != CONTROLLER_DUALSENSE) {
                         vpad_pulse_ps_button();
+                        s_awaiting_user_pick = true;
+                        s_picker_cancel_sent = false;
+                        s_picker_cancel_time_us = 0;
+                        daemon_log(LOG_LEVEL_INFO, "User picker launched — monitoring Circle/B (cancel) vs Cross/A (confirm)");
                     }
 
                     int slot = vpad_get_assigned_slot();
@@ -718,6 +741,13 @@ static int scan_and_open(void) {
         s_failed_cooldown_vid = 0;
         s_failed_cooldown_pid = 0;
         s_failed_cooldown_until_us = 0;
+    }
+
+    if (s_replug_vid != 0 && !replug_seen) {
+        daemon_log(LOG_LEVEL_INFO, "Controller VID:0x%04X PID:0x%04X physically unplugged — ready for reconnection",
+                   s_replug_vid, s_replug_pid);
+        s_replug_vid = 0;
+        s_replug_pid = 0;
     }
 
     p_sceUsbdFreeDeviceList(list);
@@ -939,6 +969,58 @@ int usb_driver_init(void) {
     return 0;
 }
 
+static void execute_picker_cancel_teardown(void) {
+    // Send a final neutral packet so no buttons remain latched before tearing down
+    OrbisPadData neutral = s_last_ds4;
+    neutral.buttons = 0;
+    neutral.timestamp = daemon_sys_time_us();
+    vpad_send_data(&neutral);
+
+    daemon_log(LOG_LEVEL_INFO, "User cancelled account selection (B/Circle) — shutting down Virtual Pad until physical replug");
+    s_replug_vid = g_usb_state.vid;
+    s_replug_pid = g_usb_state.pid;
+    s_awaiting_user_pick = false;
+    s_picker_cancel_sent = false;
+    s_picker_cancel_time_us = 0;
+
+    // Shut down Virtual Pad first so physical DS4 immediately regains PS4 focus
+    // (also prevents close_controller() from firing the generic "Controller Disconnected" toast)
+    vpad_shutdown();
+    close_controller();
+    daemon_notify("OneFamily: Reconnect controller to use");
+}
+
+static void handle_pad_input_and_send(const OrbisPadData* ds4) {
+    if (s_awaiting_user_pick) {
+        bool circle = (ds4->buttons & DS4_BUTTON_CIRCLE) != 0;
+        bool cross  = (ds4->buttons & DS4_BUTTON_CROSS)  != 0;
+
+        if (s_picker_cancel_sent) {
+            // Phase 2: Circle press was already forwarded to Orbis OS to dismiss the picker;
+            // wait for button release (or 400ms safety timeout) before destroying the virtual pad
+            uint64_t now = daemon_sys_time_us();
+            if (!circle || (now - s_picker_cancel_time_us > 400000ULL)) {
+                execute_picker_cancel_teardown();
+                return;
+            }
+        } else if (circle && !cross) {
+            // Phase 1: User pressed B/Circle on the account selection screen
+            daemon_log(LOG_LEVEL_INFO, "User picker: B/Circle pressed — forwarding to OS to close menu, then tearing down");
+            s_picker_cancel_sent = true;
+            s_picker_cancel_time_us = daemon_sys_time_us();
+        } else if (cross) {
+            // User pressed A/Cross to select an account -> confirmed!
+            daemon_log(LOG_LEVEL_INFO, "User picker: A/Cross pressed — user profile confirmed");
+            s_awaiting_user_pick = false;
+            s_picker_cancel_sent = false;
+            s_picker_cancel_time_us = 0;
+        }
+    }
+
+    s_last_ds4 = *ds4;
+    vpad_send_data(ds4);
+}
+
 void usb_driver_poll_step(void) {
     uint64_t now_us = daemon_sys_time_us();
 
@@ -981,6 +1063,10 @@ void usb_driver_poll_step(void) {
             // PS button pulse deferred here because vpad must be active first
             if (g_daemon_config.mode == CONFIG_MODE_AUTO) {
                 vpad_pulse_ps_button();
+                s_awaiting_user_pick = true;
+                s_picker_cancel_sent = false;
+                s_picker_cancel_time_us = 0;
+                daemon_log(LOG_LEVEL_INFO, "User picker launched — monitoring Circle/B (cancel) vs Cross/A (confirm)");
             }
         }
 
@@ -1051,8 +1137,7 @@ void usb_driver_poll_step(void) {
                     ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
                     ds4.buttons |= DS4_BUTTON_PS;
                 }
-                s_last_ds4 = ds4;
-                vpad_send_data(&ds4);
+                handle_pad_input_and_send(&ds4);
             }
         } else if (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4) {
             if (rx[0] == XBOXONE_REPORT_INPUT && transferred >= 18) {
@@ -1070,8 +1155,7 @@ void usb_driver_poll_step(void) {
                     ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
                     ds4.buttons |= DS4_BUTTON_PS;
                 }
-                s_last_ds4 = ds4;
-                vpad_send_data(&ds4);
+                handle_pad_input_and_send(&ds4);
             } else if (rx[0] == XBOXONE_REPORT_GUIDE) {
                 // Send GIP ACK to controller if requested (GIP_OPT_ACK: 0x10 or 0x01)
                 if ((rx[1] & 0x10) || (rx[1] & 0x01)) {
@@ -1119,8 +1203,7 @@ void usb_driver_poll_step(void) {
                 ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
                 ds4.buttons |= DS4_BUTTON_PS;
             }
-            s_last_ds4 = ds4;
-            vpad_send_data(&ds4);
+            handle_pad_input_and_send(&ds4);
         } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO && transferred >= 11) {
             static int s_logged_sw_report = 0;
             if (s_logged_sw_report < 10) {
@@ -1150,8 +1233,7 @@ void usb_driver_poll_step(void) {
                         daemon_log(LOG_LEVEL_INFO, "Switch Pro buttons active: 0x%08X", ds4.buttons);
                     }
 
-                    s_last_ds4 = ds4;
-                    vpad_send_data(&ds4);
+                    handle_pad_input_and_send(&ds4);
                 }
             } else if (rx[0] == 0x3F && transferred >= sizeof(SwitchSimpleReport)) {
                 const SwitchSimpleReport* simple = (const SwitchSimpleReport*)rx;
@@ -1168,8 +1250,7 @@ void usb_driver_poll_step(void) {
                 if (sw_fallback.buttons1 & SWITCH_BTN_HOME) {
                     ds4.buttons |= get_guide_button_mask();
                 }
-                s_last_ds4 = ds4;
-                vpad_send_data(&ds4);
+                handle_pad_input_and_send(&ds4);
             }
         } else if (g_usb_state.type == CONTROLLER_DS3 && transferred >= sizeof(DS3Report)) {
             translator_convert_ds3((const DS3Report*)rx, &ds4, &s_trans_cfg);
@@ -1177,8 +1258,7 @@ void usb_driver_poll_step(void) {
                 ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
                 ds4.buttons |= DS4_BUTTON_PS;
             }
-            s_last_ds4 = ds4;
-            vpad_send_data(&ds4);
+            handle_pad_input_and_send(&ds4);
         } else if (g_usb_state.type == CONTROLLER_DUALSENSE && transferred >= 10) {
             static int s_logged_ds_report = 0;
             if (s_logged_ds_report < 10) {
@@ -1217,8 +1297,7 @@ void usb_driver_poll_step(void) {
                     daemon_log(LOG_LEVEL_INFO, "DualSense buttons active: 0x%08X", ds4.buttons);
                 }
 
-                s_last_ds4 = ds4;
-                vpad_send_data(&ds4);
+                handle_pad_input_and_send(&ds4);
             }
         } else if (g_usb_state.type == CONTROLLER_STADIA && transferred >= 9) {
             static int s_logged_stadia_report = 0;
@@ -1261,8 +1340,7 @@ void usb_driver_poll_step(void) {
                     daemon_log(LOG_LEVEL_INFO, "Stadia buttons active: 0x%08X", ds4.buttons);
                 }
 
-                s_last_ds4 = ds4;
-                vpad_send_data(&ds4);
+                handle_pad_input_and_send(&ds4);
             }
         } else if (g_usb_state.type == CONTROLLER_GENERIC_HID && transferred > 0) {
             static int s_logged_generic_report = 0;
@@ -1289,8 +1367,7 @@ void usb_driver_poll_step(void) {
                     ds4.buttons |= DS4_BUTTON_TOUCHPAD;
                 }
 
-                s_last_ds4 = ds4;
-                vpad_send_data(&ds4);
+                handle_pad_input_and_send(&ds4);
             }
         }
     } else {
@@ -1308,6 +1385,11 @@ void usb_driver_poll_step(void) {
         }
 
         if (ret == 0x80240007 || ret == -7) {
+            // If user pressed B/Circle to cancel picker and held it without further USB packets for >400ms
+            if (s_awaiting_user_pick && s_picker_cancel_sent && (daemon_sys_time_us() - s_picker_cancel_time_us > 400000ULL)) {
+                execute_picker_cancel_teardown();
+                return;
+            }
             s_consecutive_timeouts++;
             // Active bus presence probe: if device has timed out for ~30 consecutive polls (~500ms),
             // verify if the device is still physically enumerated on the USB bus.
