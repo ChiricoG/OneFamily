@@ -336,6 +336,15 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
     draw_text(scene, "Companion", fontTitle, 175, 188, COLOR_BLUE_BRIGHT);
     draw_text(scene, "No more console war - we are a family!", fontSubtitle, 175, 222, COLOR_TEXT_DIM);
 
+    // Header Persistent Update Badge (visible across all tabs if an update is available)
+    if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
+        int bX = 1260, bY = 138, bW = 290, bH = 46;
+        draw_rounded_rect(scene, bX, bY, bW, bH, 8, Color{ 10, 42, 28 });
+        draw_rounded_outline(scene, bX, bY, bW, bH, 8, Color{ 0, 255, 150 }, 2);
+        std::string badgeStr = "UPDATE: " + updater->get_latest_version();
+        draw_text(scene, badgeStr, fontCardTitle, bX + 22, bY + 31, Color{ 0, 255, 150 });
+    }
+
     // 3. Left Sidebar (3 or 4 Tabs based on HID controller connection)
     // Tab 0: Settings (Y = 280)
     if (activeTab == 0) {
@@ -391,6 +400,9 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
             draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 520, COLOR_TEXT_DIM);
         }
         draw_image(scene, btnR1, SIDEBAR_X + 250, 496);
+        if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
+            draw_circle(scene, SIDEBAR_X + 132, 511, 5, Color{ 0, 255, 150 });
+        }
     } else {
         // Tab 2: Info (Y = 416)
         if (activeTab == 2) {
@@ -405,6 +417,9 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
             draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_TEXT_DIM);
         }
         draw_image(scene, btnR1, SIDEBAR_X + 250, 428);
+        if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
+            draw_circle(scene, SIDEBAR_X + 132, 443, 5, Color{ 0, 255, 150 });
+        }
     }
 
     // 4. Main Content Area
@@ -566,8 +581,10 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         } else if (upState == UPDATER_DOWNLOADING) {
             UpdaterProgress prog = updater->get_progress();
             char dlTitle[128];
-            snprintf(dlTitle, sizeof(dlTitle), "Downloading Update: %d%% (%ld MB / %ld MB)",
-                     prog.percent, prog.bytesReceived / (1024 * 1024), prog.totalBytes / (1024 * 1024));
+            snprintf(dlTitle, sizeof(dlTitle), "Downloading Update: %d%% (%llu MB / %llu MB)",
+                     prog.percent,
+                     (unsigned long long)(prog.bytesReceived / (1024 * 1024)),
+                     (unsigned long long)(prog.totalBytes / (1024 * 1024)));
             draw_text(scene, dlTitle, fontCardTitle, CARD_X + 90, 468, COLOR_BLUE_BRIGHT);
 
             // Progress bar
