@@ -29,6 +29,7 @@ public:
 private:
     bool m_enabled;
     float m_time;
+    uint32_t* m_canvas;
 
     static const int PARTICLE_COUNT = 36;
     PSParticle m_particles[PARTICLE_COUNT];
