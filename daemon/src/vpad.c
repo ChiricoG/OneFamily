@@ -303,41 +303,41 @@ int vpad_init(void) {
         }
     }
 
-    // 2. Load libScePad
+    // 2. Load libScePad and initialize Pad/Mbus once
     if (g_hPad == 0) {
         if (load_prx("libScePad.sprx", &g_hPad) < 0) {
             daemon_log(LOG_LEVEL_ERROR, "Failed to load libScePad.sprx");
             return -1;
         }
         daemon_log(LOG_LEVEL_INFO, "libScePad.sprx loaded successfully (handle=0x%X)", g_hPad);
-    }
 
-    // 3. Resolve Pad Symbols
-    daemon_sys_dlsym(g_hPad, "scePadInit", (void**)&p_scePadInit);
-    daemon_sys_dlsym(g_hPad, "scePadMbusInit", (void**)&p_scePadMbusInit);
-    daemon_sys_dlsym(g_hPad, "scePadSetProcessPrivilege", (void**)&p_scePadSetProcessPrivilege);
-    daemon_sys_dlsym(g_hPad, "scePadSetConnection", (void**)&p_scePadSetConnection);
-    daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceAddDevice", (void**)&p_scePadVirtualDeviceAddDevice);
-    daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceInsertData", (void**)&p_scePadVirtualDeviceInsertData);
-    daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceDeleteDevice", (void**)&p_scePadVirtualDeviceDeleteDevice);
-    daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceGetRemoteSetting", (void**)&p_scePadVirtualDeviceGetRemoteSetting);
+        // 3. Resolve Pad Symbols
+        daemon_sys_dlsym(g_hPad, "scePadInit", (void**)&p_scePadInit);
+        daemon_sys_dlsym(g_hPad, "scePadMbusInit", (void**)&p_scePadMbusInit);
+        daemon_sys_dlsym(g_hPad, "scePadSetProcessPrivilege", (void**)&p_scePadSetProcessPrivilege);
+        daemon_sys_dlsym(g_hPad, "scePadSetConnection", (void**)&p_scePadSetConnection);
+        daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceAddDevice", (void**)&p_scePadVirtualDeviceAddDevice);
+        daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceInsertData", (void**)&p_scePadVirtualDeviceInsertData);
+        daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceDeleteDevice", (void**)&p_scePadVirtualDeviceDeleteDevice);
+        daemon_sys_dlsym(g_hPad, "scePadVirtualDeviceGetRemoteSetting", (void**)&p_scePadVirtualDeviceGetRemoteSetting);
 
-    // Fallback: check if sceMbusBindDeviceWithUserId is exported from libScePad
-    if (!p_sceMbusBindDeviceWithUserId) {
-        daemon_sys_dlsym(g_hPad, "sceMbusBindDeviceWithUserId", (void**)&p_sceMbusBindDeviceWithUserId);
-    }
+        // Fallback: check if sceMbusBindDeviceWithUserId is exported from libScePad
+        if (!p_sceMbusBindDeviceWithUserId) {
+            daemon_sys_dlsym(g_hPad, "sceMbusBindDeviceWithUserId", (void**)&p_sceMbusBindDeviceWithUserId);
+        }
 
-    if (p_scePadInit) {
-        int r = p_scePadInit();
-        daemon_log(LOG_LEVEL_INFO, "scePadInit() = 0x%08X", r);
-    }
-    if (p_scePadMbusInit) {
-        int r = p_scePadMbusInit();
-        daemon_log(LOG_LEVEL_INFO, "scePadMbusInit() = 0x%08X", r);
-    }
-    if (p_scePadSetProcessPrivilege) {
-        int r = p_scePadSetProcessPrivilege(1);
-        daemon_log(LOG_LEVEL_INFO, "scePadSetProcessPrivilege(1) = 0x%08X", r);
+        if (p_scePadInit) {
+            int r = p_scePadInit();
+            daemon_log(LOG_LEVEL_INFO, "scePadInit() = 0x%08X", r);
+        }
+        if (p_scePadMbusInit) {
+            int r = p_scePadMbusInit();
+            daemon_log(LOG_LEVEL_INFO, "scePadMbusInit() = 0x%08X", r);
+        }
+        if (p_scePadSetProcessPrivilege) {
+            int r = p_scePadSetProcessPrivilege(1);
+            daemon_log(LOG_LEVEL_INFO, "scePadSetProcessPrivilege(1) = 0x%08X", r);
+        }
     }
 
     if (!p_scePadVirtualDeviceAddDevice || !p_scePadVirtualDeviceInsertData) {
@@ -401,6 +401,10 @@ void vpad_shutdown(void) {
         if (p_scePadSetConnection) {
             p_scePadSetConnection(g_vpad_handle, 0);
         }
+        if (p_sceMbusDisconnectDevice) {
+            p_sceMbusDisconnectDevice(g_vpad_handle);
+        }
+        daemon_sys_usleep(50000);
         if (p_scePadVirtualDeviceDeleteDevice) {
             p_scePadVirtualDeviceDeleteDevice(g_vpad_handle);
         }

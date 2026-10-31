@@ -554,6 +554,17 @@ static int scan_and_open(void) {
             daemon_log(LOG_LEVEL_INFO, "USB Bus Scan: no devices found (count=%d)", (int)count);
             s_logged_first_scan = 1;
         }
+        if (s_failed_cooldown_vid != 0) {
+            s_failed_cooldown_vid = 0;
+            s_failed_cooldown_pid = 0;
+            s_failed_cooldown_until_us = 0;
+        }
+        if (s_replug_vid != 0) {
+            daemon_log(LOG_LEVEL_INFO, "Controller VID:0x%04X PID:0x%04X physically unplugged (bus empty) — ready for reconnection",
+                       s_replug_vid, s_replug_pid);
+            s_replug_vid = 0;
+            s_replug_pid = 0;
+        }
         if (list) p_sceUsbdFreeDeviceList(list);
         return -1;
     }
@@ -956,11 +967,22 @@ int usb_driver_init(void) {
 }
 
 static void execute_picker_cancel_teardown(void) {
-    // Send a final neutral packet so no buttons remain latched before tearing down
+    // 1. Ensure Circle press was held at least 80ms so SceShellCore latches it cleanly on fast taps
+    uint64_t now = daemon_sys_time_us();
+    if (s_picker_cancel_time_us != 0 && now > s_picker_cancel_time_us && (now - s_picker_cancel_time_us) < 80000ULL) {
+        daemon_sys_usleep((unsigned int)(80000ULL - (now - s_picker_cancel_time_us)));
+    }
+
+    // 2. Send neutral release packet (buttons = 0) and keep Virtual Pad alive in neutral state
+    //    for 300ms so SceShellCore (60 Hz) reads the Circle release, finishes closing the
+    //    "Who is using this controller?" modal, and restores XMB focus to the physical DS4.
     OrbisPadData neutral = s_last_ds4;
     neutral.buttons = 0;
-    neutral.timestamp = daemon_sys_time_us();
-    vpad_send_data(&neutral);
+    for (int i = 0; i < 15; i++) {
+        neutral.timestamp = daemon_sys_time_us();
+        vpad_send_data(&neutral);
+        daemon_sys_usleep(20000); // 15 * 20ms = 300ms
+    }
 
     daemon_log(LOG_LEVEL_INFO, "User cancelled account selection (B/Circle) — shutting down Virtual Pad until physical replug");
     s_replug_vid = g_usb_state.vid;
@@ -969,8 +991,8 @@ static void execute_picker_cancel_teardown(void) {
     s_picker_cancel_sent = false;
     s_picker_cancel_time_us = 0;
 
-    // Shut down Virtual Pad first so physical DS4 immediately regains PS4 focus
-    // (also prevents close_controller() from firing the generic "Controller Disconnected" toast)
+    // 3. Shut down Virtual Pad cleanly after the modal transition is complete
+    //    (also prevents close_controller() from firing the generic "Controller Disconnected" toast)
     vpad_shutdown();
     close_controller();
     daemon_notify("OneFamily: Reconnect controller to use");
