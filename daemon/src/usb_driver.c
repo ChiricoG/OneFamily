@@ -303,18 +303,15 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
 static bool s_ds_use_vibration_v2 = true;
 
 static void dualsense_send_output_report(const uint8_t* pkt, size_t len, int timeout_ms) {
-    int sent = 0;
     if (g_usb_state.endpoint_out && p_sceUsbdInterruptTransfer) {
         int transferred = 0;
         int r = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out,
                                            (uint8_t*)pkt, (int)len, &transferred, timeout_ms);
         daemon_log(LOG_LEVEL_INFO, "DualSense output report (%dB) via Interrupt OUT (ret=0x%08X)", (int)len, r);
-        if (r == 0) sent = 1;
-    }
-    if (!sent && p_sceUsbdControlTransfer) {
-        int cr = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202,
-                                          (uint16_t)g_claimed_interface, (uint8_t*)pkt, (uint16_t)len, timeout_ms);
-        daemon_log(LOG_LEVEL_INFO, "DualSense output report via Control SET_REPORT (ret=0x%08X)", cr);
+        if (r != 0 && p_sceUsbdClearHalt) {
+            daemon_log(LOG_LEVEL_WARN, "DualSense Interrupt OUT rejected (0x%08X) — executing ClearHalt", r);
+            p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_out);
+        }
     }
 }
 
@@ -365,30 +362,39 @@ static void init_dualsense_controller(void) {
         daemon_log(LOG_LEVEL_INFO, "DualSense GET_REPORT Calibration 0x05 (41B) = 0x%08X (id=0x%02X)", cr, cal_buf[0]);
     }
 
-    // === PHASE 2: SET_IDLE — activate HID periodic interrupt streaming ===
-    {
-        int sir = p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x0A, 0,
-                                           (uint16_t)g_claimed_interface, NULL, 0, 100);
-        daemon_log(LOG_LEVEL_INFO, "DualSense SET_IDLE (IF=%d) = 0x%08X", g_claimed_interface, sir);
+    // Reset data toggle on both endpoints after feature control requests
+    if (p_sceUsbdClearHalt) {
+        p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+        if (g_usb_state.endpoint_out) {
+            p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_out);
+        }
     }
+    daemon_sys_usleep(25000); // 25ms delay for endpoint stabilization
 
-    // === PHASE 3: Replicate dualsense_reset_leds() + dualsense_output_worker() ===
-    // Step 3a: dualsense_reset_leds() — sends LIGHTBAR_SETUP_LIGHT_OUT (0x02) alone to unlock software LED control
+    // NOTE: SET_IDLE (0x0A) must NOT be sent to DualSense!
+    // Linux hid-playstation does not send SET_IDLE; DualSense firmware stalls or suppresses
+    // continuous input streaming if SET_IDLE duration=0 is received.
+
+    // === PHASE 2: Replicate dualsense_reset_leds() + dualsense_output_worker() ===
+    // Step 2a: dualsense_reset_leds() — sends LIGHTBAR_SETUP_LIGHT_OUT (0x02) alone to unlock software LED control
+    // Exactly 64 bytes on USB Interrupt OUT (Report ID 0x02 + 63 bytes payload)
     {
-        uint8_t reset_pkt[63];
+        uint8_t reset_pkt[64];
         memset(reset_pkt, 0, sizeof(reset_pkt));
-        reset_pkt[0]  = 0x02; // DS_OUTPUT_REPORT_USB
+        reset_pkt[0]  = 0x02; // DS_OUTPUT_REPORT_USB (64 bytes)
         reset_pkt[39] = 0x02; // valid_flag2: DS_OUTPUT_VALID_FLAG2_LIGHTBAR_SETUP_CONTROL_ENABLE
         reset_pkt[42] = 0x02; // lightbar_setup: DS_OUTPUT_LIGHTBAR_SETUP_LIGHT_OUT
         dualsense_send_output_report(reset_pkt, sizeof(reset_pkt), 150);
     }
 
-    // Step 3b: dualsense_set_lightbar(0, 0, 128) + dualsense_set_player_leds(BIT(2))
-    // Note: valid_flag2 and lightbar_setup are 0 here so the lightbar stays ON!
+    daemon_sys_usleep(15000);
+
+    // Step 2b: dualsense_set_lightbar(0, 0, 128) + dualsense_set_player_leds(BIT(2))
+    // Exactly 64 bytes on USB Interrupt OUT (Report ID 0x02 + 63 bytes payload)
     {
-        uint8_t led_pkt[63];
+        uint8_t led_pkt[64];
         memset(led_pkt, 0, sizeof(led_pkt));
-        led_pkt[0]  = 0x02;        // DS_OUTPUT_REPORT_USB
+        led_pkt[0]  = 0x02;        // DS_OUTPUT_REPORT_USB (64 bytes)
         led_pkt[2]  = 0x04 | 0x10; // valid_flag1: LIGHTBAR_CONTROL_ENABLE | PLAYER_INDICATOR_CONTROL_ENABLE
         led_pkt[44] = 0x04;        // player_leds: BIT(2) (Player 1 center LED)
         led_pkt[45] = 0x00;        // lightbar_red
@@ -396,6 +402,8 @@ static void init_dualsense_controller(void) {
         led_pkt[47] = 128;         // lightbar_blue (128, exact Linux default)
         dualsense_send_output_report(led_pkt, sizeof(led_pkt), 150);
     }
+
+    daemon_sys_usleep(15000);
 }
 
 static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expected_ack, int timeout_ms) {
@@ -741,11 +749,13 @@ static int scan_and_open(void) {
                         daemon_log(LOG_LEVEL_INFO, "User picker launched — monitoring Circle/B (cancel) vs Cross/A (confirm)");
                     }
 
-                    int slot = vpad_get_assigned_slot();
-                    if (slot == 2) {
-                        daemon_notify("OneFamily: %s (Player 2)", controller_type_to_str(det.type));
-                    } else {
-                        daemon_notify("OneFamily: %s Connected", controller_type_to_str(det.type));
+                    if (det.type != CONTROLLER_DUALSENSE) {
+                        int slot = vpad_get_assigned_slot();
+                        if (slot == 2) {
+                            daemon_notify("OneFamily: %s (Player 2)", controller_type_to_str(det.type));
+                        } else {
+                            daemon_notify("OneFamily: %s Connected", controller_type_to_str(det.type));
+                        }
                     }
                 } else {
                     p_sceUsbdClose(h);
@@ -906,9 +916,9 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         }
     } else if (g_usb_state.type == CONTROLLER_DUALSENSE) {
         if (!vpad_is_active()) return;
-        uint8_t pkt[63];
+        uint8_t pkt[64];
         memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x02;        // DS_OUTPUT_REPORT_USB (63 bytes)
+        pkt[0] = 0x02;        // DS_OUTPUT_REPORT_USB (64 bytes)
         pkt[1] = 0x02;        // valid_flag0: DS_OUTPUT_VALID_FLAG0_HAPTICS_SELECT
         if (s_ds_use_vibration_v2) {
             pkt[39] = 0x04;   // valid_flag2: DS_OUTPUT_VALID_FLAG2_COMPATIBLE_VIBRATION2
@@ -920,14 +930,8 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         pkt[4] = large_motor; // motor_left (strong)
         pkt[44] = 0x04;       // player_leds: BIT(2) (Player 1 center LED)
         pkt[47] = 128;        // lightbar_blue (128, Linux default)
-        int sent = 0;
         if (ep != 0 && p_sceUsbdInterruptTransfer) {
-            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50) == 0) {
-                sent = 1;
-            }
-        }
-        if (!sent && p_sceUsbdControlTransfer) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0202, (uint16_t)g_claimed_interface, pkt, sizeof(pkt), 50);
+            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
         }
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         generic_hid_send_rumble(g_dev_handle, g_usb_state.vid, g_usb_state.pid,
@@ -1098,7 +1102,12 @@ void usb_driver_poll_step(void) {
         if (g_usb_state.type == CONTROLLER_DUALSENSE && !vpad_is_active()) {
             daemon_log(LOG_LEVEL_INFO, "DualSense first valid report received (%d bytes) - Activating Virtual DS4", transferred);
             vpad_init();
-            daemon_notify("OneFamily: DualSense Connected");
+            int slot = vpad_get_assigned_slot();
+            if (slot == 2) {
+                daemon_notify("OneFamily: DualSense (Player 2)");
+            } else {
+                daemon_notify("OneFamily: DualSense Connected");
+            }
             // PS button pulse deferred here because vpad must be active first
             if (g_daemon_config.mode == CONFIG_MODE_AUTO) {
                 vpad_pulse_ps_button();
