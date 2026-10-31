@@ -142,6 +142,8 @@ bool UI::init(Scene2D* scene) {
         stbi_image_free(data);
     }
 
+    psBg.init();
+
     // 2. Load separate clean vector-crisp icons
     xboxLogo      = load_icon("/app0/assets/icons/xbox_logo.png");
     iconGear      = load_icon("/app0/assets/icons/icon_gear.png");
@@ -324,10 +326,9 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
                 const PkgUpdater* updater) {
     if (!scene) return;
 
-    // 1. Blit clean native background (pure wallpaper)
-    if (cached_bg) {
-        scene->CopyToActiveBuffer(cached_bg);
-    }
+    // 1. Blit native background + Animated PlayStation XMB Wave & Bokeh Sparkles
+    psBg.update(0.01666f);
+    psBg.render(scene, cached_bg);
 
     // 2. Header
     draw_image(scene, xboxLogo, 60, 120);
@@ -654,12 +655,9 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
 void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
     if (!scene) return;
 
-    // Draw cached background or fallback
-    if (cached_bg) {
-        scene->CopyToActiveBuffer(cached_bg);
-    } else {
-        scene->DrawRectangle(0, 0, 1920, 1080, Color{ 8, 14, 24 });
-    }
+    // Draw background with animated PlayStation XMB waves
+    psBg.update(0.01666f);
+    psBg.render(scene, cached_bg);
 
     // Top Header
     draw_image(scene, xboxLogo, 60, 60);
