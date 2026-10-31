@@ -967,31 +967,31 @@ int usb_driver_init(void) {
 }
 
 static void execute_picker_cancel_teardown(void) {
-    // 1. Ensure Circle press was held at least 80ms so SceShellCore latches it cleanly on fast taps
+    // 1. Ensure the translated Cross press was held at least 100ms so SceShellCore latches it cleanly
     uint64_t now = daemon_sys_time_us();
-    if (s_picker_cancel_time_us != 0 && now > s_picker_cancel_time_us && (now - s_picker_cancel_time_us) < 80000ULL) {
-        daemon_sys_usleep((unsigned int)(80000ULL - (now - s_picker_cancel_time_us)));
+    if (s_picker_cancel_time_us != 0 && now > s_picker_cancel_time_us && (now - s_picker_cancel_time_us) < 100000ULL) {
+        daemon_sys_usleep((unsigned int)(100000ULL - (now - s_picker_cancel_time_us)));
     }
 
     // 2. Send neutral release packet (buttons = 0) and keep Virtual Pad alive in neutral state
-    //    for 300ms so SceShellCore (60 Hz) reads the Circle release, finishes closing the
-    //    "Who is using this controller?" modal, and restores XMB focus to the physical DS4.
+    //    for 400ms so SceShellCore finishes closing the "Who is using this controller?" modal
+    //    AND completes powering off the physical DualShock 4 (turning its LED off) before teardown.
     OrbisPadData neutral = s_last_ds4;
     neutral.buttons = 0;
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < 20; i++) {
         neutral.timestamp = daemon_sys_time_us();
         vpad_send_data(&neutral);
-        daemon_sys_usleep(20000); // 15 * 20ms = 300ms
+        daemon_sys_usleep(20000); // 20 * 20ms = 400ms
     }
 
-    daemon_log(LOG_LEVEL_INFO, "User cancelled account selection (B/Circle) — shutting down Virtual Pad until physical replug");
+    daemon_log(LOG_LEVEL_INFO, "User cancelled account selection (B/Circle) — physical DS4 powered off by OS, shutting down Virtual Pad until replug");
     s_replug_vid = g_usb_state.vid;
     s_replug_pid = g_usb_state.pid;
     s_awaiting_user_pick = false;
     s_picker_cancel_sent = false;
     s_picker_cancel_time_us = 0;
 
-    // 3. Shut down Virtual Pad cleanly after the modal transition is complete
+    // 3. Shut down Virtual Pad cleanly after the modal transition and DS4 power-off complete
     //    (also prevents close_controller() from firing the generic "Controller Disconnected" toast)
     vpad_shutdown();
     close_controller();
@@ -999,23 +999,31 @@ static void execute_picker_cancel_teardown(void) {
 }
 
 static void handle_pad_input_and_send(const OrbisPadData* ds4) {
+    OrbisPadData out_ds4 = *ds4;
+
     if (s_awaiting_user_pick) {
         bool circle = (ds4->buttons & DS4_BUTTON_CIRCLE) != 0;
         bool cross  = (ds4->buttons & DS4_BUTTON_CROSS)  != 0;
 
         if (s_picker_cancel_sent) {
-            // Phase 2: Circle press was already forwarded to Orbis OS to dismiss the picker;
-            // wait for button release (or 400ms safety timeout) before destroying the virtual pad
+            // Phase 2: Wait for B/Circle release (or 400ms safety timeout) before tearing down
             uint64_t now = daemon_sys_time_us();
             if (!circle || (now - s_picker_cancel_time_us > 400000ULL)) {
                 execute_picker_cancel_teardown();
                 return;
             }
+            // Keep sending DS4_BUTTON_CROSS while B/Circle is held so SceShellCore confirms User 1
+            // and automatically powers off the physical DS4 instead of leaving it in a zombie state
+            out_ds4.buttons = (ds4->buttons & ~DS4_BUTTON_CIRCLE) | DS4_BUTTON_CROSS;
         } else if (circle && !cross) {
-            // Phase 1: User pressed B/Circle on the account selection screen
-            daemon_log(LOG_LEVEL_INFO, "User picker: B/Circle pressed — forwarding to OS to close menu, then tearing down");
+            // Phase 1: User pressed B/Circle on the account selection screen.
+            // Native DS4_BUTTON_CIRCLE leaves the physical DS4 powered ON (LED lit) but unbound in SceMbus.
+            // By sending DS4_BUTTON_CROSS instead, SceShellCore dismisses the modal AND cleanly powers off
+            // the physical DS4 (LED off), after which we immediately tear down the Virtual Pad.
+            daemon_log(LOG_LEVEL_INFO, "User picker: B/Circle pressed — remapping to Cross so OS powers off physical DS4 before Virtual Pad teardown");
             s_picker_cancel_sent = true;
             s_picker_cancel_time_us = daemon_sys_time_us();
+            out_ds4.buttons = (ds4->buttons & ~DS4_BUTTON_CIRCLE) | DS4_BUTTON_CROSS;
         } else if (cross) {
             // User pressed A/Cross to select an account -> confirmed!
             daemon_log(LOG_LEVEL_INFO, "User picker: A/Cross pressed — user profile confirmed");
@@ -1025,8 +1033,8 @@ static void handle_pad_input_and_send(const OrbisPadData* ds4) {
         }
     }
 
-    s_last_ds4 = *ds4;
-    vpad_send_data(ds4);
+    s_last_ds4 = out_ds4;
+    vpad_send_data(&out_ds4);
 }
 
 void usb_driver_poll_step(void) {
