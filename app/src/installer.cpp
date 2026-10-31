@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <ctype.h>
 #include <orbis/libkernel.h>
 
@@ -274,6 +275,10 @@ static const struct {
         "[Invert]\n"
         "invert_ly = 0\n"
         "invert_ry = 0\n"
+        "\n"
+        "[Rumble]\n"
+        "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+        "rumble = auto\n"
     },
     {
         "2DC8_310B.ini",
@@ -311,6 +316,10 @@ static const struct {
         "[Invert]\n"
         "invert_ly = 0\n"
         "invert_ry = 0\n"
+        "\n"
+        "[Rumble]\n"
+        "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+        "rumble = auto\n"
     },
     {
         "2DC8_3012.ini",
@@ -348,6 +357,10 @@ static const struct {
         "[Invert]\n"
         "invert_ly = 0\n"
         "invert_ry = 0\n"
+        "\n"
+        "[Rumble]\n"
+        "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+        "rumble = auto\n"
     },
     {
         "2DC8_6012.ini",
@@ -385,6 +398,10 @@ static const struct {
         "[Invert]\n"
         "invert_ly = 0\n"
         "invert_ry = 0\n"
+        "\n"
+        "[Rumble]\n"
+        "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+        "rumble = auto\n"
     },
     {
         "2DC8_2100.ini",
@@ -422,6 +439,10 @@ static const struct {
         "[Invert]\n"
         "invert_ly = 0\n"
         "invert_ry = 0\n"
+        "\n"
+        "[Rumble]\n"
+        "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+        "rumble = auto\n"
     },
     {
         "3537_1022.ini",
@@ -459,6 +480,10 @@ static const struct {
         "[Invert]\n"
         "invert_ly = 0\n"
         "invert_ry = 0\n"
+        "\n"
+        "[Rumble]\n"
+        "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+        "rumble = auto\n"
     },
     {
         "FFFF_046E.ini",
@@ -496,23 +521,86 @@ static const struct {
         "[Invert]\n"
         "invert_ly = 0\n"
         "invert_ry = 0\n"
+        "\n"
+        "[Rumble]\n"
+        "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+        "rumble = auto\n"
     }
 };
+
+static void upgrade_ini_file_if_needed(const char* path) {
+    std::string content;
+    if (!read_text_file(path, content) || content.empty()) {
+        return;
+    }
+
+    std::string lower = content;
+    for (size_t i = 0; i < lower.size(); i++) {
+        lower[i] = (char)::tolower((unsigned char)lower[i]);
+    }
+
+    // Check if [Rumble] section or rumble key is already present
+    if (lower.find("[rumble]") != std::string::npos ||
+        lower.find("\nrumble ") != std::string::npos ||
+        lower.find("\nrumble=") != std::string::npos ||
+        lower.find("\nrumble_report") != std::string::npos) {
+        return;
+    }
+
+    if (content.back() != '\n') {
+        content += "\n";
+    }
+    content += "\n[Rumble]\n"
+               "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+               "rumble = auto\n";
+    write_text_file(path, content);
+}
+
+static void upgrade_existing_profiles_in_dir(const char* dir_path) {
+    int dfd = sceKernelOpen(dir_path, O_RDONLY, 0);
+    if (dfd < 0) return;
+
+    char dent_buf[2048];
+    int nread = 0;
+    while ((nread = sceKernelGetdents(dfd, dent_buf, sizeof(dent_buf))) > 0) {
+        int pos = 0;
+        while (pos < nread) {
+            struct dirent* d = (struct dirent*)(dent_buf + pos);
+            if (d->d_reclen == 0) break;
+            const char* name = d->d_name;
+            size_t nlen = strlen(name);
+            if (nlen > 4 && strcasecmp(name + nlen - 4, ".ini") == 0) {
+                char full_path[256];
+                snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
+                upgrade_ini_file_if_needed(full_path);
+            }
+            pos += d->d_reclen;
+        }
+    }
+    sceKernelClose(dfd);
+}
 
 static void install_controller_profiles() {
     for (size_t i = 0; i < sizeof(k_factory_profiles) / sizeof(k_factory_profiles[0]); i++) {
         char path[128];
         snprintf(path, sizeof(path), "/data/onefamily/controllers/%s", k_factory_profiles[i].filename);
-        // If default.ini already exists on disk, do not overwrite user modifications
-        if (strcmp(k_factory_profiles[i].filename, "default.ini") != 0 || !file_exists(path)) {
+        if (!file_exists(path)) {
             write_text_file(path, k_factory_profiles[i].content);
+        } else {
+            upgrade_ini_file_if_needed(path);
         }
 
         snprintf(path, sizeof(path), "/user/data/onefamily/controllers/%s", k_factory_profiles[i].filename);
-        if (strcmp(k_factory_profiles[i].filename, "default.ini") != 0 || !file_exists(path)) {
+        if (!file_exists(path)) {
             write_text_file(path, k_factory_profiles[i].content);
+        } else {
+            upgrade_ini_file_if_needed(path);
         }
     }
+
+    // Also upgrade any user-created <VID>_<PID>.ini profiles in the directories
+    upgrade_existing_profiles_in_dir("/data/onefamily/controllers");
+    upgrade_existing_profiles_in_dir("/user/data/onefamily/controllers");
 }
 
 InstallResult Installer::runInstallation(bool isUpdate) {

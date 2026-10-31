@@ -97,7 +97,7 @@ bool HidProfile::read_status(HidStatus& out) {
 
 void HidProfile::reset_defaults(int nbuttons) {
     max_buttons = (nbuttons >= 14 && nbuttons <= 32) ? nbuttons : 16;
-    custom_rumble = "";
+    custom_rumble = "auto";
     for (int i = 0; i < ACT_COUNT; i++) {
         assignments[i] = 0;
     }
@@ -243,11 +243,13 @@ bool HidProfile::save(uint16_t vid, uint16_t pid, const std::string& name) {
         "invert_ry = 0\n"
     );
 
-    if (!custom_rumble.empty() && len < (int)sizeof(out) - 128) {
+    if (len < (int)sizeof(out) - 160) {
+        const char* rumble_val = custom_rumble.empty() ? "auto" : custom_rumble.c_str();
         len += snprintf(out + len, sizeof(out) - len,
             "\n[Rumble]\n"
+            "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
             "rumble = %s\n",
-            custom_rumble.c_str()
+            rumble_val
         );
     }
 
