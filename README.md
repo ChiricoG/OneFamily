@@ -4,7 +4,7 @@
 
 <h1 align="center">OneFamily</h1>
 <p align="center">
-  <b>Universal USB & Bluetooth Controller Daemon & Companion App for PlayStation 4</b><br>
+  <b>Universal USB & Bluetooth (DualSense) Controller Daemon & Companion App for PlayStation 4</b><br>
   <i>"No more console war - we are a family!"</i>
 </p>
 
