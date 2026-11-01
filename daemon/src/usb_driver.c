@@ -323,6 +323,18 @@ static void init_dualsense_controller(void) {
 
     s_ds_use_vibration_v2 = (g_usb_state.pid == SONY_DUALSENSE_EDGE_PID);
 
+    // === PHASE 0: Standard USB HID Handshake — Query HID Report Descriptor (0x22) ===
+    // Linux usbhid always queries the HID Report Descriptor before client drivers attach.
+    // Many USB HID microcontrollers keep the interrupt endpoints dormant until this request is fulfilled.
+    {
+        uint8_t report_desc[512];
+        memset(report_desc, 0, sizeof(report_desc));
+        int rdr = p_sceUsbdControlTransfer(g_dev_handle, 0x81, 0x06, 0x2200,
+                                          (uint16_t)g_claimed_interface, report_desc, sizeof(report_desc), 200);
+        daemon_log(LOG_LEVEL_INFO, "DualSense GET_DESCRIPTOR HID Report 0x22 (IF=%d) = 0x%08X (len=%d)",
+                   g_claimed_interface, rdr, rdr > 0 ? rdr : 0);
+    }
+
     // === PHASE 1: Exact Linux hid-playstation.c dualsense_create() feature report sequence ===
     // 1a. dualsense_get_mac_address(): GET_REPORT 0x09 — Pairing Info (20 bytes)
     {
@@ -1478,11 +1490,11 @@ void usb_driver_poll_step(void) {
                 // attempt ClearHalt to reset the endpoint data toggle and retry.
                 // 0x802400FF after probe sequence likely means toggle desync, not a true STALL.
                 int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
-                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors % 50 == 1)) {
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors <= 3 || s_consecutive_transfer_errors % 25 == 1)) {
                     daemon_log(LOG_LEVEL_WARN, "DualSense EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
-                    daemon_sys_usleep(20000);
+                    daemon_sys_usleep(10000);
                 }
             } else if (g_usb_state.type == CONTROLLER_XBOX360 || g_usb_state.type == CONTROLLER_XBOXONE) {
                 static int s_logged_xb_err = 0;
