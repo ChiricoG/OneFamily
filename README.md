@@ -128,6 +128,27 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 
 ---
 
+## Bug Reports & Requesting New Controllers
+
+Encountered a bug, crash, or have a controller that isn't recognized yet? We're actively expanding OneFamily and welcome community feedback!
+
+Please open an issue on our [GitHub Issues Tracker](https://github.com/ChiricoG/OneFamily/issues).
+
+### Requesting Support for a New Controller
+
+To help us add support for your gamepad quickly, please include:
+1. **Controller Brand & Exact Model** (e.g., *Razer Wolverine V2*, *8BitDo Ultimate 2.4G*, *Flydigi Vader 3 Pro*).
+2. **Connection Type** (USB or 2.4 GHz wireless USB dongle).
+3. **OPTIONAL: Hardware Identifiers (VID & PID)**:
+   - Check `/data/onefamily/onefamily.log` on your PS4, or connect the controller to a PC (Device Manager > Hardware IDs).
+4. **Behavior on PS4**: What happens when plugged in (e.g., does the notification appear, is it detected as Generic HID, or completely ignored?).
+
+### Reporting Bugs
+
+Please **follow the Bug Report template**
+
+---
+
 ## Building from Source
 
 ### Prerequisites
