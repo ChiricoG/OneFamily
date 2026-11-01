@@ -31,10 +31,12 @@ static volatile bool s_bt_running = false;
 static int s_bt_fd = -1;
 static int s_bt_queue = -1;
 static bool s_bt_registered = false;
+static bool s_bt_supported = false;
 static bool s_dualsense_connected = false;
 static int s_bt_vpad_slot = -1;
 static uint64_t s_physical_address = 0;
 static uint64_t s_last_input_time = 0;
+static uint32_t s_current_fw_bcd = 0x1250;
 
 // -------------------------------------------------------------
 // CRC32 Calculation for DualSense Bluetooth Reports
@@ -57,50 +59,137 @@ static uint32_t bt_calc_crc32(uint8_t prefix, const uint8_t* data, size_t len) {
 }
 
 // -------------------------------------------------------------
-// Kernel Allowlist Patching (Multi-Firmware Dynamic SigScan / Ring 0)
+// Kernel Allowlist Patching (Multi-Firmware Hybrid: Verified Table + Safe AOB SigScan)
 // -------------------------------------------------------------
 
 struct PatchRequest {
     int restore;
+    uint32_t fw_version; // BCD (e.g. 0x1250, 0x1100, 0x0900, 0x1300)
+    int is_dynamic;      // Output: 0 for static table, 1 for dynamic resolution
+    int detail_code;     // Output: internal diagnostic code
 };
 
-struct PatchArgs {
-    void* function;
-    struct PatchRequest* request;
+struct DynamicBTScan {
+    uint32_t lock_offset;
+    uint32_t unlock_offset;
+    uint32_t offsets[10];
 };
 
-// Firmware gate: sceKernelGetSystemSwVersion() version >> 16 (BCD). 0x1250 = 12.50.
-// Offsets taken from Diram1x's DualSense-PS4.
-#define BT_SUPPORTED_FW 0x1250
+/**
+ * Ring 0 Dynamic AOB Scanner
+ * Locates the bthid master prologue (0x56415741E5894855UL) and resolves
+ * the 10 allowlist points and mutex locks across firmware versions.
+ */
+static int resolve_bt_offsets_dynamic(uint64_t base, struct DynamicBTScan* out_scan) {
+    if (!out_scan) return 22;
+
+    const uint64_t scan_start = base + 0x480000;
+    const uint64_t scan_end   = base + 0x680000;
+    uint64_t magic_addr = 0;
+
+    for (uint64_t addr = scan_start; addr < scan_end; addr += 16) {
+        if (*(volatile uint64_t*)addr == 0x56415741E5894855UL) {
+            magic_addr = addr;
+            break;
+        }
+    }
+
+    if (!magic_addr) {
+        return 0x301; // Master magic prologue not found
+    }
+
+    int64_t delta = (int64_t)(magic_addr - (base + 0x5B6D00));
+    uint64_t lock_addr   = (base + 0x5A6B80) + delta;
+    uint64_t unlock_addr = (base + 0x5A6C00) + delta;
+
+    static const uint32_t ref_offsets[10] = {
+        0x5B0DA6, 0x5B0DD6, 0x5B1616, 0x5B1649, 0x5B53D8,
+        0x5B5FCA, 0x5B578D, 0x5B5C6E, 0x5B580B, 0x5B5CFE
+    };
+
+    for (int i = 0; i < 10; ++i) {
+        uint64_t estimated_target = (base + ref_offsets[i]) + delta;
+        uint32_t target_original = (i & 1) ? 0x1000 : 0x044F;
+        uint32_t target_patched  = (i & 1) ? 0x0CE6 : 0x054C;
+
+        uint64_t match_addr = 0;
+        uint64_t window_start = (estimated_target > 0x3000) ? (estimated_target - 0x3000) : estimated_target;
+        uint64_t window_end   = estimated_target + 0x3000;
+
+        for (uint64_t a = window_start; a < window_end; a += 1) {
+            uint32_t val = *(volatile uint32_t*)a;
+            if (val == target_original || val == target_patched) {
+                uint8_t op1 = *(volatile uint8_t*)(a - 2);
+                uint8_t op2 = *(volatile uint8_t*)(a - 1);
+                if (op1 == 0x81 || op2 == 0x3D || op1 == 0x3D) {
+                    match_addr = a;
+                    break;
+                }
+            }
+        }
+
+        if (!match_addr) {
+            return 0x310 + i; // Offset i not confirmed in neighborhood
+        }
+
+        out_scan->offsets[i] = (uint32_t)(match_addr - base);
+    }
+
+    out_scan->lock_offset   = (uint32_t)(lock_addr - base);
+    out_scan->unlock_offset = (uint32_t)(unlock_addr - base);
+    return 0;
+}
 
 /**
  * Ring 0 Kernel Execution callback (invoked via syscall 11 / kexec)
- * Ported faithfully from Diram1x's DualSense-PS4 (src/native.c).
  */
-static int patch_allowlist(void* thread, struct PatchArgs* args) {
+static int patch_allowlist(void* thread, struct PatchRequest* req) {
     (void)thread;
     uint32_t low, high;
     __asm__ volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(0xC0000082));
     uint64_t base = (((uint64_t)high << 32) | low) - 0x1C0;
 
-    if ((base >> 48) != 0xFFFF || (base & 0x3FFF) || !args || !args->request) {
+    if ((base >> 48) != 0xFFFF || (base & 0x3FFF) || !req) {
         return 22; // EINVAL
     }
 
-    const uint32_t offsets[10] = {
-        0x5B0DA6, 0x5B0DD6, 0x5B1616, 0x5B1649, 0x5B53D8,
-        0x5B5FCA, 0x5B578D, 0x5B5C6E, 0x5B580B, 0x5B5CFE
-    };
-
-    int restore = args->request->restore;
+    int restore = req->restore;
     if (restore != 0 && restore != 1) return 22;
 
-    int (*lock)(void) = (void*)(base + 0x5A6B80);
-    int (*unlock)(int) = (void*)(base + 0x5A6C00);
+    uint32_t lock_off = 0;
+    uint32_t unlock_off = 0;
+    uint32_t active_offsets[10];
 
-    if (*(volatile uint64_t*)(base + 0x5B6D00) != 0x56415741E5894855UL) {
-        return 22;
+    // Strategy 1: Check Static Verified Firmware Table (FW 12.50)
+    if (req->fw_version == 0x1250) {
+        if (*(volatile uint64_t*)(base + 0x5B6D00) != 0x56415741E5894855UL) {
+            req->detail_code = 0x1250;
+            return 22;
+        }
+        lock_off = 0x5A6B80;
+        unlock_off = 0x5A6C00;
+        const uint32_t static_1250[10] = {
+            0x5B0DA6, 0x5B0DD6, 0x5B1616, 0x5B1649, 0x5B53D8,
+            0x5B5FCA, 0x5B578D, 0x5B5C6E, 0x5B580B, 0x5B5CFE
+        };
+        for (int i = 0; i < 10; ++i) active_offsets[i] = static_1250[i];
+        req->is_dynamic = 0;
+    } else {
+        // Strategy 2: Dynamic AOB Scanner for unlisted firmwares
+        struct DynamicBTScan dyn;
+        int drc = resolve_bt_offsets_dynamic(base, &dyn);
+        if (drc != 0) {
+            req->detail_code = drc;
+            return drc; // Safe abort: no memory touched
+        }
+        lock_off = dyn.lock_offset;
+        unlock_off = dyn.unlock_offset;
+        for (int i = 0; i < 10; ++i) active_offsets[i] = dyn.offsets[i];
+        req->is_dynamic = 1;
     }
+
+    int (*lock)(void) = (void*)(base + lock_off);
+    int (*unlock)(int) = (void*)(base + unlock_off);
 
     int rc = lock();
     if (rc) return rc;
@@ -109,7 +198,7 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     for (unsigned i = 0; i < 10; ++i) {
         uint32_t old_value = (i & 1) ? 0x1000 : 0x044F;
         uint32_t new_value = (i & 1) ? 0x0CE6 : 0x054C;
-        uint32_t current = *(volatile uint32_t*)(base + offsets[i]);
+        uint32_t current = *(volatile uint32_t*)(base + active_offsets[i]);
         if (current == old_value) ++original_count;
         else if (current == new_value) ++patched_count;
         else {
@@ -136,7 +225,7 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     for (unsigned i = 0; i < 10; ++i) {
         uint32_t old_value = (i & 1) ? 0x1000 : 0x044F;
         uint32_t new_value = (i & 1) ? 0x0CE6 : 0x054C;
-        *(volatile uint32_t*)(base + offsets[i]) = restore ? old_value : new_value;
+        *(volatile uint32_t*)(base + active_offsets[i]) = restore ? old_value : new_value;
     }
 
     __asm__ volatile("mov %0, %%cr0; pushq %1; popfq" :: "r"(cr0), "r"(flags) : "memory", "cc");
@@ -144,13 +233,15 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     return 0;
 }
 
-static int apply_kernel_allowlist_patch(int restore) {
+static int apply_kernel_allowlist_patch(int restore, uint32_t fw_version) {
     struct PatchRequest req;
     memset(&req, 0, sizeof(req));
     req.restore = restore;
+    req.fw_version = fw_version;
 
     long ret = daemon_syscall(SYS_KEXEC, (long)patch_allowlist, (long)&req, 0);
-    daemon_log(LOG_LEVEL_INFO, "DualSense BT Kernel Allowlist Patch (restore=%d) = %ld", restore, ret);
+    daemon_log(LOG_LEVEL_INFO, "DualSense BT Kernel Allowlist Patch (restore=%d, fw=0x%04X, dynamic=%d, detail=0x%X) = %ld",
+               restore, fw_version, req.is_dynamic, req.detail_code, ret);
     return (int)ret;
 }
 
@@ -375,14 +466,11 @@ int bt_driver_init(void) {
         int v_rc = get_sw_version(&sw_info);
         daemon_log(LOG_LEVEL_INFO, "resolve_version: rc=%d, firmware=0x%08X (%s)",
                    v_rc, sw_info.version, sw_info.text);
-        if (v_rc == 0 && (sw_info.version >> 16) != BT_SUPPORTED_FW) {
-            daemon_log(LOG_LEVEL_WARN,
-                       "DualSense BT: Unsupported FW 0x%04X (supported: 0x%04X / 12.50). Skipping BT driver.",
-                       (sw_info.version >> 16), BT_SUPPORTED_FW);
-            return -1;
+        if (v_rc == 0) {
+            s_current_fw_bcd = (sw_info.version >> 16);
         }
     } else {
-        daemon_log(LOG_LEVEL_WARN, "DualSense BT: sceKernelGetSystemSwVersion unresolved, proceeding with caution.");
+        daemon_log(LOG_LEVEL_WARN, "DualSense BT: sceKernelGetSystemSwVersion unresolved, defaulting to FW 0x1250 / dynamic.");
     }
 
     // 2. Open /dev/bt device node
@@ -436,13 +524,15 @@ int bt_driver_init(void) {
     }
 
     // 6. Apply temporary kernel allowlist patch (Ring 0)
-    int patch_rc = apply_kernel_allowlist_patch(0 /* patch */);
+    int patch_rc = apply_kernel_allowlist_patch(0 /* patch */, s_current_fw_bcd);
     if (patch_rc != 0) {
-        daemon_log(LOG_LEVEL_ERROR, "Failed to apply BT kernel allowlist patch (rc=%d)", patch_rc);
+        daemon_log(LOG_LEVEL_WARN, "DualSense BT: Kernel allowlist patch failed or FW 0x%04X not supported (rc=%d)",
+                   s_current_fw_bcd, patch_rc);
         daemon_sys_close(s_bt_queue);
         s_bt_queue = -1;
         daemon_sys_close(s_bt_fd);
         s_bt_fd = -1;
+        s_bt_supported = false;
         return -6;
     }
 
@@ -455,17 +545,19 @@ int bt_driver_init(void) {
     daemon_log(LOG_LEVEL_INFO, "register_dualsense = %ld", reg_rc);
     if (reg_rc != 0) {
         // Registration failed: restore allowlist, close descriptors, return cleanly
-        apply_kernel_allowlist_patch(1 /* restore */);
+        apply_kernel_allowlist_patch(1 /* restore */, s_current_fw_bcd);
         daemon_sys_close(s_bt_queue);
         s_bt_queue = -1;
         daemon_sys_close(s_bt_fd);
         s_bt_fd = -1;
+        s_bt_supported = false;
         return -7;
     }
 
     s_bt_registered = true;
     s_bt_running = true;
-    daemon_log(LOG_LEVEL_INFO, "DualSense Bluetooth Subsystem initialized successfully");
+    s_bt_supported = true;
+    daemon_log(LOG_LEVEL_INFO, "DualSense Bluetooth Subsystem initialized successfully (FW 0x%04X)", s_current_fw_bcd);
     return 0;
 }
 
@@ -474,6 +566,7 @@ void bt_driver_shutdown(void) {
 
     daemon_log(LOG_LEVEL_INFO, "Shutting down DualSense Bluetooth Subsystem...");
     s_bt_running = false;
+    s_bt_supported = false;
 
     if (s_bt_registered && s_bt_fd >= 0) {
         struct {
@@ -485,7 +578,7 @@ void bt_driver_shutdown(void) {
         s_bt_registered = false;
     }
 
-    apply_kernel_allowlist_patch(1 /* restore */);
+    apply_kernel_allowlist_patch(1 /* restore */, s_current_fw_bcd);
 
     if (s_bt_queue >= 0) {
         daemon_sys_close(s_bt_queue);
@@ -503,6 +596,10 @@ void bt_driver_shutdown(void) {
     }
     s_dualsense_connected = false;
     s_physical_address = 0;
+}
+
+bool bt_driver_is_supported(void) {
+    return s_bt_supported;
 }
 
 bool bt_driver_is_connected(void) {

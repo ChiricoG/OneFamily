@@ -30,6 +30,11 @@ void bt_driver_poll_step(void);
 void bt_driver_shutdown(void);
 
 /**
+ * Check if the DualSense Bluetooth Subsystem is active and supported on this firmware.
+ */
+bool bt_driver_is_supported(void);
+
+/**
  * Check if a DualSense controller is currently connected via Bluetooth.
  */
 bool bt_driver_is_connected(void);

@@ -15,6 +15,7 @@
 #include "controller_detect.h"
 #include "translator.h"
 #include "generic_hid.h"
+#include "bt_driver.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -647,8 +648,13 @@ static int scan_and_open(void) {
                 static uint64_t s_last_ds_warn_time = 0;
                 uint64_t now_us = daemon_sys_time_us();
                 if (now_us - s_last_ds_warn_time > 10000000ULL) { // Max 1 notification every 10s
-                    daemon_notify("OneFamily: DualSense USB detected. Please disconnect and pair via Bluetooth!");
-                    daemon_log(LOG_LEVEL_INFO, "DualSense detected on USB. Bypassing USB claim — redirecting user to Bluetooth.");
+                    if (bt_driver_is_supported()) {
+                        daemon_notify("OneFamily: DualSense USB detected. Please disconnect and pair via Bluetooth!");
+                        daemon_log(LOG_LEVEL_INFO, "DualSense detected on USB. Bypassing USB claim — redirecting user to Bluetooth.");
+                    } else {
+                        daemon_notify("OneFamily: DualSense USB detected. Bluetooth not supported on this firmware.");
+                        daemon_log(LOG_LEVEL_WARN, "DualSense detected on USB, but Bluetooth is unsupported on this firmware.");
+                    }
                     s_last_ds_warn_time = now_us;
                 }
                 continue; // Leave USB port free for charging, do not claim or stall
