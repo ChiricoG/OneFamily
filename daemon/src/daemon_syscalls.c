@@ -36,6 +36,17 @@ __asm__(
     "  retq\n"
 );
 
+__attribute__((noinline)) long daemon_sys_call6(long number, long a, long b, long c, long d, long e, long f) {
+    register long r10 __asm__("r10") = d;
+    register long r8  __asm__("r8")  = e;
+    register long r9  __asm__("r9")  = f;
+    long result;
+    __asm__ volatile("syscall; jnc 1f; neg %%rax; 1:"
+        : "=a"(result), "+D"(a), "+S"(b), "+d"(c), "+r"(r10), "+r"(r8), "+r"(r9)
+        : "a"(number) : "rcx", "r11", "cc", "memory");
+    return result;
+}
+
 int daemon_sys_open(const char *path, int flags, int mode) {
     return (int)daemon_syscall(5, path, flags, mode);
 }

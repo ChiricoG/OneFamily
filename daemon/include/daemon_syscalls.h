@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 long daemon_syscall(long num, ...);
+long daemon_sys_call6(long number, long a, long b, long c, long d, long e, long f);
 
 int daemon_sys_open(const char *path, int flags, int mode);
 int daemon_sys_read(int fd, void *buf, size_t count);

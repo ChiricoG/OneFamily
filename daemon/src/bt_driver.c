@@ -302,7 +302,7 @@ void bt_driver_poll_step(void) {
         void*    udata;
     } event;
 
-    long ready = daemon_syscall(SYS_KEVENT, s_bt_queue, 0, 0, (long)&event, 1, (long)&timeout);
+    long ready = daemon_sys_call6(SYS_KEVENT, s_bt_queue, 0, 0, (long)&event, 1, (long)&timeout);
     if (ready <= 0) {
         // Check 3-second timeout for disconnection
         if (s_dualsense_connected && (daemon_sys_time_us() - s_last_input_time > 3000000ULL)) {
@@ -413,7 +413,7 @@ int bt_driver_init(void) {
     } change = {
         (uint64_t)s_bt_fd, -1, 1, 0, 0, NULL
     };
-    long kevent_rc = daemon_syscall(SYS_KEVENT, s_bt_queue, (long)&change, 1, 0, 0, 0);
+    long kevent_rc = daemon_sys_call6(SYS_KEVENT, s_bt_queue, (long)&change, 1, 0, 0, 0);
     daemon_log(LOG_LEVEL_INFO, "watch_read = %ld", kevent_rc);
     if (kevent_rc != 0) {
         daemon_sys_close(s_bt_queue);

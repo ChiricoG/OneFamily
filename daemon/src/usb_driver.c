@@ -643,19 +643,19 @@ static int scan_and_open(void) {
         DetectedController det;
         memset(&det, 0, sizeof(det));
         if (controller_identify(dev, &desc, &det)) {
+            if (det.type == CONTROLLER_DUALSENSE) {
+                static uint64_t s_last_ds_warn_time = 0;
+                uint64_t now_us = daemon_sys_time_us();
+                if (now_us - s_last_ds_warn_time > 10000000ULL) { // Max 1 notification every 10s
+                    daemon_notify("OneFamily: DualSense USB detected. Please disconnect and pair via Bluetooth!");
+                    daemon_log(LOG_LEVEL_INFO, "DualSense detected on USB. Bypassing USB claim — redirecting user to Bluetooth.");
+                    s_last_ds_warn_time = now_us;
+                }
+                continue; // Leave USB port free for charging, do not claim or stall
+            }
+
             libusb_device_handle* h = NULL;
             if (p_sceUsbdOpen(dev, &h) == 0 && h != NULL) {
-                if (det.type == CONTROLLER_DUALSENSE) {
-                    static uint64_t s_last_ds_warn_time = 0;
-                    uint64_t now_us = daemon_sys_time_us();
-                    if (now_us - s_last_ds_warn_time > 10000000ULL) { // Max 1 notification every 10s
-                        daemon_notify("OneFamily: DualSense USB detected. Please disconnect and pair via Bluetooth!");
-                        daemon_log(LOG_LEVEL_INFO, "DualSense detected on USB. Bypassing USB claim — redirecting user to Bluetooth.");
-                        s_last_ds_warn_time = now_us;
-                    }
-                    p_sceUsbdClose(h);
-                    continue; // Leave USB port free for charging, do not claim or stall
-                }
 
                 // If device exposed a secondary composite boot keyboard interface (e.g. 8BitDo dongles),
                 // detach and claim it so Orbis OS ukbd driver will not recognize it as a keyboard.
