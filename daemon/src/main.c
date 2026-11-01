@@ -5,6 +5,7 @@
 
 #include "vpad.h"
 #include "usb_driver.h"
+#include "bt_driver.h"
 #include "config.h"
 #include "log.h"
 #include "daemon_syscalls.h"
@@ -76,7 +77,12 @@ int main(int argc, char *argv[]) {
         daemon_log(LOG_LEVEL_ERROR, "Failed to initialize USB Driver");
     }
 
-    daemon_log(LOG_LEVEL_INFO, "=== Daemon Ready - Entering USB Polling Loop (250 Hz) ===");
+    // 5. Initialize DualSense Bluetooth Subsystem
+    if (bt_driver_init() != 0) {
+        daemon_log(LOG_LEVEL_INFO, "DualSense Bluetooth Subsystem skipped or not supported on this firmware");
+    }
+
+    daemon_log(LOG_LEVEL_INFO, "=== Daemon Ready - Entering USB & BT Polling Loop (250 Hz) ===");
 
     uint32_t loop_count = 0;
 
@@ -116,6 +122,7 @@ int main(int argc, char *argv[]) {
     }
 
     daemon_log(LOG_LEVEL_INFO, "Shutting down OneFamily Daemon...");
+    bt_driver_shutdown();
     usb_driver_shutdown();
     vpad_shutdown();
     daemon_log_close();

@@ -640,24 +640,15 @@ static int scan_and_open(void) {
             libusb_device_handle* h = NULL;
             if (p_sceUsbdOpen(dev, &h) == 0 && h != NULL) {
                 if (det.type == CONTROLLER_DUALSENSE) {
-                    int curr_cfg = -1;
-                    if (p_sceUsbdGetConfiguration) {
-                        int gcr = p_sceUsbdGetConfiguration(h, &curr_cfg);
-                        daemon_log(LOG_LEVEL_INFO, "DualSense: GetConfiguration = 0x%08X (curr_cfg=%d)", gcr, curr_cfg);
+                    static uint64_t s_last_ds_warn_time = 0;
+                    uint64_t now_us = daemon_sys_time_us();
+                    if (now_us - s_last_ds_warn_time > 10000000ULL) { // Max 1 notification every 10s
+                        daemon_notify("OneFamily: DualSense USB detected. Please disconnect and pair via Bluetooth!");
+                        daemon_log(LOG_LEVEL_INFO, "DualSense detected on USB. Bypassing USB claim — redirecting user to Bluetooth.");
+                        s_last_ds_warn_time = now_us;
                     }
-                    if (curr_cfg <= 0 && p_sceUsbdSetConfiguration) {
-                        int scr = p_sceUsbdSetConfiguration(h, 1);
-                        daemon_log(LOG_LEVEL_INFO, "DualSense: SetConfiguration(1) = 0x%08X", scr);
-                    }
-
-                    // Detach kernel drivers from all interfaces (Audio 0,1,2 + HID 3)
-                    if (p_sceUsbdDetachKernelDriver) {
-                        for (int iface = 0; iface < 4; iface++) {
-                            int dr = p_sceUsbdDetachKernelDriver(h, iface);
-                            int act = p_sceUsbdKernelDriverActive ? p_sceUsbdKernelDriverActive(h, iface) : -1;
-                            daemon_log(LOG_LEVEL_INFO, "DualSense: DetachKernelDriver(IF=%d) = 0x%08X (active=%d)", iface, dr, act);
-                        }
-                    }
+                    p_sceUsbdClose(h);
+                    continue; // Leave USB port free for charging, do not claim or stall
                 }
 
                 // If device exposed a secondary composite boot keyboard interface (e.g. 8BitDo dongles),

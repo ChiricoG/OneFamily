@@ -32,7 +32,8 @@ $srcFiles = @(
     "$DAEMON_DIR/src/log.c",
     "$DAEMON_DIR/src/controller_detect.c",
     "$DAEMON_DIR/src/translator.c",
-    "$DAEMON_DIR/src/generic_hid.c"
+    "$DAEMON_DIR/src/generic_hid.c",
+    "$DAEMON_DIR/src/bt_driver.c"
 )
 
 $objFiles = @()
