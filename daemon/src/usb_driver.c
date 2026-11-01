@@ -179,18 +179,24 @@ static uint64_t s_failed_cooldown_until_us = 0;
 static bool     s_awaiting_user_pick = false;
 static bool     s_picker_cancel_sent = false;
 static uint64_t s_picker_cancel_time_us = 0;
+static int      s_usb_vpad_slot = -1;
 
 // Wait-for-physical-replug state after user cancels picker with B/Circle
 static uint16_t s_replug_vid = 0;
 static uint16_t s_replug_pid = 0;
 
 static void close_controller(void) {
-    bool had_vpad = vpad_is_active();
+    bool had_vpad = (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active());
     uint16_t closing_vid = g_usb_state.vid;
     uint16_t closing_pid = g_usb_state.pid;
     int had_any_reports = s_logged_first_report;
 
-    vpad_shutdown();
+    if (s_usb_vpad_slot >= 0) {
+        vpad_slot_close(s_usb_vpad_slot);
+        s_usb_vpad_slot = -1;
+    } else {
+        vpad_shutdown();
+    }
     generic_hid_reset();
     write_status_file(false, CONTROLLER_NONE, 0, 0, "None", 0);
     if (g_dev_handle) {
@@ -709,12 +715,13 @@ static int scan_and_open(void) {
                     s_last_ds4.count = 1;
 
                     // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer.
-                    // NOTE: For DualSense, vpad is deferred to first valid IN report (see poll_step).
-                    //       This avoids writing to USB endpoints before the controller has completed
-                    //       its probe handshake (would cause STALL on EP IN/OUT).
                     if (det.type != CONTROLLER_DUALSENSE) {
-                        vpad_init();
-                        vpad_send_data(&s_last_ds4);
+                        if (s_usb_vpad_slot < 0) {
+                            vpad_slot_open(VPAD_SOURCE_USB, &s_usb_vpad_slot);
+                        }
+                        if (s_usb_vpad_slot >= 0) {
+                            vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
+                        }
                     }
 
                     if (det.type == CONTROLLER_XBOX360) {
@@ -735,17 +742,11 @@ static int scan_and_open(void) {
                     } else if (det.type == CONTROLLER_SWITCH_PRO) {
                         init_switch_pro_controller();
                     } else if (det.type == CONTROLLER_DUALSENSE) {
-                        // DualSense: run the full hid-playstation probe sequence (GET_REPORT 0x09, 0x20, 0x05
-                        // + ClearHalt + 30ms delay) so the controller activates its interrupt endpoints.
-                        // vpad_init() and the PS button pulse will follow at the first valid IN report.
                         init_dualsense_controller();
                     }
 
-                    // In Auto Mode: Send an automatic PS Button pulse to trigger the native
-                    // Orbis OS "Who is using this controller?" user selection screen!
-                    // NOTE: For DualSense, the pulse is deferred to the first valid IN report.
+                    // In Auto Mode: SceShellCore automatically receives the PS pulse sent by vpad_slot_open!
                     if (g_daemon_config.mode == CONFIG_MODE_AUTO && det.type != CONTROLLER_DUALSENSE) {
-                        vpad_pulse_ps_button();
                         s_awaiting_user_pick = true;
                         s_picker_cancel_sent = false;
                         s_picker_cancel_time_us = 0;
@@ -753,7 +754,7 @@ static int scan_and_open(void) {
                     }
 
                     if (det.type != CONTROLLER_DUALSENSE) {
-                        int slot = vpad_get_assigned_slot();
+                        int slot = vpad_get_assigned_slot_num(s_usb_vpad_slot);
                         if (slot == 2) {
                             daemon_notify("OneFamily: %s (Player 2)", controller_type_to_str(det.type));
                         } else {
@@ -1023,7 +1024,10 @@ static void execute_picker_cancel_teardown(void) {
 
     // 3. Shut down Virtual Pad cleanly after the modal transition and DS4 power-off complete
     //    (also prevents close_controller() from firing the generic "Controller Disconnected" toast)
-    vpad_shutdown();
+    if (s_usb_vpad_slot >= 0) {
+        vpad_slot_close(s_usb_vpad_slot);
+        s_usb_vpad_slot = -1;
+    }
     close_controller();
     daemon_notify("OneFamily: Reconnect controller to use");
 }
@@ -1064,7 +1068,11 @@ static void handle_pad_input_and_send(const OrbisPadData* ds4) {
     }
 
     s_last_ds4 = out_ds4;
-    vpad_send_data(&out_ds4);
+    if (s_usb_vpad_slot >= 0) {
+        vpad_send_data_slot(s_usb_vpad_slot, &out_ds4);
+    } else {
+        vpad_send_data(&out_ds4);
+    }
 }
 
 void usb_driver_poll_step(void) {
@@ -1464,9 +1472,13 @@ void usb_driver_poll_step(void) {
                 }
             }
             // Normal USB interrupt timeout: keep 250 Hz stream alive with last known state
-            if (s_last_ds4.connected && vpad_is_active()) {
+            if (s_last_ds4.connected && (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active())) {
                 s_last_ds4.timestamp = daemon_sys_time_us();
-                vpad_send_data(&s_last_ds4);
+                if (s_usb_vpad_slot >= 0) {
+                    vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
+                } else {
+                    vpad_send_data(&s_last_ds4);
+                }
             }
         } else if (ret != 0) {
             s_consecutive_transfer_errors++;
@@ -1526,9 +1538,13 @@ void usb_driver_poll_step(void) {
                 close_controller();
             } else {
                 // Keep 250 Hz alive with last known state during transient error recovery
-                if (s_last_ds4.connected && vpad_is_active()) {
+                if (s_last_ds4.connected && (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active())) {
                     s_last_ds4.timestamp = daemon_sys_time_us();
-                    vpad_send_data(&s_last_ds4);
+                    if (s_usb_vpad_slot >= 0) {
+                        vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
+                    } else {
+                        vpad_send_data(&s_last_ds4);
+                    }
                 }
             }
         }

@@ -31,6 +31,7 @@ static volatile bool s_bt_running = false;
 static int s_bt_fd = -1;
 static void* s_bt_thread = NULL;
 static bool s_dualsense_connected = false;
+static int s_bt_vpad_slot = -1;
 
 // -------------------------------------------------------------
 // CRC32 Calculation for DualSense Bluetooth Reports
@@ -246,16 +247,17 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
 
     if (!s_dualsense_connected) {
         s_dualsense_connected = true;
-        if (!vpad_is_active()) {
-            vpad_init();
+        if (s_bt_vpad_slot < 0) {
+            vpad_slot_open(VPAD_SOURCE_BT, &s_bt_vpad_slot);
         }
-        int slot = vpad_get_assigned_slot();
-        if (slot == 2) {
+        int slot_num = vpad_get_assigned_slot_num(s_bt_vpad_slot);
+        if (slot_num == 2) {
             daemon_notify("OneFamily: DualSense Wireless (Player 2)");
         } else {
             daemon_notify("OneFamily: DualSense Wireless Connected");
         }
-        daemon_log(LOG_LEVEL_INFO, "DualSense Wireless controller connected via Bluetooth");
+        daemon_log(LOG_LEVEL_INFO, "DualSense Wireless controller connected via Bluetooth (Slot %d, Player %d)",
+                   s_bt_vpad_slot, slot_num);
     }
 
     OrbisPadData ds4;
@@ -313,7 +315,11 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
     ds4.timestamp = daemon_sys_time_us();
 
     // Send translated controller packet to Virtual DualShock 4
-    vpad_send_data(&ds4);
+    if (s_bt_vpad_slot >= 0) {
+        vpad_send_data_slot(s_bt_vpad_slot, &ds4);
+    } else {
+        vpad_send_data(&ds4);
+    }
 }
 
 // -------------------------------------------------------------
@@ -399,6 +405,10 @@ void bt_driver_shutdown(void) {
 
     // Restore original kernel allowlist
     apply_kernel_allowlist_patch(1 /* restore */);
+    if (s_bt_vpad_slot >= 0) {
+        vpad_slot_close(s_bt_vpad_slot);
+        s_bt_vpad_slot = -1;
+    }
     s_dualsense_connected = false;
 }
 

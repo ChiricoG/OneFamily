@@ -15,23 +15,37 @@ typedef enum {
 } ConfigMode;
 #endif
 
+#define VPAD_MAX_SLOTS 2
+
+typedef enum {
+    VPAD_SOURCE_NONE = 0,
+    VPAD_SOURCE_USB,
+    VPAD_SOURCE_BT
+} VPadSource;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Virtual Pad Device Lifecycle
+// Multi-Slot Device Lifecycle
+int  vpad_slot_open(VPadSource source, int *out_slot);
+void vpad_slot_close(int slot);
+bool vpad_slot_is_active(int slot);
+int  vpad_send_data_slot(int slot, const OrbisPadData *data);
+void vpad_pulse_ps_button_slot(int slot);
+int  vpad_get_assigned_slot_num(int slot);
+
+// Subsystem Lifecycle (initializes / unloads PRXs)
 int  vpad_init(void);
 void vpad_shutdown(void);
 bool vpad_is_active(void);
 
-// User & Player Slot Binding
+// Backwards-compatible single-pad helpers
 int  vpad_bind_user(ConfigMode mode, int *out_slot, char *out_username, size_t username_len);
 int  vpad_get_assigned_slot(void);
 const char* vpad_get_assigned_user(void);
 void vpad_check_user_rebind(ConfigMode mode);
 void vpad_pulse_ps_button(void);
-
-// Data Insertion (with smart delta rate-limiting)
 int  vpad_send_data(const OrbisPadData *data);
 
 // Rumble / Vibration Callback & Polling

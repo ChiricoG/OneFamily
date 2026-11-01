@@ -6,6 +6,8 @@
  */
 
 #include "vpad.h"
+#include "bt_driver.h"
+#include "usb_driver.h"
 #include "config.h"
 #include "log.h"
 #include "daemon_syscalls.h"
@@ -73,6 +75,25 @@ static int g_vpad_handle = -1;
 static bool g_vpad_active = false;
 static vpad_rumble_cb_t g_rumble_cb = NULL;
 
+typedef struct {
+    int handle;
+    bool active;
+    VPadSource source;
+    uint64_t last_send_time_us;
+    OrbisPadData last_sent_data;
+    bool has_sent_first;
+    int last_ps_state;
+    uint32_t last_logged_buttons;
+    int logged_insert_packets;
+    uint8_t last_rumble_lg;
+    uint8_t last_rumble_sm;
+    uint64_t last_rumble_send_us;
+    int assigned_slot;
+    char assigned_username[64];
+} VPadSlotState;
+
+static VPadSlotState g_slots[VPAD_MAX_SLOTS];
+
 static scePadInit_t                          p_scePadInit = NULL;
 static scePadMbusInit_t                      p_scePadMbusInit = NULL;
 static scePadSetProcessPrivilege_t           p_scePadSetProcessPrivilege = NULL;
@@ -107,11 +128,6 @@ static sceUserServiceGetUserName_t          p_sceUserServiceGetUserName = NULL;
 static int s_assigned_slot = 1;
 static char s_assigned_username[64] = "Player 1";
 static int s_last_login_count = -1;
-
-// Smart delta rate-limiting state
-static OrbisPadData s_last_sent_data;
-static uint64_t s_last_send_time_us = 0;
-static bool s_has_sent_first = false;
 
 static inline int abs_diff(int a, int b) {
     int d = a - b;
@@ -361,11 +377,11 @@ int vpad_bind_user(ConfigMode mode, int *out_slot, char *out_username, size_t us
     return 0;
 }
 
-void vpad_pulse_ps_button(void) {
-    if (!g_vpad_active || g_vpad_handle < 0 || !p_scePadVirtualDeviceInsertData) {
+void vpad_pulse_ps_button_slot(int slot) {
+    if (slot < 0 || slot >= VPAD_MAX_SLOTS || !g_slots[slot].active || g_slots[slot].handle < 0 || !p_scePadVirtualDeviceInsertData) {
         return;
     }
-    daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button: Sending native PS button pulse (120ms) to trigger user selection...");
+    daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button_slot(%d): Sending native PS button pulse (120ms) to trigger user selection...", slot);
 
     OrbisPadData pulse;
     memset(&pulse, 0, sizeof(pulse));
@@ -379,10 +395,10 @@ void vpad_pulse_ps_button(void) {
     pulse.timestamp = daemon_sys_time_us();
 
     // 1. Send PS button pressed
-    p_scePadVirtualDeviceInsertData(g_vpad_handle, &pulse);
-    s_last_send_time_us = pulse.timestamp;
-    s_last_sent_data = pulse;
-    s_has_sent_first = true;
+    p_scePadVirtualDeviceInsertData(g_slots[slot].handle, &pulse);
+    g_slots[slot].last_send_time_us = pulse.timestamp;
+    g_slots[slot].last_sent_data = pulse;
+    g_slots[slot].has_sent_first = true;
 
     // 2. Hold pulse for 120 ms so SceShellCore latches it cleanly
     daemon_sys_usleep(120000);
@@ -390,11 +406,20 @@ void vpad_pulse_ps_button(void) {
     // 3. Send PS button released
     pulse.buttons = 0;
     pulse.timestamp = daemon_sys_time_us();
-    p_scePadVirtualDeviceInsertData(g_vpad_handle, &pulse);
-    s_last_send_time_us = pulse.timestamp;
-    s_last_sent_data = pulse;
+    p_scePadVirtualDeviceInsertData(g_slots[slot].handle, &pulse);
+    g_slots[slot].last_send_time_us = pulse.timestamp;
+    g_slots[slot].last_sent_data = pulse;
 
-    daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button: PS button released, native user picker launched");
+    daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button_slot(%d): PS button released, native user picker launched", slot);
+}
+
+void vpad_pulse_ps_button(void) {
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active) {
+            vpad_pulse_ps_button_slot(i);
+            return;
+        }
+    }
 }
 
 int vpad_get_assigned_slot(void) {
@@ -427,13 +452,7 @@ void vpad_check_user_rebind(ConfigMode mode) {
     }
 }
 
-int vpad_init(void) {
-    if (g_vpad_active) {
-        return 0;
-    }
-
-    daemon_log(LOG_LEVEL_INFO, "Initializing Virtual Pad Subsystem (Device Type 1 - Native DualShock 4)...");
-
+static int vpad_ensure_subsystem(void) {
     // 1. Mandatory: libSceMbus must be loaded prior to libScePad
     if (g_hMbus == 0) {
         if (load_prx("libSceMbus.sprx", &g_hMbus) < 0) {
@@ -499,12 +518,45 @@ int vpad_init(void) {
         return -2;
     }
 
-    // 3b. Power off / disconnect any active physical DualShock 4 before registering Virtual DS4
-    //     so its Bluetooth link drops cleanly (LED turns off) and never gets stuck in an unbound state
-    vpad_poweroff_physical_ds4();
+    return 0;
+}
 
-    // 4. Register Virtual DualShock 4 as Device Type 1
-    // Type 1 is the official PS4 virtual DualShock 4 device type recognized by games & OS
+int vpad_slot_open(VPadSource source, int *out_slot) {
+    if (vpad_ensure_subsystem() != 0) {
+        return -1;
+    }
+
+    // Check if this source already has an active slot
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active && g_slots[i].source == source) {
+            if (out_slot) *out_slot = i;
+            return 0;
+        }
+    }
+
+    // Find first free slot
+    int slot = -1;
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (!g_slots[i].active) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        daemon_log(LOG_LEVEL_WARN, "vpad_slot_open: All %d virtual pad slots are occupied", VPAD_MAX_SLOTS);
+        return -1;
+    }
+
+    // Power off physical DS4 before opening the first virtual pad so its link drops cleanly
+    bool any_prior_active = false;
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active) { any_prior_active = true; break; }
+    }
+    if (!any_prior_active) {
+        vpad_poweroff_physical_ds4();
+    }
+
     ScePadVirtualDeviceParam param;
     memset(&param, 0, sizeof(param));
     param.size = sizeof(param);
@@ -514,142 +566,177 @@ int vpad_init(void) {
     int vHandle = -1;
     int ret = p_scePadVirtualDeviceAddDevice(&param, &vHandle);
     if (ret < 0 || vHandle < 0) {
-        daemon_log(LOG_LEVEL_ERROR, "scePadVirtualDeviceAddDevice(type 1) failed: 0x%08X", ret);
+        daemon_log(LOG_LEVEL_ERROR, "scePadVirtualDeviceAddDevice(type 1) failed for slot %d: 0x%08X", slot, ret);
         return ret;
     }
 
-    g_vpad_handle = vHandle;
+    memset(&g_slots[slot], 0, sizeof(VPadSlotState));
+    g_slots[slot].handle = vHandle;
+    g_slots[slot].active = true;
+    g_slots[slot].source = source;
+    g_slots[slot].assigned_slot = slot + 1;
+    snprintf(g_slots[slot].assigned_username, sizeof(g_slots[slot].assigned_username), "User %d", slot + 1);
+
     g_vpad_active = true;
-    daemon_log(LOG_LEVEL_INFO, "Virtual DualShock 4 (type 1) registered with handle=0x%X (%d)", g_vpad_handle, g_vpad_handle);
+    g_vpad_handle = vHandle;
 
-    // 5. Notify Pad Subsystem that device is connected
+    daemon_log(LOG_LEVEL_INFO, "Virtual DS4 Slot %d (%s) registered with handle=0x%X",
+               slot, source == VPAD_SOURCE_BT ? "Bluetooth" : "USB", vHandle);
+
     if (p_scePadSetConnection) {
-        int r = p_scePadSetConnection(g_vpad_handle, 1);
-        daemon_log(LOG_LEVEL_INFO, "scePadSetConnection(0x%X, 1) = 0x%08X", g_vpad_handle, r);
+        int r = p_scePadSetConnection(vHandle, 1);
+        daemon_log(LOG_LEVEL_INFO, "scePadSetConnection(0x%X, 1) = 0x%08X", vHandle, r);
     }
 
-    // 6. Bind to User Profile / Player Slot
-    int slot = 1;
-    char username[64];
-    vpad_bind_user(g_daemon_config.mode, &slot, username, sizeof(username));
+    // Automatically trigger PS button pulse so SceShellCore opens the native
+    // "Who is using this controller?" user picker screen!
+    vpad_pulse_ps_button_slot(slot);
 
-    // Reset rate-limiting state
-    s_has_sent_first = false;
-    memset(&s_last_sent_data, 0, sizeof(s_last_sent_data));
-    s_last_send_time_us = 0;
-
-    char notif[128];
-    if (slot == 2) {
-        snprintf(notif, sizeof(notif), "OneFamily: Virtual DS4 Active (Player 2: %s)", username);
-    } else {
-        snprintf(notif, sizeof(notif), "OneFamily: Virtual DS4 Active (%s)", username);
-    }
-    daemon_notify(notif);
+    if (out_slot) *out_slot = slot;
     return 0;
 }
 
-// Rumble polling state
-static uint8_t s_last_rumble_lg = 0;
-static uint8_t s_last_rumble_sm = 0;
-static uint64_t s_last_rumble_send_us = 0;
+void vpad_slot_close(int slot) {
+    if (slot < 0 || slot >= VPAD_MAX_SLOTS || !g_slots[slot].active) {
+        return;
+    }
 
-void vpad_shutdown(void) {
-    if (g_vpad_active && g_vpad_handle >= 0) {
-        daemon_log(LOG_LEVEL_INFO, "Deleting Virtual Pad handle=0x%X", g_vpad_handle);
+    int handle = g_slots[slot].handle;
+    daemon_log(LOG_LEVEL_INFO, "Closing Virtual Pad Slot %d (handle=0x%X, source=%d)",
+               slot, handle, g_slots[slot].source);
+
+    if (handle >= 0) {
         if (p_scePadSetConnection) {
-            p_scePadSetConnection(g_vpad_handle, 0);
+            p_scePadSetConnection(handle, 0);
         }
         if (p_sceMbusDisconnectDevice) {
-            p_sceMbusDisconnectDevice(g_vpad_handle);
+            p_sceMbusDisconnectDevice(handle);
         }
-        daemon_sys_usleep(50000);
+        daemon_sys_usleep(30000);
         if (p_scePadVirtualDeviceDeleteDevice) {
-            p_scePadVirtualDeviceDeleteDevice(g_vpad_handle);
+            p_scePadVirtualDeviceDeleteDevice(handle);
         }
-        g_vpad_handle = -1;
-        g_vpad_active = false;
-        s_has_sent_first = false;
-        memset(&s_last_sent_data, 0, sizeof(s_last_sent_data));
-        s_last_send_time_us = 0;
-        s_last_rumble_lg = 0;
-        s_last_rumble_sm = 0;
-        s_last_rumble_send_us = 0;
     }
+
+    memset(&g_slots[slot], 0, sizeof(VPadSlotState));
+    g_slots[slot].handle = -1;
+
+    bool any_active = false;
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active) {
+            any_active = true;
+            g_vpad_handle = g_slots[i].handle;
+            break;
+        }
+    }
+    if (!any_active) {
+        g_vpad_active = false;
+        g_vpad_handle = -1;
+    }
+}
+
+bool vpad_slot_is_active(int slot) {
+    if (slot >= 0 && slot < VPAD_MAX_SLOTS) {
+        return g_slots[slot].active;
+    }
+    return false;
+}
+
+int vpad_get_assigned_slot_num(int slot) {
+    if (slot >= 0 && slot < VPAD_MAX_SLOTS && g_slots[slot].active) {
+        return g_slots[slot].assigned_slot;
+    }
+    return 1;
+}
+
+int vpad_init(void) {
+    int slot = -1;
+    return vpad_slot_open(VPAD_SOURCE_USB, &slot);
+}
+
+void vpad_shutdown(void) {
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active) {
+            vpad_slot_close(i);
+        }
+    }
+    g_vpad_active = false;
+    g_vpad_handle = -1;
 }
 
 bool vpad_is_active(void) {
     return g_vpad_active;
 }
 
-static uint32_t s_last_logged_buttons = 0;
-static int s_logged_insert_packets = 0;
-static int s_last_ps_state = 0;
-
-int vpad_send_data(const OrbisPadData *data) {
-    if (!g_vpad_active || g_vpad_handle < 0 || !p_scePadVirtualDeviceInsertData || !data) {
+int vpad_send_data_slot(int slot, const OrbisPadData *data) {
+    if (slot < 0 || slot >= VPAD_MAX_SLOTS || !g_slots[slot].active || g_slots[slot].handle < 0 || !p_scePadVirtualDeviceInsertData || !data) {
         return -1;
     }
 
+    VPadSlotState *s = &g_slots[slot];
     uint64_t now = daemon_sys_time_us();
 
     // Determine if pad is in neutral / resting state
     bool is_neutral = (data->buttons == 0 &&
-                       data->analogButtons.l2 == 0 &&
-                       data->analogButtons.r2 == 0 &&
+                       data->analogButtons.l2 <= 4 &&
+                       data->analogButtons.r2 <= 4 &&
                        abs_diff(data->leftStick.x, 128) <= 4 &&
                        abs_diff(data->leftStick.y, 128) <= 4 &&
                        abs_diff(data->rightStick.x, 128) <= 4 &&
                        abs_diff(data->rightStick.y, 128) <= 4);
 
     bool state_changed = false;
-    if (!s_has_sent_first) {
+    if (!s->has_sent_first) {
         state_changed = true;
-    } else if (data->buttons != s_last_sent_data.buttons) {
+    } else if (data->buttons != s->last_sent_data.buttons) {
         state_changed = true;
-    } else if (abs_diff(data->leftStick.x, s_last_sent_data.leftStick.x) > 1 ||
-               abs_diff(data->leftStick.y, s_last_sent_data.leftStick.y) > 1 ||
-               abs_diff(data->rightStick.x, s_last_sent_data.rightStick.x) > 1 ||
-               abs_diff(data->rightStick.y, s_last_sent_data.rightStick.y) > 1) {
+    } else if (abs_diff(data->leftStick.x, s->last_sent_data.leftStick.x) > 1 ||
+               abs_diff(data->leftStick.y, s->last_sent_data.leftStick.y) > 1 ||
+               abs_diff(data->rightStick.x, s->last_sent_data.rightStick.x) > 1 ||
+               abs_diff(data->rightStick.y, s->last_sent_data.rightStick.y) > 1) {
         state_changed = true;
-    } else if (abs_diff(data->analogButtons.l2, s_last_sent_data.analogButtons.l2) > 2 ||
-               abs_diff(data->analogButtons.r2, s_last_sent_data.analogButtons.r2) > 2) {
+    } else if (abs_diff(data->analogButtons.l2, s->last_sent_data.analogButtons.l2) > 2 ||
+               abs_diff(data->analogButtons.r2, s->last_sent_data.analogButtons.r2) > 2) {
         state_changed = true;
     }
 
-    // Rate-limiting / Throttling:
-    // If state did NOT change:
-    // - Neutral resting state: limit keep-alive to 5 Hz (200,000 us = 200 ms).
-    //   This frees 98% of bus traffic so physical DS4 controllers operate with zero interference!
-    // - Active held state: refresh at 50 Hz (20,000 us = 20 ms).
     if (!state_changed) {
         uint64_t interval = is_neutral ? 200000 : 20000;
-        if ((now - s_last_send_time_us) < interval) {
+        if ((now - s->last_send_time_us) < interval) {
             return 0; // Throttled cleanly
         }
     }
 
-    int ret = p_scePadVirtualDeviceInsertData(g_vpad_handle, data);
-    s_last_send_time_us = now;
-    s_last_sent_data = *data;
-    s_has_sent_first = true;
+    int ret = p_scePadVirtualDeviceInsertData(s->handle, data);
+    s->last_send_time_us = now;
+    s->last_sent_data = *data;
+    s->has_sent_first = true;
 
     int ps_now = (data->buttons & DS4_BUTTON_PS) ? 1 : 0;
-    if (ps_now != s_last_ps_state) {
-        s_last_ps_state = ps_now;
-        daemon_log(LOG_LEVEL_INFO, "vpad_send_data: PS Button %s (btn=0x%08X, ret=0x%08X)",
-                   ps_now ? "ACTIVE" : "RELEASED", data->buttons, ret);
+    if (ps_now != s->last_ps_state) {
+        s->last_ps_state = ps_now;
+        daemon_log(LOG_LEVEL_INFO, "vpad_send_data_slot(%d): PS Button %s (btn=0x%08X, ret=0x%08X)",
+                   slot, ps_now ? "ACTIVE" : "RELEASED", data->buttons, ret);
     }
 
-    // Diagnostic logging: log first 5 packets, button state changes, or errors
-    if (s_logged_insert_packets < 5 || (ret != 0 && s_logged_insert_packets < 25) ||
-        (data->buttons != s_last_logged_buttons && s_logged_insert_packets < 60)) {
-        daemon_log(LOG_LEVEL_INFO, "InsertData(h=0x%X, btn=0x%08X, lx=%d, ly=%d) -> 0x%08X",
-                   g_vpad_handle, data->buttons, data->leftStick.x, data->leftStick.y, ret);
-        s_last_logged_buttons = data->buttons;
-        s_logged_insert_packets++;
+    if (s->logged_insert_packets < 5 || (ret != 0 && s->logged_insert_packets < 25) ||
+        (data->buttons != s->last_logged_buttons && s->logged_insert_packets < 60)) {
+        daemon_log(LOG_LEVEL_INFO, "InsertData(slot=%d, h=0x%X, btn=0x%08X, lx=%d, ly=%d) -> 0x%08X",
+                   slot, s->handle, data->buttons, data->leftStick.x, data->leftStick.y, ret);
+        s->last_logged_buttons = data->buttons;
+        s->logged_insert_packets++;
     }
 
     return ret;
+}
+
+int vpad_send_data(const OrbisPadData *data) {
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active) {
+            return vpad_send_data_slot(i, data);
+        }
+    }
+    return -1;
 }
 
 void vpad_set_rumble_callback(vpad_rumble_cb_t cb) {
@@ -657,33 +744,38 @@ void vpad_set_rumble_callback(vpad_rumble_cb_t cb) {
 }
 
 void vpad_poll_rumble(void) {
-    if (!g_vpad_active || g_vpad_handle < 0 || !p_scePadVirtualDeviceGetRemoteSetting || !g_rumble_cb) {
-        return;
-    }
+    if (!p_scePadVirtualDeviceGetRemoteSetting) return;
 
-    uint8_t setting[128];
-    memset(setting, 0, sizeof(setting));
-    int ret = p_scePadVirtualDeviceGetRemoteSetting(g_vpad_handle, setting);
-    if (ret == 0) {
-        // scePadVirtualDeviceGetRemoteSetting buffer layout (DS4 Output Report without Report ID):
-        // [0]    = update flags (bit 0: rumble, bit 1: light bar)
-        // [1..2] = reserved (0x00)
-        // [3]    = large motor (slow/strong, 0..255)
-        // [4]    = small motor (fast/weak, 0..255)
-        // [5..7] = light bar RGB
-        uint8_t lg = setting[3];
-        uint8_t sm = setting[4];
-        uint64_t now = daemon_sys_time_us();
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (!g_slots[i].active || g_slots[i].handle < 0) continue;
 
-        bool changed = (lg != s_last_rumble_lg || sm != s_last_rumble_sm);
-        // Periodic 100ms keep-alive while rumbling so Switch / 2.4GHz dongles do not time out
-        bool keepalive = ((lg > 0 || sm > 0) && (now - s_last_rumble_send_us >= 100000ULL));
+        uint8_t setting[128];
+        memset(setting, 0, sizeof(setting));
+        int ret = p_scePadVirtualDeviceGetRemoteSetting(g_slots[i].handle, setting);
+        if (ret == 0) {
+            uint8_t lg = setting[3];
+            uint8_t sm = setting[4];
+            uint64_t now = daemon_sys_time_us();
 
-        if (changed || keepalive) {
-            s_last_rumble_lg = lg;
-            s_last_rumble_sm = sm;
-            s_last_rumble_send_us = now;
-            g_rumble_cb(lg, sm);
+            bool changed = (lg != g_slots[i].last_rumble_lg || sm != g_slots[i].last_rumble_sm);
+            bool keepalive = ((lg > 0 || sm > 0) && (now - g_slots[i].last_rumble_send_us >= 100000ULL));
+
+            if (changed || keepalive) {
+                g_slots[i].last_rumble_lg = lg;
+                g_slots[i].last_rumble_sm = sm;
+                g_slots[i].last_rumble_send_us = now;
+
+                if (g_slots[i].source == VPAD_SOURCE_BT) {
+                    uint8_t color[3] = { setting[5], setting[6], setting[7] };
+                    bt_driver_send_rumble(lg, sm, color);
+                } else if (g_slots[i].source == VPAD_SOURCE_USB) {
+                    if (g_rumble_cb) {
+                        g_rumble_cb(lg, sm);
+                    } else {
+                        usb_driver_send_rumble(lg, sm);
+                    }
+                }
+            }
         }
     }
 }
