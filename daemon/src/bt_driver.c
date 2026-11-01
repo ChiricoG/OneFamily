@@ -69,6 +69,11 @@ struct PatchRequest {
     int detail_code;     // Output: internal diagnostic code
 };
 
+struct PatchArgs {
+    void* function;
+    struct PatchRequest* request;
+};
+
 struct DynamicBTScan {
     uint32_t lock_offset;
     uint32_t unlock_offset;
@@ -143,16 +148,17 @@ static int resolve_bt_offsets_dynamic(uint64_t base, struct DynamicBTScan* out_s
 /**
  * Ring 0 Kernel Execution callback (invoked via syscall 11 / kexec)
  */
-static int patch_allowlist(void* thread, struct PatchRequest* req) {
+static int patch_allowlist(void* thread, struct PatchArgs* args) {
     (void)thread;
     uint32_t low, high;
     __asm__ volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(0xC0000082));
     uint64_t base = (((uint64_t)high << 32) | low) - 0x1C0;
 
-    if ((base >> 48) != 0xFFFF || (base & 0x3FFF) || !req) {
+    if ((base >> 48) != 0xFFFF || (base & 0x3FFF) || !args || !args->request) {
         return 22; // EINVAL
     }
 
+    struct PatchRequest* req = args->request;
     int restore = req->restore;
     if (restore != 0 && restore != 1) return 22;
 
