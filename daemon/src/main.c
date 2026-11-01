@@ -91,6 +91,9 @@ int main(int argc, char *argv[]) {
         // Poll USB controller and feed Virtual DualShock 4
         usb_driver_poll_step();
 
+        // Poll Bluetooth DualSense controller and feed Virtual DualShock 4
+        bt_driver_poll_step();
+
         // Poll virtual DS4 rumble from OS/games
         vpad_poll_rumble();
 

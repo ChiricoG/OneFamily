@@ -24,6 +24,7 @@ int daemon_sys_dlsym(int handle, const char *symbol, void **out_addr);
 
 // Resolves libkernel functions dynamically (safe from dynamic link issues)
 void daemon_kernel_init(void);
+int daemon_kernel_get_handle(void);
 int daemon_kernel_notify(const char *message);
 int daemon_kernel_thread_create(void *out_thread, void *(*func)(void*), void *arg, const char *name);
 

@@ -18,6 +18,13 @@ extern "C" {
 int bt_driver_init(void);
 
 /**
+ * Non-blocking poll step executed in the main daemon loop (250 Hz).
+ * Checks kqueue for /dev/bt events, queries reports via ioctl 0x80206233,
+ * decodes input and feeds the virtual DualShock 4 controller.
+ */
+void bt_driver_poll_step(void);
+
+/**
  * Shutdown the Bluetooth Driver Subsystem and restore original kernel allowlist.
  */
 void bt_driver_shutdown(void);

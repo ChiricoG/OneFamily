@@ -186,6 +186,11 @@ void daemon_kernel_init(void) {
                s_hKernel, p_send_notif, p_pthread_create);
 }
 
+int daemon_kernel_get_handle(void) {
+    daemon_kernel_init();
+    return s_hKernel;
+}
+
 int daemon_kernel_notify(const char *message) {
     daemon_kernel_init();
     if (!p_send_notif || !message) return -1;
