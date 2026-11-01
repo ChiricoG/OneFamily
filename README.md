@@ -18,6 +18,19 @@
 
 ---
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Screenshots](#screenshots)
+- [Key Features](#key-features)
+- [Supported Controllers](#supported-controllers)
+- [Quick Start / Installation](#quick-start--installation)
+- [Bug Reports & Requesting New Controllers](#bug-reports--requesting-new-controllers)
+- [Building from Source](#building-from-source)
+- [License](#license)
+
+---
+
 ## Overview
 
 **OneFamily** is a high-performance background daemon and 1080p companion homebrew application for jailbroken PlayStation 4 consoles running **GoldHEN**.
