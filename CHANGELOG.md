@@ -2,20 +2,11 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
-## [v1.2.1] - Hotfix Release (2026-11-01)
-- **Zero-Panic Kernel Safety Guard**: Eliminated unmapped Ring 0 memory scanning across unknown firmware versions, completely preventing supervisor page faults and kernel panics on FW 13.52 and other unmapped firmwares.
-- **Graceful Unsupported Firmware Fallback**: Safely skips the Bluetooth allowlist subsystem on unmapped firmwares while keeping USB controllers (Xbox, Switch, DualSense over USB, Generic HID) 100% active and stable.
-
----
-
 ## [v1.2.0] - Official Release (2026-11-01)
 
 ### DualSense (PS5) Bluetooth Wireless & USB Support
 - **Ring 0 Kernel Allowlist Patch**: Native integration of the Orbis OS kernel allowlist patch, allowing PlayStation 5 DualSense and DualSense Edge controllers to pair wirelessly over Bluetooth without disabling standard DualShock 4 pads.
-- **Hybrid Multi-Firmware Compatibility**:
-  - *Verified Static Table (FW 12.50)*: Zero-overhead allowlist execution protected by 64-bit magic header validation (`0x56415741E5894855UL`) and synchronized `bthid_lock` / `bthid_unlock` mutexes.
-  - *Safe Ring 0 AOB Dynamic Scanner*: Dynamic signature scanner for other firmwares (9.00, 11.00, 13.00, 13.52+) verifying target opcode patterns within tight safety bounds.
-  - *Zero-Panic Safety Guarantee*: Memory write protection (CR0 WP) is strictly preserved unless all integrity checkpoints pass.
+- **Zero-Panic Multi-Firmware Architecture**: Verified static table for FW 12.50 protected by 64-bit magic header validation (`0x56415741E5894855UL`) and synchronized `bthid_lock` / `bthid_unlock` mutexes. On unmapped firmwares (such as FW 13.52), gracefully skips Bluetooth without touching unverified kernel memory, guaranteeing 0 panics.
 - **64-bit Syscall Architecture (`daemon_sys_call6`)**: Dedicated inline assembly register constraints guaranteeing clean 64-bit pointers and resolving `sys_kevent` `-EFAULT` (-14).
 - **FreeBSD `sys_kexec` Argument Mapping (`struct PatchArgs`)**: Correctly maps the FreeBSD kernel `uap` structure in Ring 0 execution.
 - **DualSense USB Streaming**: Added Standard HID Handshake (`GET_DESCRIPTOR 0x22`), removed disruptive `SET_IDLE`, aligned output reports strictly to 64 bytes, eliminated destructive EP0 fallbacks, and added early ClearHalt recovery.
