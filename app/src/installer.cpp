@@ -670,6 +670,8 @@ InstallResult Installer::runInstallation(bool isUpdate) {
     }
 
     // 3. Write payload to destination (overwriting existing file with latest version)
+    sceKernelUnlink(TARGET_PAYLOAD_PATH);
+    sceKernelUnlink(TARGET_USER_PAYLOAD_PATH);
     bool write1 = write_binary_file(TARGET_PAYLOAD_PATH, payloadData.data(), payloadData.size());
     bool write2 = write_binary_file(TARGET_USER_PAYLOAD_PATH, payloadData.data(), payloadData.size());
     res.payloadCopied = (write1 || write2);
