@@ -27,6 +27,7 @@
 - [Quick Start / Installation](#quick-start--installation)
 - [Bug Reports & Requesting New Controllers](#bug-reports--requesting-new-controllers)
 - [Building from Source](#building-from-source)
+- [Credits & Acknowledgements](#credits--acknowledgements)
 - [License](#license)
 
 ---
@@ -183,6 +184,12 @@ Please **follow the Bug Report template**
 The compiled binaries will be output to:
 - `bin/onefamily.bin` (Daemon payload)
 - `bin/onefamily_companion.pkg` (PS4 Companion Package)
+
+---
+
+## Credits & Acknowledgements
+
+- **[Diram1x](https://github.com/Diramix)**: **Special thanks** for the pioneering research on PS4 Bluetooth allowlist patching and DualSense wireless HID communication, which inspired and served as the technical foundation for OneFamily's native Bluetooth DualSense integration.
 
 ---
 
