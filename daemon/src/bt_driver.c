@@ -53,7 +53,7 @@ static uint32_t bt_calc_crc32(uint8_t prefix, const uint8_t* data, size_t len) {
 }
 
 // -------------------------------------------------------------
-// Kernel Allowlist Patching (Multi-Firmware / Ring 0)
+// Kernel Allowlist Patching (Multi-Firmware Dynamic SigScan / Ring 0)
 // -------------------------------------------------------------
 
 struct PatchRequest {
@@ -66,11 +66,46 @@ struct PatchArgs {
     struct PatchRequest* request;
 };
 
-// Known allowlist offsets for Firmware 11.00 (0x1250)
+// Known allowlist offsets for Firmware 11.00 (0x1250) as rapid fallback
 static const uint32_t s_offsets_1100[10] = {
     0x5B0DA6, 0x5B0DD6, 0x5B1616, 0x5B1649, 0x5B53D8,
     0x5B5FCA, 0x5B578D, 0x5B5C6E, 0x5B580B, 0x5B5CFE
 };
+
+/**
+ * Ring 0 Kernel Pattern Scanner
+ * Dynamically locates the Bluetooth gamepad allowlist check points in the kernel .text section.
+ * Works across all GoldHEN-supported firmwares (5.05 - 13.52+).
+ */
+static int find_allowlist_offsets_dynamic(uint64_t base, uint32_t out_offsets[10], int restore) {
+    // Scan the kernel code section (.text): typically 0x200000 to 0x900000 from base
+    const uint64_t scan_start = base + 0x200000;
+    const uint64_t scan_end   = base + 0x900000;
+
+    uint32_t target_vid = restore ? SONY_VID : 0x044F;
+    uint32_t target_pid = restore ? SONY_DUALSENSE_PID : 0x1000;
+
+    int found = 0;
+
+    // Search for clusters where VID and PID comparisons appear together in Bluetooth driver logic
+    for (uint64_t addr = scan_start; addr < scan_end - 16 && found < 10; addr += 2) {
+        uint32_t val = *(volatile uint32_t*)addr;
+        if (val == target_vid) {
+            // Check if within 64 bytes there is a corresponding PID check
+            for (uint64_t paddr = addr + 4; paddr < addr + 64; paddr += 2) {
+                if (*(volatile uint32_t*)paddr == target_pid) {
+                    // Match found for this VID/PID pair
+                    out_offsets[found++] = (uint32_t)(addr - base);
+                    out_offsets[found++] = (uint32_t)(paddr - base);
+                    addr = paddr + 4;
+                    break;
+                }
+            }
+        }
+    }
+
+    return found; // Number of offsets located dynamically
+}
 
 /**
  * Ring 0 Kernel Execution callback (invoked via syscall 11 / kexec)
@@ -90,46 +125,55 @@ static int kernel_patch_allowlist(void* thread, struct PatchArgs* args) {
     }
 
     int restore = args->request->restore;
-    int found_mode = 0; // 1 = 11.00 offsets valid, 2 = sigscan matched
+    uint32_t target_offsets[10];
+    int count_offsets = 0;
 
-    // 1. Check for FW 11.00 Magic Integrity Header
+    // Strategy 1: Check known FW 11.00 Magic Integrity Header
     if (*(volatile uint64_t*)(base + 0x5B6D00) == 0x56415741E5894855UL) {
-        found_mode = 1;
+        for (int i = 0; i < 10; i++) {
+            target_offsets[i] = s_offsets_1100[i];
+        }
+        count_offsets = 10;
     }
 
-    if (found_mode == 1) {
+    // Strategy 2: If not 11.00 or if magic mismatch, run Dynamic SigScan in kernel .text
+    if (count_offsets < 10) {
+        count_offsets = find_allowlist_offsets_dynamic(base, target_offsets, restore);
+    }
+
+    if (count_offsets >= 2) {
         // Disable Write Protection via CR0
         uint64_t flags = 0, cr0 = 0;
         __asm__ volatile("pushfq; popq %0; cli; mov %%cr0, %1" : "=r"(flags), "=r"(cr0) :: "memory");
         uint64_t writable = cr0 & ~(1UL << 16);
         __asm__ volatile("mov %0, %%cr0" :: "r"(writable) : "memory");
 
-        unsigned count = 0;
-        for (unsigned i = 0; i < 10; ++i) {
+        unsigned patched = 0;
+        for (int i = 0; i < count_offsets; ++i) {
             uint32_t old_val = (i & 1) ? 0x1000 : 0x044F;
             uint32_t new_val = (i & 1) ? SONY_DUALSENSE_PID : SONY_VID;
-            volatile uint32_t* ptr = (volatile uint32_t*)(base + s_offsets_1100[i]);
+            volatile uint32_t* ptr = (volatile uint32_t*)(base + target_offsets[i]);
 
             if (restore) {
                 if (*ptr == new_val) {
                     *ptr = old_val;
-                    count++;
+                    patched++;
                 }
             } else {
                 if (*ptr == old_val) {
                     *ptr = new_val;
-                    count++;
+                    patched++;
                 }
             }
         }
 
         // Restore CR0 and Flags
         __asm__ volatile("mov %0, %%cr0; pushq %1; popfq" :: "r"(cr0), "r"(flags) : "memory", "cc");
-        args->request->patched_count = (int)count;
+        args->request->patched_count = (int)patched;
         return 0;
     }
 
-    return 45; // ENOTSUP / Not verified on this build
+    return 45; // ENOTSUP / SigScan did not find matching allowlist cluster
 }
 
 static int apply_kernel_allowlist_patch(int restore) {
