@@ -69,6 +69,13 @@ public:
 	void DrawRectangle(int x, int y, int w, int h, Color color);
 	void CopyToActiveBuffer(const uint32_t* srcPixels);
 	
+	uint32_t* GetActiveFrameBuffer() const {
+		if (!this->frameBuffers) return 0;
+		return (uint32_t*)this->frameBuffers[this->activeFrameBufferIdx];
+	}
+	int GetWidth() const { return this->width; }
+	int GetHeight() const { return this->height; }
+	
 #ifdef GRAPHICS_USES_FONT
 	bool InitFont(FT_Face *face, const char *fontPath, int fontSize);
 	void DrawText(char *txt, FT_Face face, int startX, int startY, Color bgColor, Color fgColor);

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <vector>
 
 #include <orbis/Net.h>
 #include <orbis/NetCtl.h>
@@ -17,8 +18,8 @@ extern "C" {
     int ofHttpSetRecvTimeOut(int id, uint32_t microseconds) __asm__("sceHttpSetRecvTimeOut");
 }
 
-#define GITHUB_API_LATEST_RELEASE "https://api.github.com/repos/ChiricoG/OneFamily/releases/latest"
-#define HTTP_USER_AGENT "OneFamily-Companion/1.1.6 PS4"
+#define GITHUB_API_RELEASES "https://api.github.com/repos/ChiricoG/OneFamily/releases"
+#define HTTP_USER_AGENT "OneFamily-Companion/1.2.0 PS4"
 
 #define ONEFAMILY_NET_POOLSIZE    (32 * 1024)
 #define ONEFAMILY_HTTP_POOLSIZE   (128 * 1024)
@@ -77,7 +78,7 @@ PkgUpdater& PkgUpdater::instance() {
 PkgUpdater::PkgUpdater()
     : m_threadRunning(false),
       m_state(UPDATER_IDLE),
-      m_currentVersion("v1.1.6"),
+      m_currentVersion("v1.2.0"),
       m_expectedPkgSize(0),
       m_targetPkgPath("/data/pkg/onefamily_companion.pkg"),
       m_actionDownloadTriggered(false) {
@@ -103,7 +104,13 @@ void PkgUpdater::start_check() {
     m_statusMessage = "Checking for updates online...";
     m_actionDownloadTriggered = false;
     m_threadRunning = true;
-    pthread_create(&m_thread, NULL, thread_entry, this);
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 512 * 1024); // 512 KB stack
+    pthread_create(&m_thread, &attr, thread_entry, this);
+    pthread_attr_destroy(&attr);
+
     pthread_mutex_unlock(&m_mutex);
 }
 
@@ -169,21 +176,31 @@ bool PkgUpdater::check_network_ready() {
 }
 
 bool PkgUpdater::is_version_newer(const std::string& remoteTag, const std::string& localVer) {
-    // Compare semantic versions (e.g. "v1.1.6" vs "v1.1.5")
+    if (remoteTag == localVer) return false;
+
     const char* r = remoteTag.c_str();
     const char* l = localVer.c_str();
     if (*r == 'v' || *r == 'V') r++;
     if (*l == 'v' || *l == 'V') l++;
 
-    int rMajor = 0, rMinor = 0, rPatch = 0;
-    int lMajor = 0, lMinor = 0, lPatch = 0;
+    int rMajor = 0, rMinor = 0, rPatch = 0, rBeta = 0;
+    int lMajor = 0, lMinor = 0, lPatch = 0, lBeta = 0;
 
     sscanf(r, "%d.%d.%d", &rMajor, &rMinor, &rPatch);
     sscanf(l, "%d.%d.%d", &lMajor, &lMinor, &lPatch);
 
+    const char* rBetaStr = strstr(r, "beta");
+    if (rBetaStr) sscanf(rBetaStr, "beta%d", &rBeta);
+
+    const char* lBetaStr = strstr(l, "beta");
+    if (lBetaStr) sscanf(lBetaStr, "beta%d", &lBeta);
+
     if (rMajor != lMajor) return rMajor > lMajor;
     if (rMinor != lMinor) return rMinor > lMinor;
-    return rPatch > lPatch;
+    if (rPatch != lPatch) return rPatch > lPatch;
+    if (rBeta != lBeta) return rBeta > lBeta;
+
+    return false;
 }
 
 bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUrl, uint64_t& outPkgSize) {
@@ -198,13 +215,13 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
     sceHttpSetSendTimeOut(tpl, 10 * 1000 * 1000);
     ofHttpSetRecvTimeOut(tpl, 10 * 1000 * 1000);
 
-    int conn = sceHttpCreateConnectionWithURL(tpl, GITHUB_API_LATEST_RELEASE, 1);
+    int conn = sceHttpCreateConnectionWithURL(tpl, GITHUB_API_RELEASES, 1);
     if (conn < 0) {
         sceHttpDeleteTemplate(tpl);
         return false;
     }
 
-    int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, GITHUB_API_LATEST_RELEASE, 0);
+    int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, GITHUB_API_RELEASES, 0);
     if (req < 0) {
         sceHttpDeleteConnection(conn);
         sceHttpDeleteTemplate(tpl);
@@ -243,7 +260,7 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
     sceHttpDeleteConnection(conn);
     sceHttpDeleteTemplate(tpl);
 
-    // Fast targeted JSON parsing for tag_name and onefamily_companion.pkg asset
+    // 1. Extract tag_name of the newest release (first entry in array)
     size_t tagPos = jsonBody.find("\"tag_name\"");
     if (tagPos == std::string::npos) return false;
 
@@ -254,15 +271,15 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
 
     outTag = jsonBody.substr(tagStart + 1, tagEnd - tagStart - 1);
 
-    // Look for "onefamily_companion.pkg" in assets
-    size_t pkgPos = jsonBody.find("onefamily_companion.pkg");
+    // 2. Look for "onefamily_companion.pkg" in assets
+    size_t pkgPos = jsonBody.find("\"onefamily_companion.pkg\"");
+    if (pkgPos == std::string::npos) {
+        pkgPos = jsonBody.find("onefamily_companion.pkg");
+    }
     if (pkgPos == std::string::npos) return false;
 
-    // Search for browser_download_url near pkgPos
-    size_t urlKey = jsonBody.rfind("\"browser_download_url\"", pkgPos);
-    if (urlKey == std::string::npos) {
-        urlKey = jsonBody.find("\"browser_download_url\"", pkgPos);
-    }
+    // Search for browser_download_url AFTER pkgPos to ensure we match onefamily_companion.pkg
+    size_t urlKey = jsonBody.find("\"browser_download_url\"", pkgPos);
     if (urlKey == std::string::npos) return false;
 
     size_t urlStart = jsonBody.find('"', urlKey + 22);
@@ -272,10 +289,10 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
 
     outPkgUrl = jsonBody.substr(urlStart + 1, urlEnd - urlStart - 1);
 
-    // Search for size in bytes
-    outPkgSize = 8500000; // sensible fallback ~8.5MB
+    // 3. Search for size in bytes near pkgPos
+    outPkgSize = 8585216; // fallback ~8.5MB
     size_t sizeKey = jsonBody.find("\"size\"", pkgPos);
-    if (sizeKey != std::string::npos && sizeKey < pkgPos + 300) {
+    if (sizeKey != std::string::npos && sizeKey < pkgPos + 500) {
         size_t numStart = jsonBody.find_first_of("0123456789", sizeKey + 6);
         if (numStart != std::string::npos) {
             outPkgSize = strtoull(&jsonBody[numStart], NULL, 10);
@@ -285,7 +302,7 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
     return (!outTag.empty() && !outPkgUrl.empty());
 }
 
-bool PkgUpdater::download_file(const std::string& url, const std::string& destination, uint64_t expectedSize) {
+bool PkgUpdater::download_file(const std::string& initialUrl, const std::string& destination, uint64_t expectedSize) {
     if (!ensure_http_stack()) return false;
 
     // Ensure /data and /data/pkg directories exist
@@ -293,117 +310,167 @@ bool PkgUpdater::download_file(const std::string& url, const std::string& destin
     mkdir("/data/pkg", 0777);
 
     std::string tempDest = destination + ".download";
+    std::string currentUrl = initialUrl;
 
-    int tpl = sceHttpCreateTemplate(s_httpCtxId, HTTP_USER_AGENT, ORBIS_HTTP_VERSION_1_1, 1);
-    if (tpl < 0) return false;
+    const int MAX_REDIRECTS = 5;
+    int redirects = 0;
 
-    sceHttpsSetSslCallback(tpl, skipSslCallback, NULL);
-    ofHttpSetAutoRedirect(tpl, 1);
-    sceHttpSetConnectTimeOut(tpl, 15 * 1000 * 1000); // 15s
-    sceHttpSetSendTimeOut(tpl, 15 * 1000 * 1000);
-    ofHttpSetRecvTimeOut(tpl, 30 * 1000 * 1000);
+    std::vector<uint8_t> buffer(64 * 1024);
 
-    int conn = sceHttpCreateConnectionWithURL(tpl, url.c_str(), 1);
-    if (conn < 0) {
-        sceHttpDeleteTemplate(tpl);
-        return false;
-    }
+    while (redirects < MAX_REDIRECTS) {
+        int tpl = sceHttpCreateTemplate(s_httpCtxId, HTTP_USER_AGENT, ORBIS_HTTP_VERSION_1_1, 1);
+        if (tpl < 0) return false;
 
-    int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, url.c_str(), 0);
-    if (req < 0) {
-        sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tpl);
-        return false;
-    }
+        sceHttpsSetSslCallback(tpl, skipSslCallback, NULL);
+        ofHttpSetAutoRedirect(tpl, 0); // Disable auto-redirect to handle cross-domain hops safely
+        sceHttpSetConnectTimeOut(tpl, 15 * 1000 * 1000); // 15s
+        sceHttpSetSendTimeOut(tpl, 15 * 1000 * 1000);
+        ofHttpSetRecvTimeOut(tpl, 30 * 1000 * 1000);
 
-    int ret = sceHttpSendRequest(req, NULL, 0);
-    if (ret < 0) {
-        sceHttpDeleteRequest(req);
-        sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tpl);
-        return false;
-    }
-
-    int statusCode = 0;
-    sceHttpGetStatusCode(req, &statusCode);
-    if (statusCode != 200) {
-        sceHttpDeleteRequest(req);
-        sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tpl);
-        return false;
-    }
-
-    int contentLengthType = 0;
-    uint64_t contentLength = 0;
-    sceHttpGetResponseContentLength(req, &contentLengthType, &contentLength);
-    if (contentLengthType == ORBIS_HTTP_CONTENTLEN_EXIST && contentLength > 0) {
-        expectedSize = contentLength;
-    }
-
-    FILE* fp = fopen(tempDest.c_str(), "wb");
-    if (!fp) {
-        sceHttpDeleteRequest(req);
-        sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tpl);
-        return false;
-    }
-
-    uint8_t buffer[64 * 1024];
-    uint64_t totalReceived = 0;
-
-    pthread_mutex_lock(&m_mutex);
-    m_progress.bytesReceived = 0;
-    m_progress.totalBytes = expectedSize;
-    m_progress.percent = 0;
-    pthread_mutex_unlock(&m_mutex);
-
-    bool downloadOk = true;
-    while (true) {
-        int bytesRead = sceHttpReadData(req, buffer, sizeof(buffer));
-        if (bytesRead < 0) {
-            downloadOk = false;
-            break;
-        }
-        if (bytesRead == 0) {
-            // EOF reached
-            break;
+        int conn = sceHttpCreateConnectionWithURL(tpl, currentUrl.c_str(), 1);
+        if (conn < 0) {
+            sceHttpDeleteTemplate(tpl);
+            return false;
         }
 
-        size_t written = fwrite(buffer, 1, bytesRead, fp);
-        if (written != (size_t)bytesRead) {
-            downloadOk = false;
-            break;
+        int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, currentUrl.c_str(), 0);
+        if (req < 0) {
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tpl);
+            return false;
         }
 
-        totalReceived += bytesRead;
+        int ret = sceHttpSendRequest(req, NULL, 0);
+        if (ret < 0) {
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tpl);
+            return false;
+        }
+
+        int statusCode = 0;
+        sceHttpGetStatusCode(req, &statusCode);
+
+        // Handle HTTP Redirects (301, 302, 303, 307, 308)
+        if (statusCode == 301 || statusCode == 302 || statusCode == 303 || statusCode == 307 || statusCode == 308) {
+            char* headers = nullptr;
+            size_t headerLen = 0;
+            std::string nextUrl;
+
+            if (sceHttpGetAllResponseHeaders(req, &headers, &headerLen) == 0 && headers && headerLen > 0) {
+                std::string headerStr(headers, headerLen);
+                size_t locPos = headerStr.find("Location:");
+                if (locPos == std::string::npos) {
+                    locPos = headerStr.find("location:");
+                }
+                if (locPos != std::string::npos) {
+                    size_t valStart = locPos + 9;
+                    while (valStart < headerStr.size() && (headerStr[valStart] == ' ' || headerStr[valStart] == '\t')) {
+                        valStart++;
+                    }
+                    size_t valEnd = headerStr.find_first_of("\r\n", valStart);
+                    if (valEnd != std::string::npos) {
+                        nextUrl = headerStr.substr(valStart, valEnd - valStart);
+                    } else {
+                        nextUrl = headerStr.substr(valStart);
+                    }
+                }
+            }
+
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tpl);
+
+            if (nextUrl.empty()) {
+                return false;
+            }
+
+            currentUrl = nextUrl;
+            redirects++;
+            continue; // Re-issue GET to the redirect location with clean connection
+        }
+
+        if (statusCode != 200) {
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tpl);
+            return false;
+        }
+
+        // Status is 200 OK! Proceed with download stream
+        int contentLengthType = 0;
+        uint64_t contentLength = 0;
+        sceHttpGetResponseContentLength(req, &contentLengthType, &contentLength);
+        if (contentLengthType == ORBIS_HTTP_CONTENTLEN_EXIST && contentLength > 0) {
+            expectedSize = contentLength;
+        }
+
+        FILE* fp = fopen(tempDest.c_str(), "wb");
+        if (!fp) {
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tpl);
+            return false;
+        }
+
+        uint64_t totalReceived = 0;
 
         pthread_mutex_lock(&m_mutex);
-        m_progress.bytesReceived = totalReceived;
-        if (expectedSize > 0) {
-            m_progress.percent = (int)((totalReceived * 100) / expectedSize);
-            if (m_progress.percent > 100) m_progress.percent = 100;
-        }
+        m_progress.bytesReceived = 0;
+        m_progress.totalBytes = expectedSize;
+        m_progress.percent = 0;
         pthread_mutex_unlock(&m_mutex);
+
+        bool downloadOk = true;
+        while (true) {
+            int bytesRead = sceHttpReadData(req, buffer.data(), (uint32_t)buffer.size());
+            if (bytesRead < 0) {
+                downloadOk = false;
+                break;
+            }
+            if (bytesRead == 0) {
+                // EOF reached
+                break;
+            }
+
+            size_t written = fwrite(buffer.data(), 1, bytesRead, fp);
+            if (written != (size_t)bytesRead) {
+                downloadOk = false;
+                break;
+            }
+
+            totalReceived += bytesRead;
+
+            pthread_mutex_lock(&m_mutex);
+            m_progress.bytesReceived = totalReceived;
+            if (expectedSize > 0) {
+                m_progress.percent = (int)((totalReceived * 100) / expectedSize);
+                if (m_progress.percent > 100) m_progress.percent = 100;
+            }
+            pthread_mutex_unlock(&m_mutex);
+        }
+
+        fclose(fp);
+
+        sceHttpDeleteRequest(req);
+        sceHttpDeleteConnection(conn);
+        sceHttpDeleteTemplate(tpl);
+
+        if (!downloadOk || totalReceived < 1024 * 1024) { // Minimum check (> 1MB for PKG)
+            unlink(tempDest.c_str());
+            return false;
+        }
+
+        // Atomic rename
+        unlink(destination.c_str());
+        if (rename(tempDest.c_str(), destination.c_str()) != 0) {
+            return false;
+        }
+
+        return true;
     }
 
-    fclose(fp);
-
-    sceHttpDeleteRequest(req);
-    sceHttpDeleteConnection(conn);
-    sceHttpDeleteTemplate(tpl);
-
-    if (!downloadOk || totalReceived < 1024 * 1024) { // Minimum check (> 1MB for PKG)
-        unlink(tempDest.c_str());
-        return false;
-    }
-
-    // Atomic rename
-    unlink(destination.c_str());
-    if (rename(tempDest.c_str(), destination.c_str()) != 0) {
-        return false;
-    }
-
-    return true;
+    return false;
 }
 
 void PkgUpdater::run() {

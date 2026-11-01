@@ -81,6 +81,11 @@ bool HidProfile::read_status(HidStatus& out) {
                 } else if (k == "nbuttons") {
                     out.nbuttons = atoi(v.c_str());
                     if (out.nbuttons <= 0) out.nbuttons = 16;
+                } else if (k == "player_slot") {
+                    out.player_slot = atoi(v.c_str());
+                    if (out.player_slot <= 0) out.player_slot = 1;
+                } else if (k == "user_name") {
+                    out.user_name = v;
                 }
             }
         }
@@ -92,6 +97,7 @@ bool HidProfile::read_status(HidStatus& out) {
 
 void HidProfile::reset_defaults(int nbuttons) {
     max_buttons = (nbuttons >= 14 && nbuttons <= 32) ? nbuttons : 16;
+    custom_rumble = "auto";
     for (int i = 0; i < ACT_COUNT; i++) {
         assignments[i] = 0;
     }
@@ -176,6 +182,9 @@ bool HidProfile::load(uint16_t vid, uint16_t pid, int nbuttons) {
                             assignments[a] = (int)btn;
                         }
                     }
+                } else if (strcasecmp(k.c_str(), "rumble") == 0 ||
+                           strcasecmp(k.c_str(), "rumble_report") == 0) {
+                    custom_rumble = v;
                 }
             }
         }
@@ -233,6 +242,16 @@ bool HidProfile::save(uint16_t vid, uint16_t pid, const std::string& name) {
         "invert_ly = 0\n"
         "invert_ry = 0\n"
     );
+
+    if (len < (int)sizeof(out) - 160) {
+        const char* rumble_val = custom_rumble.empty() ? "auto" : custom_rumble.c_str();
+        len += snprintf(out + len, sizeof(out) - len,
+            "\n[Rumble]\n"
+            "# Presets: auto, logitech, dragonrise, greenasia, betop, shanwan, 8bitdo, dinput05, none (or hex e.g. 05 L R 00 00)\n"
+            "rumble = %s\n",
+            rumble_val
+        );
+    }
 
     if (len > 0) {
         sceKernelWrite(fd, out, (size_t)len);

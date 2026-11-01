@@ -13,6 +13,20 @@
 // DualShock 3 / Sixaxis
 #define SONY_DS3_PID                    0x0268
 
+// DualShock 4 PIDs (Handled natively by PS4 Orbis OS, daemon ignores these)
+#define SONY_DS4_V1_PID                 0x05C4
+#define SONY_DS4_V2_PID                 0x09CC
+#define SONY_DS4_DONGLE_PID             0x0BA0
+
+static inline int is_native_ps4_controller(uint16_t vid, uint16_t pid) {
+    if (vid == SONY_VID) {
+        if (pid == SONY_DS4_V1_PID || pid == SONY_DS4_V2_PID || pid == 0x05C5 || pid == SONY_DS4_DONGLE_PID) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // DualSense (PS5) & DualSense Edge
 #define SONY_DUALSENSE_PID              0x0CE6
 #define SONY_DUALSENSE_EDGE_PID         0x0DF2
@@ -58,6 +72,7 @@ typedef struct __attribute__((packed)) {
 
 /*
  * DualSense USB Input Report (64 bytes, Report ID 0x01)
+ * Matches struct dualsense_input_report in Linux drivers/hid/hid-playstation.c
  */
 typedef struct __attribute__((packed)) {
     uint8_t  report_id;         // 0: Always 0x01
@@ -73,19 +88,20 @@ typedef struct __attribute__((packed)) {
                                 // 10: PS(0x01), Touchpad_click(0x02), Mic_mute(0x04)
                                 // 11: Reserved
     uint8_t  reserved[4];       // 12-15
-    uint8_t  gyro_accel[18];    // 16-33
-    uint32_t sensor_timestamp;  // 34-37
-    uint8_t  reserved2;         // 38
-    // Touchpad data: 2 touch points
+    uint16_t gyro[3];           // 16-21: Gyroscope X, Y, Z (LE16)
+    uint16_t accel[3];          // 22-27: Accelerometer X, Y, Z (LE16)
+    uint32_t sensor_timestamp;  // 28-31: Sensor timestamp (LE32)
+    uint8_t  reserved2;         // 32
+    // Touchpad data: 2 touch points (offsets 33-40)
     struct {
         uint8_t  contact;       // bit 7 == 0: active touch, bit 7 == 1: released
         uint8_t  x_lo;
         uint8_t  x_hi_y_lo;     // low nibble = x_hi, high nibble = y_lo
         uint8_t  y_hi;
-    } touch_points[2];          // 39-46
-    uint8_t  reserved3[12];     // 47-58
-    uint8_t  status;            // 59
-    uint8_t  reserved4[4];      // 60-63
+    } touch_points[2];          // 33-40
+    uint8_t  reserved3[12];     // 41-52
+    uint8_t  status[3];         // 53-55
+    uint8_t  reserved4[8];      // 56-63
 } DualSenseReport;
 
 #endif // PS_CONTROLLERS_H

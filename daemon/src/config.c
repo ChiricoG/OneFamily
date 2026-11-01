@@ -130,10 +130,10 @@ void daemon_config_load(DaemonConfig *cfg) {
             char *key = trim_whitespace(trimmed);
             char *val = trim_whitespace(eq + 1);
 
-            if (str_case_eq(key, "mode")) {
-                if (str_case_eq(val, "merge")) {
+            if (str_case_eq(key, "mode") || str_case_eq(key, "player_slot") || str_case_eq(key, "slot")) {
+                if (str_case_eq(val, "merge") || str_case_eq(val, "1") || str_case_eq(val, "p1") || str_case_eq(val, "player1")) {
                     cfg->mode = CONFIG_MODE_MERGE;
-                } else if (str_case_eq(val, "secondary")) {
+                } else if (str_case_eq(val, "secondary") || str_case_eq(val, "2") || str_case_eq(val, "p2") || str_case_eq(val, "player2")) {
                     cfg->mode = CONFIG_MODE_SECONDARY;
                 } else {
                     cfg->mode = CONFIG_MODE_AUTO;

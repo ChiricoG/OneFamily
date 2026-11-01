@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 long daemon_syscall(long num, ...);
+long daemon_sys_call6(long number, long a, long b, long c, long d, long e, long f);
 
 int daemon_sys_open(const char *path, int flags, int mode);
 int daemon_sys_read(int fd, void *buf, size_t count);
@@ -24,6 +25,7 @@ int daemon_sys_dlsym(int handle, const char *symbol, void **out_addr);
 
 // Resolves libkernel functions dynamically (safe from dynamic link issues)
 void daemon_kernel_init(void);
+int daemon_kernel_get_handle(void);
 int daemon_kernel_notify(const char *message);
 int daemon_kernel_thread_create(void *out_thread, void *(*func)(void*), void *arg, const char *name);
 

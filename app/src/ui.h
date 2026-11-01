@@ -5,6 +5,7 @@
 #include "installer.h"
 #include "hid_profile.h"
 #include "pkg_updater.h"
+#include "ps_background.h"
 #include <orbis/Pad.h>
 #include <string>
 
@@ -61,6 +62,7 @@ private:
     uint32_t* cached_bg;
     int bg_width;
     int bg_height;
+    PSBackground psBg;
 
     ImageRGBA xboxLogo;
     ImageRGBA iconGear;

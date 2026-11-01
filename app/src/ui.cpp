@@ -142,6 +142,8 @@ bool UI::init(Scene2D* scene) {
         stbi_image_free(data);
     }
 
+    psBg.init();
+
     // 2. Load separate clean vector-crisp icons
     xboxLogo      = load_icon("/app0/assets/icons/xbox_logo.png");
     iconGear      = load_icon("/app0/assets/icons/icon_gear.png");
@@ -324,16 +326,24 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
                 const PkgUpdater* updater) {
     if (!scene) return;
 
-    // 1. Blit clean native background (pure wallpaper)
-    if (cached_bg) {
-        scene->CopyToActiveBuffer(cached_bg);
-    }
+    // 1. Blit native background + Animated PlayStation XMB Wave & Bokeh Sparkles
+    psBg.update(0.01666f);
+    psBg.render(scene, cached_bg);
 
     // 2. Header
     draw_image(scene, xboxLogo, 60, 120);
     draw_text(scene, "OneFamily", fontTitle, 175, 145, COLOR_WHITE);
     draw_text(scene, "Companion", fontTitle, 175, 188, COLOR_BLUE_BRIGHT);
     draw_text(scene, "No more console war - we are a family!", fontSubtitle, 175, 222, COLOR_TEXT_DIM);
+
+    // Header Persistent Update Badge (visible across all tabs if an update is available)
+    if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
+        int bX = 1260, bY = 138, bW = 290, bH = 46;
+        draw_rounded_rect(scene, bX, bY, bW, bH, 8, Color{ 10, 42, 28 });
+        draw_rounded_outline(scene, bX, bY, bW, bH, 8, Color{ 0, 255, 150 }, 2);
+        std::string badgeStr = "UPDATE: " + updater->get_latest_version();
+        draw_text(scene, badgeStr, fontCardTitle, bX + 22, bY + 31, Color{ 0, 255, 150 });
+    }
 
     // 3. Left Sidebar (3 or 4 Tabs based on HID controller connection)
     // Tab 0: Settings (Y = 280)
@@ -390,6 +400,9 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
             draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 520, COLOR_TEXT_DIM);
         }
         draw_image(scene, btnR1, SIDEBAR_X + 250, 496);
+        if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
+            draw_circle(scene, SIDEBAR_X + 132, 511, 5, Color{ 0, 255, 150 });
+        }
     } else {
         // Tab 2: Info (Y = 416)
         if (activeTab == 2) {
@@ -404,6 +417,9 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
             draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_TEXT_DIM);
         }
         draw_image(scene, btnR1, SIDEBAR_X + 250, 428);
+        if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
+            draw_circle(scene, SIDEBAR_X + 132, 443, 5, Color{ 0, 255, 150 });
+        }
     }
 
     // 4. Main Content Area
@@ -533,7 +549,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_rounded_outline(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BORDER, 1);
         draw_image(scene, iconInfo, CARD_X + 24, 298);
         draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 312, COLOR_WHITE);
-        draw_text(scene, "Version: v1.1.6 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Version: v1.2.0 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
         draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 372, COLOR_TEXT_DIM);
         draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 400, COLOR_TEXT_DIM);
 
@@ -565,8 +581,10 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         } else if (upState == UPDATER_DOWNLOADING) {
             UpdaterProgress prog = updater->get_progress();
             char dlTitle[128];
-            snprintf(dlTitle, sizeof(dlTitle), "Downloading Update: %d%% (%ld MB / %ld MB)",
-                     prog.percent, prog.bytesReceived / (1024 * 1024), prog.totalBytes / (1024 * 1024));
+            snprintf(dlTitle, sizeof(dlTitle), "Downloading Update: %d%% (%llu MB / %llu MB)",
+                     prog.percent,
+                     (unsigned long long)(prog.bytesReceived / (1024 * 1024)),
+                     (unsigned long long)(prog.totalBytes / (1024 * 1024)));
             draw_text(scene, dlTitle, fontCardTitle, CARD_X + 90, 468, COLOR_BLUE_BRIGHT);
 
             // Progress bar
@@ -586,7 +604,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
             draw_text(scene, "Open PS4 Settings -> GoldHEN -> Package Installer and press (X) to install!", fontCardDesc, CARD_X + 90, 526, Color{ 0, 255, 150 });
         } else if (upState == UPDATER_UP_TO_DATE) {
             draw_text(scene, "OneFamily Companion is Up to Date", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
-            draw_text(scene, "You are running the latest official version (v1.1.6). Checked online.", fontCardDesc, CARD_X + 90, 498, COLOR_BLUE_BRIGHT);
+            draw_text(scene, "You are running the latest official version (v1.2.0). Checked online.", fontCardDesc, CARD_X + 90, 498, COLOR_BLUE_BRIGHT);
             draw_text(scene, "GitHub Releases: https://github.com/ChiricoG/OneFamily/releases", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
         } else if (upState == UPDATER_CHECKING) {
             draw_text(scene, "Checking for Updates...", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
@@ -654,12 +672,9 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
 void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
     if (!scene) return;
 
-    // Draw cached background or fallback
-    if (cached_bg) {
-        scene->CopyToActiveBuffer(cached_bg);
-    } else {
-        scene->DrawRectangle(0, 0, 1920, 1080, Color{ 8, 14, 24 });
-    }
+    // Draw background with animated PlayStation XMB waves
+    psBg.update(0.01666f);
+    psBg.render(scene, cached_bg);
 
     // Top Header
     draw_image(scene, xboxLogo, 60, 60);
@@ -1089,8 +1104,13 @@ void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile&
     draw_text(scene, devTitle, fontCardTitle, CARD_X + 75, 168, COLOR_WHITE);
 
     char devSub[256];
-    snprintf(devSub, sizeof(devSub), "Hardware: VID 0x%04X | PID 0x%04X   •   Buttons: %d   •   Profile: %04X_%04X.ini",
-             status.vid, status.pid, status.nbuttons, status.vid, status.pid);
+    if (status.player_slot > 0 && !status.user_name.empty()) {
+        snprintf(devSub, sizeof(devSub), "Player %d (%s)   •   Hardware: VID 0x%04X | PID 0x%04X   •   Profile: %04X_%04X.ini",
+                 status.player_slot, status.user_name.c_str(), status.vid, status.pid, status.vid, status.pid);
+    } else {
+        snprintf(devSub, sizeof(devSub), "Hardware: VID 0x%04X | PID 0x%04X   •   Buttons: %d   •   Profile: %04X_%04X.ini",
+                 status.vid, status.pid, status.nbuttons, status.vid, status.pid);
+    }
     draw_text(scene, devSub, fontCardDesc, CARD_X + 75, 198, COLOR_TEXT_DIM);
 
     // Card 2: Test Mode R3 Badge Card (X = 1500, Y = 135, W = 360, H = 88)

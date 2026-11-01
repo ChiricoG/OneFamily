@@ -4,13 +4,13 @@
 
 <h1 align="center">OneFamily</h1>
 <p align="center">
-  <b>Universal USB Controller Daemon & Companion App for PlayStation 4</b><br>
+  <b>Universal USB & Bluetooth (DualSense) Controller Daemon & Companion App for PlayStation 4</b><br>
   <i>"No more console war - we are a family!"</i>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/PS4-GoldHEN%20Compatible-0070D1?style=for-the-badge&logo=playstation" alt="GoldHEN Compatible"/>
-  <img src="https://img.shields.io/badge/Version-v1.1.6-blueviolet?style=for-the-badge" alt="Version v1.1.6"/>
+  <img src="https://img.shields.io/badge/Version-v1.2.0-blueviolet?style=for-the-badge" alt="Version v1.2.0"/>
   <img src="https://img.shields.io/badge/Polling-250%20Hz%20(4ms)-brightgreen?style=for-the-badge" alt="250 Hz Polling"/>
   <img src="https://img.shields.io/badge/Platform-PlayStation%204-blue?style=for-the-badge" alt="Platform PS4"/>
   <img src="https://img.shields.io/badge/License-MIT-orange?style=for-the-badge" alt="License MIT"/>
@@ -18,11 +18,25 @@
 
 ---
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Screenshots](#screenshots)
+- [Key Features](#key-features)
+- [Supported Controllers](#supported-controllers)
+- [Quick Start / Installation](#quick-start--installation)
+- [Bug Reports & Requesting New Controllers](#bug-reports--requesting-new-controllers)
+- [Building from Source](#building-from-source)
+- [Credits & Acknowledgements](#credits--acknowledgements)
+- [License](#license)
+
+---
+
 ## Overview
 
 **OneFamily** is a high-performance background daemon and 1080p companion homebrew application for jailbroken PlayStation 4 consoles running **GoldHEN**.
 
-It allows you to connect virtually any USB controller — including **all XInput-compatible PC gamepads**, **Generic USB HID & DirectInput controllers** (Logitech F310/F710, 8BitDo in D-Input mode, etc.), **Google Stadia**, official and third-party **Xbox controllers** (Xbox 360, Xbox One, Xbox Series X|S), **Nintendo Switch** controllers, and Sony **DualShock 3** — and play across the entire PS4 operating system and all games with **zero input lag**, full analog precision, and hardware rumble feedback.
+It allows you to connect virtually any gamepad — including **Sony DualSense & DualSense Edge (PS5 via native Bluetooth)**, **all XInput-compatible PC gamepads**, **Generic USB HID & DirectInput controllers** (Logitech F310/F710, 8BitDo in D-Input mode, etc.), **Google Stadia**, official and third-party **Xbox controllers** (Xbox 360, Xbox One, Xbox Series X|S via USB), **Nintendo Switch** controllers, and Sony **DualShock 3** — and play across the entire PS4 operating system and all games with **zero input lag**, full analog precision, and hardware rumble feedback.
 
 Unlike traditional game-specific hooks that only intercept inputs inside running titles, OneFamily operates as an independent, system-level background daemon. It registers connected gamepads directly into the PlayStation 4 pad subsystem (`libScePad`) as genuine Type 1 DualShock 4 devices. This provides complete OS integration: you can log into any user account, switch profiles on the fly, access the system Quick Menu, navigate the XMB dashboard, and play local multiplayer titles just like an official Sony controller.
 
@@ -55,6 +69,8 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 ## Key Features
 
 - **Native System-Wide DualShock 4 Emulation:** Registers controllers directly into `libScePad` as official Type 1 DualShock 4 devices. Unlike user-space game hooks, it functions seamlessly across the entire console environment—including the XMB dashboard, system settings, media applications, PlayStation Store, and all retail or homebrew titles.
+- **Native PS5 DualSense & DualSense Edge Wireless Support (Bluetooth):** Seamless Bluetooth connection for Sony DualSense and DualSense Edge controllers via dynamic kernel pattern scanning (SigScan) compatible across all GoldHEN firmware versions (5.05 up to 13.52+). Full 250 Hz reporting, touchpad navigation, and motion sensors without disabling or affecting original DualShock 4 controllers.
+- **Smart DualSense USB Bypass & Charging:** Connecting a DualSense via USB leaves the port active as a safe 5V power supply to charge the controller while displaying an on-screen toast guiding the user to pair wirelessly via Bluetooth, preventing audio/endpoint hardware stalls.
 - **Multi-User Profile Login & Profile Switching:** Fully integrated with the PS4 User Service (`libSceUserService`). When you plug in a controller or press the Guide/PS button, you can assign it to any profile on the console (Player 1, Player 2, or Guest), enabling native local co-op and split-screen multiplayer across different accounts.
 - **Complete Quick Menu & Shell Navigation:** The Guide/PS button provides native PlayStation Home functionality. Tap to return to the XMB dashboard, or hold to open the PlayStation Quick Menu (to adjust audio, manage power options, or suspend applications).
 - **Universal XInput & Third-Party Xbox Support:** Comprehensive hardware descriptor detection supporting official Microsoft controllers as well as licensed and third-party gamepads (PowerA, PDP, 8BitDo, Razer, Hori, Nacon, Thrustmaster, GameSir, Logitech, and generic PC XInput devices).
@@ -95,10 +111,14 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 | **Google Stadia Controller** | Official Stadia Controller (USB-C cable) | USB | Yes | Yes |
 | **Nintendo Switch Pro Controller** | Official Pro Controller & third-party Switch pads | USB | — | Yes |
 | **Sony PlayStation 3 DualShock 3** | Official DualShock 3 (automatic handshake) | USB | Yes | Yes |
-| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | USB | *In development* | *In development* |
+| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | **Bluetooth (Wireless)** | Yes | Yes |
 
-> [!NOTE]
-> **Sony PlayStation 5 DualSense Support:** Support for Sony DualSense and DualSense Edge controllers is currently in active development and will be available in an upcoming release.
+> [!TIP]
+> **How to Pair Sony PlayStation 5 DualSense / Edge via Bluetooth:**
+> 1. With the controller powered off, press and hold the **Create (Share)** and **PS** buttons simultaneously until the lightbar rapidly blinks blue (pairing mode).
+> 2. On your PS4, navigate to **Settings > Devices > Bluetooth Devices**.
+> 3. Select **Wireless Controller** and confirm the pairing prompt. OneFamily will automatically hook into the Bluetooth subsystem and register the DualSense as an active system controller!
+> *(Note: The USB port is reserved for charging the DualSense battery — OneFamily will guide you to connect via Bluetooth if plugged into USB).*
 
 ---
 
@@ -115,10 +135,31 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 3. **Reboot & Enjoy:**
    - Restart your console and enable GoldHEN.
    - A notification **"OneFamily Daemon Active"** will appear on the top-left of the screen.
-   - Plug in your USB controller — it works instantly!
+   - Plug in your USB controller or connect your DualSense via Bluetooth — it works instantly!
 
 4. **Customize & Calibrate:**
    - Launch **OneFamily Companion** anytime to calibrate stick drift, test vibration, remap HID buttons, or adjust settings. Changes apply in real time!
+
+---
+
+## Bug Reports & Requesting New Controllers
+
+Encountered a bug, crash, or have a controller that isn't recognized yet? We're actively expanding OneFamily and welcome community feedback!
+
+Please open an issue on our [GitHub Issues Tracker](https://github.com/ChiricoG/OneFamily/issues).
+
+### Requesting Support for a New Controller
+
+To help us add support for your gamepad quickly, please include:
+1. **Controller Brand & Exact Model** (e.g., *Razer Wolverine V2*, *8BitDo Ultimate 2.4G*, *Flydigi Vader 3 Pro*).
+2. **Connection Type** (USB or 2.4 GHz wireless USB dongle).
+3. **OPTIONAL: Hardware Identifiers (VID & PID)**:
+   - Check `/data/onefamily/onefamily.log` on your PS4, or connect the controller to a PC (Device Manager > Hardware IDs).
+4. **Behavior on PS4**: What happens when plugged in (e.g., does the notification appear, is it detected as Generic HID, or completely ignored?).
+
+### Reporting Bugs
+
+Please **follow the Bug Report template**
 
 ---
 
@@ -143,6 +184,12 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 The compiled binaries will be output to:
 - `bin/onefamily.bin` (Daemon payload)
 - `bin/onefamily_companion.pkg` (PS4 Companion Package)
+
+---
+
+## Credits & Acknowledgements
+
+- **[Diram1x](https://github.com/Diramix)**: **Special thanks** for the pioneering research on PS4 Bluetooth allowlist patching and DualSense wireless HID communication, which inspired and served as the technical foundation for OneFamily's native Bluetooth DualSense integration.
 
 ---
 

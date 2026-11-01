@@ -5,6 +5,7 @@
 
 #include "vpad.h"
 #include "usb_driver.h"
+#include "bt_driver.h"
 #include "config.h"
 #include "log.h"
 #include "daemon_syscalls.h"
@@ -52,7 +53,7 @@ int main(int argc, char *argv[]) {
 
     // 1. Initialize Safe Kernel resolution and Logging
     daemon_log_init();
-    daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon v1.1.6 (Native) Starting ===");
+    daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon v1.2.0 (Native) Starting ===");
     daemon_kernel_init();
 
     // Ensure persistent storage and controller profile directories exist
@@ -69,14 +70,19 @@ int main(int argc, char *argv[]) {
                g_daemon_config.enable_rumble);
 
     // 3. Notify user on screen immediately
-    daemon_notify("OneFamily Daemon v1.1.6 Active");
+    daemon_notify("OneFamily Daemon v1.2.0 Active");
 
     // 4. Initialize USB Driver Subsystem
     if (usb_driver_init() != 0) {
         daemon_log(LOG_LEVEL_ERROR, "Failed to initialize USB Driver");
     }
 
-    daemon_log(LOG_LEVEL_INFO, "=== Daemon Ready - Entering USB Polling Loop (250 Hz) ===");
+    // 5. Initialize DualSense Bluetooth Subsystem
+    if (bt_driver_init() != 0) {
+        daemon_log(LOG_LEVEL_INFO, "DualSense Bluetooth Subsystem skipped or not supported on this firmware");
+    }
+
+    daemon_log(LOG_LEVEL_INFO, "=== Daemon Ready - Entering USB & BT Polling Loop (250 Hz) ===");
 
     uint32_t loop_count = 0;
 
@@ -84,6 +90,9 @@ int main(int argc, char *argv[]) {
     while (g_running) {
         // Poll USB controller and feed Virtual DualShock 4
         usb_driver_poll_step();
+
+        // Poll Bluetooth DualSense controller and feed Virtual DualShock 4
+        bt_driver_poll_step();
 
         // Poll virtual DS4 rumble from OS/games
         vpad_poll_rumble();
@@ -109,12 +118,14 @@ int main(int argc, char *argv[]) {
         // Periodically check if configuration INI file was updated (every ~1s = 250 loops)
         if (loop_count % 250 == 0) {
             daemon_config_check_reload(&g_daemon_config);
+            vpad_check_user_rebind(g_daemon_config.mode);
         }
 
         daemon_sys_usleep(4000); // 4 ms sleep = 250 Hz
     }
 
     daemon_log(LOG_LEVEL_INFO, "Shutting down OneFamily Daemon...");
+    bt_driver_shutdown();
     usb_driver_shutdown();
     vpad_shutdown();
     daemon_log_close();

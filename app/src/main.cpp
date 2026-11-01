@@ -129,6 +129,7 @@ int main() {
     // Start background check for online PKG updates
     PkgUpdater& updater = PkgUpdater::instance();
     updater.start_check();
+    UpdaterState lastUpdaterState = UPDATER_IDLE;
 
     // Main Interaction Loop
     for (;;) {
@@ -393,6 +394,14 @@ int main() {
                 activeTab = 0;
             }
         }
+
+        // Auto-notify user as soon as an online update is detected
+        UpdaterState curUpState = updater.get_state();
+        if (lastUpdaterState != UPDATER_UPDATE_AVAILABLE && curUpState == UPDATER_UPDATE_AVAILABLE) {
+            toastText = "Update available: " + updater.get_latest_version() + "! Press L1/R1 to visit Info";
+            toastFrames = 240; // ~4s notification toast
+        }
+        lastUpdaterState = curUpState;
 
         if (toastFrames > 0) {
             toastFrames--;
