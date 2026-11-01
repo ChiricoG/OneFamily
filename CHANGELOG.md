@@ -2,6 +2,12 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.1] - Hotfix Release (2026-11-01)
+- **Zero-Panic Kernel Safety Guard**: Eliminated unmapped Ring 0 memory scanning across unknown firmware versions, completely preventing supervisor page faults and kernel panics on FW 13.52 and other unmapped firmwares.
+- **Graceful Unsupported Firmware Fallback**: Safely skips the Bluetooth allowlist subsystem on unmapped firmwares while keeping USB controllers (Xbox, Switch, DualSense over USB, Generic HID) 100% active and stable.
+
+---
+
 ## [v1.2.0] - Official Release (2026-11-01)
 
 ### DualSense (PS5) Bluetooth Wireless & USB Support

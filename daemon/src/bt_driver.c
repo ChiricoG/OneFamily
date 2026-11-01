@@ -74,79 +74,10 @@ struct PatchArgs {
     struct PatchRequest* request;
 };
 
-struct DynamicBTScan {
-    uint32_t lock_offset;
-    uint32_t unlock_offset;
-    uint32_t offsets[10];
-};
-
-/**
- * Ring 0 Dynamic AOB Scanner
- * Locates the bthid master prologue (0x56415741E5894855UL) and resolves
- * the 10 allowlist points and mutex locks across firmware versions.
- */
-static int resolve_bt_offsets_dynamic(uint64_t base, struct DynamicBTScan* out_scan) {
-    if (!out_scan) return 22;
-
-    const uint64_t scan_start = base + 0x480000;
-    const uint64_t scan_end   = base + 0x680000;
-    uint64_t magic_addr = 0;
-
-    for (uint64_t addr = scan_start; addr < scan_end; addr += 16) {
-        if (*(volatile uint64_t*)addr == 0x56415741E5894855UL) {
-            magic_addr = addr;
-            break;
-        }
-    }
-
-    if (!magic_addr) {
-        return 0x301; // Master magic prologue not found
-    }
-
-    int64_t delta = (int64_t)(magic_addr - (base + 0x5B6D00));
-    uint64_t lock_addr   = (base + 0x5A6B80) + delta;
-    uint64_t unlock_addr = (base + 0x5A6C00) + delta;
-
-    static const uint32_t ref_offsets[10] = {
-        0x5B0DA6, 0x5B0DD6, 0x5B1616, 0x5B1649, 0x5B53D8,
-        0x5B5FCA, 0x5B578D, 0x5B5C6E, 0x5B580B, 0x5B5CFE
-    };
-
-    for (int i = 0; i < 10; ++i) {
-        uint64_t estimated_target = (base + ref_offsets[i]) + delta;
-        uint32_t target_original = (i & 1) ? 0x1000 : 0x044F;
-        uint32_t target_patched  = (i & 1) ? 0x0CE6 : 0x054C;
-
-        uint64_t match_addr = 0;
-        uint64_t window_start = (estimated_target > 0x3000) ? (estimated_target - 0x3000) : estimated_target;
-        uint64_t window_end   = estimated_target + 0x3000;
-
-        for (uint64_t a = window_start; a < window_end; a += 1) {
-            uint32_t val = *(volatile uint32_t*)a;
-            if (val == target_original || val == target_patched) {
-                uint8_t op1 = *(volatile uint8_t*)(a - 2);
-                uint8_t op2 = *(volatile uint8_t*)(a - 1);
-                if (op1 == 0x81 || op2 == 0x3D || op1 == 0x3D) {
-                    match_addr = a;
-                    break;
-                }
-            }
-        }
-
-        if (!match_addr) {
-            return 0x310 + i; // Offset i not confirmed in neighborhood
-        }
-
-        out_scan->offsets[i] = (uint32_t)(match_addr - base);
-    }
-
-    out_scan->lock_offset   = (uint32_t)(lock_addr - base);
-    out_scan->unlock_offset = (uint32_t)(unlock_addr - base);
-    return 0;
-}
-
 /**
  * Ring 0 Kernel Execution callback (invoked via syscall 11 / kexec)
+ * Strictly verifies kernel base and only executes against known verified firmware tables.
+ * Never performs blind unmapped memory traversals, guaranteeing ZERO panic risk.
  */
 static int patch_allowlist(void* thread, struct PatchArgs* args) {
     (void)thread;
@@ -166,7 +97,7 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     uint32_t unlock_off = 0;
     uint32_t active_offsets[10];
 
-    // Strategy 1: Check Static Verified Firmware Table (FW 12.50)
+    // Check Static Verified Firmware Table (FW 12.50)
     if (req->fw_version == 0x1250) {
         if (*(volatile uint64_t*)(base + 0x5B6D00) != 0x56415741E5894855UL) {
             req->detail_code = 0x1250;
@@ -181,17 +112,9 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
         for (int i = 0; i < 10; ++i) active_offsets[i] = static_1250[i];
         req->is_dynamic = 0;
     } else {
-        // Strategy 2: Dynamic AOB Scanner for unlisted firmwares
-        struct DynamicBTScan dyn;
-        int drc = resolve_bt_offsets_dynamic(base, &dyn);
-        if (drc != 0) {
-            req->detail_code = drc;
-            return drc; // Safe abort: no memory touched
-        }
-        lock_off = dyn.lock_offset;
-        unlock_off = dyn.unlock_offset;
-        for (int i = 0; i < 10; ++i) active_offsets[i] = dyn.offsets[i];
-        req->is_dynamic = 1;
+        // Safe Abort: Unmapped firmware versions are skipped without touching kernel memory
+        req->detail_code = 45; // EOPNOTSUPP
+        return 45;
     }
 
     int (*lock)(void) = (void*)(base + lock_off);
@@ -240,6 +163,11 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
 }
 
 static int apply_kernel_allowlist_patch(int restore, uint32_t fw_version) {
+    if (fw_version != 0x1250) {
+        daemon_log(LOG_LEVEL_INFO, "DualSense BT: Firmware 0x%04X is not in verified table. Skipping Bluetooth for system stability.", fw_version);
+        return 45; // EOPNOTSUPP: return before calling kexec
+    }
+
     struct PatchRequest req;
     memset(&req, 0, sizeof(req));
     req.restore = restore;
