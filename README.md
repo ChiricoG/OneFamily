@@ -111,7 +111,7 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 | **Google Stadia Controller** | Official Stadia Controller (USB-C cable) | USB | Yes | Yes |
 | **Nintendo Switch Pro Controller** | Official Pro Controller & third-party Switch pads | USB | — | Yes |
 | **Sony PlayStation 3 DualShock 3** | Official DualShock 3 (automatic handshake) | USB | Yes | Yes |
-| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | **Bluetooth (Wireless)** | Yes | Yes |
+| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | **Bluetooth (Wireless) ONLY ON FW 12.50** | Yes | Yes |
 
 > [!TIP]
 > **How to Pair Sony PlayStation 5 DualSense / Edge via Bluetooth:**
