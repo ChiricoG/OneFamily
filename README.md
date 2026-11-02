@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/PS4-GoldHEN%20Compatible-0070D1?style=for-the-badge&logo=playstation" alt="GoldHEN Compatible"/>
-  <img src="https://img.shields.io/badge/Version-v1.2.0-blueviolet?style=for-the-badge" alt="Version v1.2.0"/>
+  <img src="https://img.shields.io/badge/Version-v1.2.1-blueviolet?style=for-the-badge" alt="Version v1.2.1"/>
   <img src="https://img.shields.io/badge/Polling-250%20Hz%20(4ms)-brightgreen?style=for-the-badge" alt="250 Hz Polling"/>
   <img src="https://img.shields.io/badge/Platform-PlayStation%204-blue?style=for-the-badge" alt="Platform PS4"/>
   <img src="https://img.shields.io/badge/License-MIT-orange?style=for-the-badge" alt="License MIT"/>
@@ -69,7 +69,7 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 ## Key Features
 
 - **Native System-Wide DualShock 4 Emulation:** Registers controllers directly into `libScePad` as official Type 1 DualShock 4 devices. Unlike user-space game hooks, it functions seamlessly across the entire console environment—including the XMB dashboard, system settings, media applications, PlayStation Store, and all retail or homebrew titles.
-- **Native PS5 DualSense & DualSense Edge Wireless Support (Bluetooth):** Seamless Bluetooth connection for Sony DualSense and DualSense Edge controllers via dynamic kernel pattern scanning (SigScan) compatible across all GoldHEN firmware versions (5.05 up to 13.52+). Full 250 Hz reporting, touchpad navigation, and motion sensors without disabling or affecting original DualShock 4 controllers.
+- **Native PS5 DualSense & DualSense Edge Wireless Support (Bluetooth):** Seamless Bluetooth connection for Sony DualSense and DualSense Edge controllers via a hybrid kernel architecture: verified zero-delay static tables for **FW 12.50** and **FW 13.52**, and an ultra-safe universal VID-First AOB scanner with greedy nearest-pairing for all other firmware versions (5.05 up to 13.52+). Full 250 Hz reporting, touchpad navigation, and motion sensors without disabling or affecting original DualShock 4 controllers.
 - **Smart DualSense USB Bypass & Charging:** Connecting a DualSense via USB leaves the port active as a safe 5V power supply to charge the controller while displaying an on-screen toast guiding the user to pair wirelessly via Bluetooth, preventing audio/endpoint hardware stalls.
 - **Multi-User Profile Login & Profile Switching:** Fully integrated with the PS4 User Service (`libSceUserService`). When you plug in a controller or press the Guide/PS button, you can assign it to any profile on the console (Player 1, Player 2, or Guest), enabling native local co-op and split-screen multiplayer across different accounts.
 - **Complete Quick Menu & Shell Navigation:** The Guide/PS button provides native PlayStation Home functionality. Tap to return to the XMB dashboard, or hold to open the PlayStation Quick Menu (to adjust audio, manage power options, or suspend applications).
@@ -118,6 +118,8 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 > 1. With the controller powered off, press and hold the **Create (Share)** and **PS** buttons simultaneously until the lightbar rapidly blinks blue (pairing mode).
 > 2. On your PS4, navigate to **Settings > Devices > Bluetooth Devices**.
 > 3. Select **Wireless Controller** and confirm the pairing prompt. OneFamily will automatically hook into the Bluetooth subsystem and register the DualSense as an active system controller!
+> 
+> *Firmware Compatibility: Pre-verified zero-delay static tables for **FW 12.50** and **FW 13.52**; universal dynamic VID-First AOB scanner automatically supports all other GoldHEN firmware versions (5.05 – 11.00+).*
 > *(Note: The USB port is reserved for charging the DualSense battery — OneFamily will guide you to connect via Bluetooth if plugged into USB).*
 
 ---
