@@ -2,6 +2,17 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.1] - Official Release (2026-11-02)
+
+### Bluetooth DualSense Multi-Firmware Architecture & FW 13.52 Support
+- **Pre-verified Static Table for FW 13.52**: Integrated field-tested, native static allowlist table (`static_1352[12]`) enabling 0 ms instant wireless Bluetooth pairing for DualSense and DualSense Edge controllers on PS4 Firmware 13.52 without runtime scanning overhead.
+- **Universal VID-First AOB Scanner**: Replaced generic assembly prologue anchors with an ultra-safe, kernel-bounded VID-First clustering scanner (`[0x4E0000, 0x660000)`). Completely eliminates false positives from generic x86-64 stack frames and prevents any risk of Page Faults (`#PF` / Trap 12).
+- **Greedy Nearest-Pairing Engine**: Intelligently pairs each Thrustmaster Vendor ID with its companion Product ID located within the same function block, resolving ioctl `register_dualsense` failures and guaranteeing that both VID and PID are patched simultaneously.
+- **Dynamic Multi-Firmware Fallback**: Automatic, universal compatibility for all other GoldHEN firmware versions (5.05 up to 11.00+) with automatic caching in Ring 0 for clean restore on shutdown.
+- **Discovered Offsets Logging**: Automatically outputs discovered hex offsets and mutex positions to `/data/onefamily/onefamily.log` on newly encountered firmware versions.
+
+---
+
 ## [v1.2.0] - Official Release (2026-11-01)
 
 ### DualSense (PS5) Bluetooth Wireless & USB Support
