@@ -12,17 +12,33 @@
 #include <orbis/Http.h>
 #include <orbis/Sysmodule.h>
 
+#include <stdarg.h>
+#include <time.h>
+
 // Use custom typed wrappers to invoke symbols with their real parameters
 extern "C" {
     int ofHttpSetAutoRedirect(int id, int enabled) __asm__("sceHttpSetAutoRedirect");
     int ofHttpSetRecvTimeOut(int id, uint32_t microseconds) __asm__("sceHttpSetRecvTimeOut");
+    int ofHttpSetResponseHeaderMaxSize(int id, size_t size) __asm__("sceHttpSetResponseHeaderMaxSize");
 }
 
 #define GITHUB_API_RELEASES "https://api.github.com/repos/ChiricoG/OneFamily/releases"
 #define HTTP_USER_AGENT "OneFamily-Companion/1.2.1 PS4"
 
-#define ONEFAMILY_NET_POOLSIZE    (32 * 1024)
-#define ONEFAMILY_HTTP_POOLSIZE   (128 * 1024)
+#define ONEFAMILY_NET_POOLSIZE    (256 * 1024)
+#define ONEFAMILY_HTTP_POOLSIZE   (1024 * 1024)
+
+static void updater_log(const char* fmt, ...) {
+    mkdir("/data", 0777);
+    mkdir("/data/onefamily", 0777);
+    FILE* f = fopen("/data/onefamily/updater.log", "a");
+    if (!f) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(f, fmt, args);
+    va_end(args);
+    fclose(f);
+}
 
 static int s_netMemId = 0;
 static int s_sslCtxId = 0;
@@ -211,6 +227,7 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
 
     sceHttpsSetSslCallback(tpl, skipSslCallback, NULL);
     ofHttpSetAutoRedirect(tpl, 1);
+    ofHttpSetResponseHeaderMaxSize(tpl, 64 * 1024);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000); // 10s
     sceHttpSetSendTimeOut(tpl, 10 * 1000 * 1000);
     ofHttpSetRecvTimeOut(tpl, 10 * 1000 * 1000);
@@ -303,7 +320,14 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
 }
 
 bool PkgUpdater::download_file(const std::string& initialUrl, const std::string& destination, uint64_t expectedSize) {
-    if (!ensure_http_stack()) return false;
+    updater_log("\n========== [UPDATER] Starting download_file ==========\n");
+    updater_log("[UPDATER] initialUrl: %s\n", initialUrl.c_str());
+    updater_log("[UPDATER] destination: %s\n", destination.c_str());
+
+    if (!ensure_http_stack()) {
+        updater_log("[UPDATER] ensure_http_stack failed\n");
+        return false;
+    }
 
     // Ensure /data and /data/pkg directories exist
     mkdir("/data", 0777);
@@ -319,29 +343,39 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
 
     while (redirects < MAX_REDIRECTS) {
         int tpl = sceHttpCreateTemplate(s_httpCtxId, HTTP_USER_AGENT, ORBIS_HTTP_VERSION_1_1, 1);
-        if (tpl < 0) return false;
+        if (tpl < 0) {
+            updater_log("[UPDATER] sceHttpCreateTemplate failed: 0x%08X\n", (unsigned int)tpl);
+            return false;
+        }
 
         sceHttpsSetSslCallback(tpl, skipSslCallback, NULL);
         ofHttpSetAutoRedirect(tpl, 0); // Disable auto-redirect to handle cross-domain hops safely
+        ofHttpSetResponseHeaderMaxSize(tpl, 64 * 1024);
         sceHttpSetConnectTimeOut(tpl, 15 * 1000 * 1000); // 15s
         sceHttpSetSendTimeOut(tpl, 15 * 1000 * 1000);
         ofHttpSetRecvTimeOut(tpl, 30 * 1000 * 1000);
 
         int conn = sceHttpCreateConnectionWithURL(tpl, currentUrl.c_str(), 1);
         if (conn < 0) {
+            updater_log("[UPDATER] sceHttpCreateConnectionWithURL failed: 0x%08X (URL: %s)\n", (unsigned int)conn, currentUrl.c_str());
             sceHttpDeleteTemplate(tpl);
             return false;
         }
 
         int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, currentUrl.c_str(), 0);
         if (req < 0) {
+            updater_log("[UPDATER] sceHttpCreateRequestWithURL failed: 0x%08X\n", (unsigned int)req);
             sceHttpDeleteConnection(conn);
             sceHttpDeleteTemplate(tpl);
             return false;
         }
 
+        ofHttpSetResponseHeaderMaxSize(req, 64 * 1024);
+
+        updater_log("[UPDATER] Sending GET [hop %d] to: %s\n", redirects, currentUrl.c_str());
         int ret = sceHttpSendRequest(req, NULL, 0);
         if (ret < 0) {
+            updater_log("[UPDATER] sceHttpSendRequest failed: 0x%08X (%d)\n", (unsigned int)ret, ret);
             sceHttpDeleteRequest(req);
             sceHttpDeleteConnection(conn);
             sceHttpDeleteTemplate(tpl);
@@ -350,6 +384,7 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
 
         int statusCode = 0;
         sceHttpGetStatusCode(req, &statusCode);
+        updater_log("[UPDATER] HTTP statusCode: %d\n", statusCode);
 
         // Handle HTTP Redirects (301, 302, 303, 307, 308)
         if (statusCode == 301 || statusCode == 302 || statusCode == 303 || statusCode == 307 || statusCode == 308) {
@@ -357,7 +392,11 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
             size_t headerLen = 0;
             std::string nextUrl;
 
-            if (sceHttpGetAllResponseHeaders(req, &headers, &headerLen) == 0 && headers && headerLen > 0) {
+            int hRet = sceHttpGetAllResponseHeaders(req, &headers, &headerLen);
+            updater_log("[UPDATER] sceHttpGetAllResponseHeaders ret=0x%08X, ptr=%p, len=%llu\n",
+                        (unsigned int)hRet, headers, (unsigned long long)headerLen);
+
+            if (hRet == 0 && headers && headerLen > 0) {
                 std::string headerStr(headers, headerLen);
                 size_t locPos = headerStr.find("Location:");
                 if (locPos == std::string::npos) {
@@ -382,15 +421,18 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
             sceHttpDeleteTemplate(tpl);
 
             if (nextUrl.empty()) {
+                updater_log("[UPDATER] ERROR: nextUrl is empty!\n");
                 return false;
             }
 
+            updater_log("[UPDATER] Redirect hop %d -> nextUrl: %s\n", redirects, nextUrl.c_str());
             currentUrl = nextUrl;
             redirects++;
             continue; // Re-issue GET to the redirect location with clean connection
         }
 
         if (statusCode != 200) {
+            updater_log("[UPDATER] Non-200 HTTP status %d, aborting.\n", statusCode);
             sceHttpDeleteRequest(req);
             sceHttpDeleteConnection(conn);
             sceHttpDeleteTemplate(tpl);
@@ -404,9 +446,11 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
         if (contentLengthType == ORBIS_HTTP_CONTENTLEN_EXIST && contentLength > 0) {
             expectedSize = contentLength;
         }
+        updater_log("[UPDATER] 200 OK. ContentLength=%llu. Saving to %s\n", (unsigned long long)expectedSize, tempDest.c_str());
 
         FILE* fp = fopen(tempDest.c_str(), "wb");
         if (!fp) {
+            updater_log("[UPDATER] fopen failed for %s\n", tempDest.c_str());
             sceHttpDeleteRequest(req);
             sceHttpDeleteConnection(conn);
             sceHttpDeleteTemplate(tpl);
@@ -425,6 +469,7 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
         while (true) {
             int bytesRead = sceHttpReadData(req, buffer.data(), (uint32_t)buffer.size());
             if (bytesRead < 0) {
+                updater_log("[UPDATER] sceHttpReadData error: 0x%08X (%d)\n", (unsigned int)bytesRead, bytesRead);
                 downloadOk = false;
                 break;
             }
@@ -435,6 +480,7 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
 
             size_t written = fwrite(buffer.data(), 1, bytesRead, fp);
             if (written != (size_t)bytesRead) {
+                updater_log("[UPDATER] fwrite error: written %zu != %d\n", written, bytesRead);
                 downloadOk = false;
                 break;
             }
@@ -456,7 +502,12 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
         sceHttpDeleteConnection(conn);
         sceHttpDeleteTemplate(tpl);
 
+        updater_log("[UPDATER] Download loop finished. totalReceived=%llu, downloadOk=%d\n",
+                    (unsigned long long)totalReceived, (int)downloadOk);
+
         if (!downloadOk || totalReceived < 1024 * 1024) { // Minimum check (> 1MB for PKG)
+            updater_log("[UPDATER] Validation failed (totalReceived=%llu < 1MB). Removing %s\n",
+                        (unsigned long long)totalReceived, tempDest.c_str());
             unlink(tempDest.c_str());
             return false;
         }
@@ -464,12 +515,15 @@ bool PkgUpdater::download_file(const std::string& initialUrl, const std::string&
         // Atomic rename
         unlink(destination.c_str());
         if (rename(tempDest.c_str(), destination.c_str()) != 0) {
+            updater_log("[UPDATER] rename %s -> %s failed\n", tempDest.c_str(), destination.c_str());
             return false;
         }
 
+        updater_log("[UPDATER] Successfully saved PKG to %s\n", destination.c_str());
         return true;
     }
 
+    updater_log("[UPDATER] Max redirects reached!\n");
     return false;
 }
 
