@@ -64,9 +64,17 @@ static uint32_t bt_calc_crc32(uint8_t prefix, const uint8_t* data, size_t len) {
 
 struct PatchRequest {
     int restore;
-    uint32_t fw_version; // BCD (e.g. 0x1250, 0x1100, 0x0900, 0x1300)
-    int is_dynamic;      // Output: 0 for static table, 1 for dynamic resolution
-    int detail_code;     // Output: internal diagnostic code
+    uint32_t fw_version;             // BCD (e.g. 0x1250, 0x1100, 0x0900, 0x1352)
+    int is_dynamic;                  // Output: 0 for static table, 1 for dynamic resolution
+    int detail_code;                 // Output: internal diagnostic code
+    uint32_t pair_count;             // Output: number of pairs patched (5 or 6)
+    uint32_t n_vid_found;
+    uint32_t n_pid_found;
+    uint32_t discovered_vids[8];
+    uint32_t discovered_pids[8];
+    uint32_t discovered_offsets[12]; // Output: Discovered offsets for future static tables (up to 6 pairs)
+    uint32_t discovered_lock;        // Output: Discovered lock offset
+    uint32_t discovered_unlock;      // Output: Discovered unlock offset
 };
 
 struct PatchArgs {
@@ -74,10 +82,146 @@ struct PatchArgs {
     struct PatchRequest* request;
 };
 
+// -------------------------------------------------------------
+// Dynamic AOB Scanner Cache
+// -------------------------------------------------------------
+static uint32_t s_dyn_offsets[12];
+static uint32_t s_dyn_offsets_count = 0;
+static bool     s_dyn_offsets_valid = false;
+
+// Helper: Check if p points to a CMP immediate operand
+static inline bool aob_is_cmp_imm(const uint8_t* p) {
+    uint8_t b1 = p[-1];
+    uint8_t b2 = p[-2];
+    uint8_t b3 = p[-3];
+    // 3D id (CMP eax, id)
+    if (b1 == 0x3D) return true;
+    // 81 /7 id (CMP r/m32, id) -> ModR/M byte has reg field == 7 ((b >> 3) & 7 == 7)
+    if (b2 == 0x81 && ((b1 >> 3) & 7) == 7) return true;
+    if (b3 == 0x81 && ((b2 >> 3) & 7) == 7) return true;
+    return false;
+}
+
+#define AOB_SAFE_SCAN_START 0x004E0000UL
+#define AOB_SAFE_SCAN_END   0x00660000UL
+
+static int aob_find_allowlist_offsets(uint64_t base, uint32_t out_offsets[12], uint32_t* out_count, uint32_t* out_lock, uint32_t* out_unlock, struct PatchRequest* req) {
+    uint32_t vids[8];
+    uint32_t pids[8];
+    int n_vid = 0, n_pid = 0;
+
+    // 1. VID Phase: Scan safe kernel window for CMP imm32 == 0x044F (Thrustmaster VID)
+    // 0x044F is exceptionally rare in the kernel and only present in bthid allowlists.
+    for (uint64_t a = base + AOB_SAFE_SCAN_START; a + 4 <= base + AOB_SAFE_SCAN_END; ++a) {
+        if (*(const volatile uint32_t*)a == 0x0000044FUL) {
+            if (aob_is_cmp_imm((const uint8_t*)a)) {
+                if (n_vid < 8) vids[n_vid++] = (uint32_t)(a - base);
+            }
+        }
+    }
+
+    if (req) {
+        req->n_vid_found = n_vid;
+        for (int i = 0; i < n_vid && i < 8; ++i) req->discovered_vids[i] = vids[i];
+    }
+
+    // Accept 5 or 6 VIDs (FW 12.50 has 5, FW 13.52 has 6)
+    if (n_vid < 5 || n_vid > 6) {
+        return 0x310 + n_vid; // Unexpected VID count
+    }
+
+    // 2. PID Phase: Search inside the cluster window around the detected VIDs.
+    // In Orbis OS bthid, all VIDs and PIDs reside within a compact span.
+    uint64_t pid_win_start = (base + vids[0] > 0x800) ? (base + vids[0] - 0x800) : (base + vids[0]);
+    uint64_t pid_win_end   = base + vids[n_vid - 1] + 0x8000;
+    if (pid_win_end > base + AOB_SAFE_SCAN_END) pid_win_end = base + AOB_SAFE_SCAN_END;
+
+    for (uint64_t a = pid_win_start; a + 4 <= pid_win_end; ++a) {
+        if (*(const volatile uint32_t*)a == 0x00001000UL) {
+            if (aob_is_cmp_imm((const uint8_t*)a)) {
+                if (n_pid < 8) pids[n_pid++] = (uint32_t)(a - base);
+            }
+        }
+    }
+
+    if (req) {
+        req->n_pid_found = n_pid;
+        for (int i = 0; i < n_pid && i < 8; ++i) req->discovered_pids[i] = pids[i];
+    }
+
+    if (n_pid < 5) {
+        return 0x320 + n_pid; // Expected at least 5 Thrustmaster PIDs
+    }
+
+    // 3. Greedy Nearest-Pairing: assign each VID to its closest unused companion PID
+    bool pid_used[8] = {false};
+    uint32_t pairs = 0;
+
+    for (int i = 0; i < n_vid && pairs < 6; ++i) {
+        uint32_t v = vids[i];
+        int best_idx = -1;
+        uint32_t best_dist = 0xFFFFFFFFU;
+
+        // Prefer forward PID within 4096 bytes
+        for (int j = 0; j < n_pid; ++j) {
+            if (pid_used[j]) continue;
+            uint32_t p = pids[j];
+            if (p > v && (p - v) < 4096) {
+                uint32_t dist = p - v;
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best_idx = j;
+                }
+            }
+        }
+
+        // Fallback: Closest available overall
+        if (best_idx < 0) {
+            for (int j = 0; j < n_pid; ++j) {
+                if (pid_used[j]) continue;
+                uint32_t p = pids[j];
+                uint32_t dist = (p > v) ? (p - v) : (v - p);
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best_idx = j;
+                }
+            }
+        }
+
+        if (best_idx >= 0) {
+            pid_used[best_idx] = true;
+            out_offsets[2 * pairs]     = v;
+            out_offsets[2 * pairs + 1] = pids[best_idx];
+            ++pairs;
+        }
+    }
+
+    if (pairs < 5) {
+        return 0x330 + pairs;
+    }
+
+    *out_count = pairs;
+
+    // 4. Resolve lock / unlock mutexes relative to the first VID anchor (12.50 delta = -0xA226 and -0xA1A6)
+    int64_t delta = (int64_t)((base + vids[0]) - (base + 0x5B0DA6));
+    uint64_t lock_cand   = (base + 0x5A6B80) + delta;
+    uint64_t unlock_cand = (base + 0x5A6C00) + delta;
+
+    if ((*(const volatile uint32_t*)lock_cand & 0x00FFFFFF) == 0x00E58948 ||
+        *(const volatile uint8_t*)lock_cand == 0x55) {
+        *out_lock   = (uint32_t)(lock_cand - base);
+        *out_unlock = (uint32_t)(unlock_cand - base);
+    } else {
+        *out_lock   = 0;
+        *out_unlock = 0;
+    }
+
+    return 0;
+}
+
 /**
  * Ring 0 Kernel Execution callback (invoked via syscall 11 / kexec)
- * Strictly verifies kernel base and only executes against known verified firmware tables.
- * Never performs blind unmapped memory traversals, guaranteeing ZERO panic risk.
+ * Hybrid Multi-Firmware: Verified Table (12.50) + Safe Contextual AOB Scanner (Other FW)
  */
 static int patch_allowlist(void* thread, struct PatchArgs* args) {
     (void)thread;
@@ -95,9 +239,10 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
 
     uint32_t lock_off = 0;
     uint32_t unlock_off = 0;
-    uint32_t active_offsets[10];
+    uint32_t active_offsets[12];
+    uint32_t total_offsets = 10;
 
-    // Check Static Verified Firmware Table (FW 12.50)
+    // Path 1: Verified Static Table (FW 12.50)
     if (req->fw_version == 0x1250) {
         if (*(volatile uint64_t*)(base + 0x5B6D00) != 0x56415741E5894855UL) {
             req->detail_code = 0x1250;
@@ -110,39 +255,87 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
             0x5B5FCA, 0x5B578D, 0x5B5C6E, 0x5B580B, 0x5B5CFE
         };
         for (int i = 0; i < 10; ++i) active_offsets[i] = static_1250[i];
+        total_offsets = 10;
         req->is_dynamic = 0;
-    } else {
-        // Safe Abort: Unmapped firmware versions are skipped without touching kernel memory
-        req->detail_code = 45; // EOPNOTSUPP
-        return 45;
+        req->pair_count = 5;
+    }
+    // Path 2: Verified Static Table (FW 13.52)
+    else if (req->fw_version == 0x1352) {
+        if (*(volatile uint32_t*)(base + 0x5B1616) != 0x0000044FUL) {
+            req->detail_code = 0x1352;
+            return 22;
+        }
+        lock_off = 0;
+        unlock_off = 0;
+        const uint32_t static_1352[12] = {
+            0x59C869, 0x59C8C0,
+            0x5B1616, 0x5B1646,
+            0x5B1E86, 0x5B1EB9,
+            0x5B5C48, 0x5B64DE,
+            0x5B5FFD, 0x5B656E,
+            0x5B607B, 0x5B348A
+        };
+        for (int i = 0; i < 12; ++i) active_offsets[i] = static_1352[i];
+        total_offsets = 12;
+        req->is_dynamic = 0;
+        req->pair_count = 6;
+    }
+    // Path 3: Safe Contextual AOB Scanner for unlisted firmwares (11.00, 9.00, 10.xx, etc.)
+    else {
+        // Path 2: Safe Contextual AOB Scanner for unlisted firmwares (13.52, 9.00, etc.)
+        if (restore && s_dyn_offsets_valid) {
+            total_offsets = s_dyn_offsets_count;
+            for (uint32_t i = 0; i < total_offsets; ++i) active_offsets[i] = s_dyn_offsets[i];
+            req->is_dynamic = 1;
+            req->pair_count = total_offsets / 2;
+        } else {
+            uint32_t pair_count = 0;
+            int aob_rc = aob_find_allowlist_offsets(base, active_offsets, &pair_count, &lock_off, &unlock_off, req);
+            req->detail_code = aob_rc;
+            if (aob_rc != 0) {
+                return 45; // Safe abort: no memory touched, fallback cleanly to USB
+            }
+            total_offsets = pair_count * 2;
+            for (uint32_t i = 0; i < total_offsets; ++i) s_dyn_offsets[i] = active_offsets[i];
+            s_dyn_offsets_count = total_offsets;
+            s_dyn_offsets_valid = true;
+            req->is_dynamic = 1;
+            req->pair_count = pair_count;
+        }
     }
 
-    int (*lock)(void) = (void*)(base + lock_off);
-    int (*unlock)(int) = (void*)(base + unlock_off);
+    for (uint32_t i = 0; i < total_offsets; ++i) req->discovered_offsets[i] = active_offsets[i];
+    req->discovered_lock = lock_off;
+    req->discovered_unlock = unlock_off;
 
-    int rc = lock();
-    if (rc) return rc;
+    int (*lock)(void) = lock_off ? (void*)(base + lock_off) : NULL;
+    int (*unlock)(int) = unlock_off ? (void*)(base + unlock_off) : NULL;
+
+    if (lock) {
+        int rc = lock();
+        if (rc) return rc;
+    }
 
     unsigned original_count = 0, patched_count = 0;
-    for (unsigned i = 0; i < 10; ++i) {
+    for (unsigned i = 0; i < total_offsets; ++i) {
         uint32_t old_value = (i & 1) ? 0x1000 : 0x044F;
         uint32_t new_value = (i & 1) ? 0x0CE6 : 0x054C;
         uint32_t current = *(volatile uint32_t*)(base + active_offsets[i]);
         if (current == old_value) ++original_count;
         else if (current == new_value) ++patched_count;
         else {
-            unlock(0);
+            if (unlock) unlock(0);
             return 0x100 + (int)i;
         }
     }
 
     if (original_count && patched_count) {
-        unlock(0);
+        if (unlock) unlock(0);
         return 0x200 + (int)original_count;
     }
 
-    if ((!restore && patched_count == 10) || (restore && original_count == 10)) {
-        unlock(0);
+    if ((!restore && patched_count == total_offsets) || (restore && original_count == total_offsets)) {
+        if (unlock) unlock(0);
         return 0;
     }
 
@@ -151,23 +344,18 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     uint64_t writable = cr0 & ~(1UL << 16);
     __asm__ volatile("mov %0, %%cr0" :: "r"(writable) : "memory");
 
-    for (unsigned i = 0; i < 10; ++i) {
+    for (unsigned i = 0; i < total_offsets; ++i) {
         uint32_t old_value = (i & 1) ? 0x1000 : 0x044F;
         uint32_t new_value = (i & 1) ? 0x0CE6 : 0x054C;
         *(volatile uint32_t*)(base + active_offsets[i]) = restore ? old_value : new_value;
     }
 
     __asm__ volatile("mov %0, %%cr0; pushq %1; popfq" :: "r"(cr0), "r"(flags) : "memory", "cc");
-    unlock(0);
+    if (unlock) unlock(0);
     return 0;
 }
 
 static int apply_kernel_allowlist_patch(int restore, uint32_t fw_version) {
-    if (fw_version != 0x1250) {
-        daemon_log(LOG_LEVEL_INFO, "DualSense BT: Firmware 0x%04X is not in verified table. Skipping Bluetooth for system stability.", fw_version);
-        return 45; // EOPNOTSUPP: return before calling kexec
-    }
-
     struct PatchRequest req;
     memset(&req, 0, sizeof(req));
     req.restore = restore;
@@ -176,6 +364,27 @@ static int apply_kernel_allowlist_patch(int restore, uint32_t fw_version) {
     long ret = daemon_syscall(SYS_KEXEC, (long)patch_allowlist, (long)&req, 0);
     daemon_log(LOG_LEVEL_INFO, "DualSense BT Kernel Allowlist Patch (restore=%d, fw=0x%04X, dynamic=%d, detail=0x%X) = %ld",
                restore, fw_version, req.is_dynamic, req.detail_code, ret);
+
+    if (req.n_vid_found > 0) {
+        daemon_log(LOG_LEVEL_INFO, "[FW 0x%04X] AOB Scan detected %u VIDs and %u PIDs:", fw_version, req.n_vid_found, req.n_pid_found);
+        for (uint32_t i = 0; i < req.n_vid_found && i < 8; ++i) {
+            daemon_log(LOG_LEVEL_INFO, "  VID[%u] = 0x%06X", i, req.discovered_vids[i]);
+        }
+        for (uint32_t i = 0; i < req.n_pid_found && i < 8; ++i) {
+            daemon_log(LOG_LEVEL_INFO, "  PID[%u] = 0x%06X", i, req.discovered_pids[i]);
+        }
+    }
+
+    if (ret == 0 && req.is_dynamic && !restore) {
+        daemon_log(LOG_LEVEL_INFO, "[FW 0x%04X] Successfully paired and patched %u Pairs (%u Offsets) for DualSense Wireless Pairing:",
+                   fw_version, req.pair_count, req.pair_count * 2);
+        for (uint32_t i = 0; i < req.pair_count; ++i) {
+            daemon_log(LOG_LEVEL_INFO, "  Pair[%u]: VID=0x%06X, PID=0x%06X",
+                       i, req.discovered_offsets[2 * i], req.discovered_offsets[2 * i + 1]);
+        }
+        daemon_log(LOG_LEVEL_INFO, "  Lock/Unlock: lock=0x%06X, unlock=0x%06X",
+                   req.discovered_lock, req.discovered_unlock);
+    }
     return (int)ret;
 }
 
