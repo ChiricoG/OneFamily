@@ -64,6 +64,16 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
   <img src="assets/screenshots/05_tester_calibration.jpg" width="85%" alt="Input Tester and Stick Calibration"/>
 </p>
 
+<p align="center">
+  <b>Visual Button Remapping GUI (Generic USB HID Gamepads)</b><br>
+  <img src="assets/screenshots/06_HID_configuration.jpg" width="85%" alt="HID Controller Remapping Screen with R3 Test Mode"/>
+</p>
+
+<p align="center">
+  <b>System Info & In-App Online Update Service</b><br>
+  <img src="assets/screenshots/07_info_tab.jpg" width="85%" alt="Companion Info Tab and Online Updater"/>
+</p>
+
 ---
 
 ## Key Features
