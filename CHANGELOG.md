@@ -11,6 +11,10 @@ All notable changes to the OneFamily project are documented in this file.
 - **Dynamic Multi-Firmware Fallback**: Automatic, universal compatibility for all other GoldHEN firmware versions (5.05 up to 11.00+) with automatic caching in Ring 0 for clean restore on shutdown.
 - **Discovered Offsets Logging**: Automatically outputs discovered hex offsets and mutex positions to `/data/onefamily/onefamily.log` on newly encountered firmware versions.
 
+### In-App Companion Updater Fix
+- **HTTP 302 Large Response Header Support**: Configured `sceHttpSetResponseHeaderMaxSize` to 64 KB and expanded HTTP memory pool to 1 MB, resolving `SCE_HTTP_ERROR_HEADER_SIZE_LIMIT` (`0x80431050`) on GitHub release asset redirects to Azure/AWS S3.
+- **Dedicated Diagnostic Logging**: Added persistent `/data/onefamily/updater.log` tracing network status, HTTP headers, redirect hops, and download progress.
+
 ---
 
 ## [v1.2.0] - Official Release (2026-11-01)
