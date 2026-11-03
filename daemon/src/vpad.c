@@ -90,6 +90,7 @@ typedef struct {
     uint64_t last_rumble_send_us;
     int assigned_slot;
     char assigned_username[64];
+    uint8_t packet_counter;
 } VPadSlotState;
 
 static VPadSlotState g_slots[VPAD_MAX_SLOTS];
@@ -700,16 +701,28 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
         state_changed = true;
     }
 
-    if (!state_changed) {
-        uint64_t interval = is_neutral ? 200000 : 20000;
-        if ((now - s->last_send_time_us) < interval) {
-            return 0; // Throttled cleanly
+    // Rate-limiting: only throttle when pad is completely neutral/untouched (keep-alive at 10 Hz)
+    // When buttons or sticks are active, never throttle: stream at full 250 Hz for zero input lag and rhythm games!
+    if (is_neutral && !state_changed) {
+        if ((now - s->last_send_time_us) < 100000ULL) {
+            return 0; // Throttled cleanly when idle
         }
     }
 
-    int ret = p_scePadVirtualDeviceInsertData(s->handle, data);
+    // Sequential rolling counter (1..255, wrapping to 1) adhering to DualShock 4 hardware spec
+    if (++s->packet_counter == 0) {
+        s->packet_counter = 1;
+    }
+
+    OrbisPadData send_data = *data;
+    send_data.count = s->packet_counter;
+    if (send_data.timestamp == 0) {
+        send_data.timestamp = now;
+    }
+
+    int ret = p_scePadVirtualDeviceInsertData(s->handle, &send_data);
     s->last_send_time_us = now;
-    s->last_sent_data = *data;
+    s->last_sent_data = send_data;
     s->has_sent_first = true;
 
     int ps_now = (data->buttons & DS4_BUTTON_PS) ? 1 : 0;

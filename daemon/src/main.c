@@ -88,6 +88,8 @@ int main(int argc, char *argv[]) {
 
     // Main service loop (250 Hz)
     while (g_running) {
+        uint64_t loop_start_us = daemon_sys_time_us();
+
         // Poll USB controller and feed Virtual DualShock 4
         usb_driver_poll_step();
 
@@ -121,7 +123,11 @@ int main(int argc, char *argv[]) {
             vpad_check_user_rebind(g_daemon_config.mode);
         }
 
-        daemon_sys_usleep(4000); // 4 ms sleep = 250 Hz
+        // Precision sleep to pace exactly at 250 Hz (4000 us)
+        uint64_t elapsed_us = daemon_sys_time_us() - loop_start_us;
+        if (elapsed_us < 4000ULL) {
+            daemon_sys_usleep((uint32_t)(4000ULL - elapsed_us));
+        }
     }
 
     daemon_log(LOG_LEVEL_INFO, "Shutting down OneFamily Daemon...");
