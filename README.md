@@ -79,7 +79,7 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 ## Key Features
 
 - **Native System-Wide DualShock 4 Emulation:** Registers controllers directly into `libScePad` as official Type 1 DualShock 4 devices. Unlike user-space game hooks, it functions seamlessly across the entire console environment—including the XMB dashboard, system settings, media applications, PlayStation Store, and all retail or homebrew titles.
-- **Native PS5 DualSense & DualSense Edge Wireless Support (Bluetooth):** Seamless Bluetooth connection for Sony DualSense and DualSense Edge controllers via a hybrid kernel architecture: verified zero-delay static tables for **FW 12.50** and **FW 13.52**, and an ultra-safe universal VID-First AOB scanner with greedy nearest-pairing for all other firmware versions (5.05 up to 13.52+). Full 250 Hz reporting, touchpad navigation, and motion sensors without disabling or affecting original DualShock 4 controllers.
+- **Native PS5 DualSense & DualSense Edge Wireless Support (Bluetooth - FW 9.00 to 13.52+):** Seamless Bluetooth connection for Sony DualSense and DualSense Edge controllers via a hybrid kernel architecture: verified zero-delay static tables for **FW 12.50** and **FW 13.52**, and an ultra-safe universal VID-First AOB scanner with greedy nearest-pairing for **FW 9.00 to 11.00+**. Full 250 Hz reporting, touchpad navigation, and motion sensors without disabling or affecting original DualShock 4 controllers. *(On firmwares prior to 9.00 such as FW 5.05, 6.72, and 7.xx, the Bluetooth driver is cleanly and safely skipped to protect the kernel, while all USB controllers remain 100% active).*
 - **Smart DualSense USB Bypass & Charging:** Connecting a DualSense via USB leaves the port active as a safe 5V power supply to charge the controller while displaying an on-screen toast guiding the user to pair wirelessly via Bluetooth, preventing audio/endpoint hardware stalls.
 - **Multi-User Profile Login & Profile Switching:** Fully integrated with the PS4 User Service (`libSceUserService`). When you plug in a controller or press the Guide/PS button, you can assign it to any profile on the console (Player 1, Player 2, or Guest), enabling native local co-op and split-screen multiplayer across different accounts.
 - **Complete Quick Menu & Shell Navigation:** The Guide/PS button provides native PlayStation Home functionality. Tap to return to the XMB dashboard, or hold to open the PlayStation Quick Menu (to adjust audio, manage power options, or suspend applications).
@@ -91,7 +91,7 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
   - **Back + Start** or **Share + D-Pad Down** = PS Button (Home / Quick Menu)
   - **Share + D-Pad Up** = Touchpad Click
 - **Ultra-Low Latency (250 Hz Polling):** Operates on an unthrottled 4 ms polling loop for competitive, instantaneous input response with zero latency overhead.
-- **Unified Filesystem (`/data/onefamily`):** Centralized directory for configuration (`onefamily.ini`), custom controller profiles (`controllers/`), and runtime logs.
+- **Unified Filesystem & Canonical `/user/data` Fallback:** Centralized directory for configuration (`onefamily.ini`), custom controller profiles (`controllers/`), and runtime logs with dual `/data` and canonical `/user/data` fallback support across all firmware versions, guaranteeing zero setup issues even on FW 5.05 where `/data` is not symlinked.
 - **All-in-One Automated Setup:** The companion app handles full deployment on first launch:
   - Deploys the background daemon payload to `/data/payloads/onefamily.bin`.
   - Configures `/data/GoldHEN/payloads.ini` for automatic boot on system start (`[AutoRun]`).
@@ -121,7 +121,7 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 | **Google Stadia Controller** | Official Stadia Controller (USB-C cable) | USB | Yes | Yes |
 | **Nintendo Switch Pro Controller** | Official Pro Controller & third-party Switch pads | USB | — | Yes |
 | **Sony PlayStation 3 DualShock 3** | Official DualShock 3 (automatic handshake) | USB | Yes | Yes |
-| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | **Bluetooth (Wireless)** | Yes | Yes |
+| **Sony PlayStation 5 DualSense / Edge** | Official DualSense & DualSense Edge | **Bluetooth (Wireless - FW 9.00+)** | Yes | Yes |
 
 > [!TIP]
 > **How to Pair Sony PlayStation 5 DualSense / Edge via Bluetooth:**
@@ -129,8 +129,11 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 > 2. On your PS4, navigate to **Settings > Devices > Bluetooth Devices**.
 > 3. Select **Wireless Controller** and confirm the pairing prompt. OneFamily will automatically hook into the Bluetooth subsystem and register the DualSense as an active system controller!
 > 
-> *Firmware Compatibility: Pre-verified zero-delay static tables for **FW 12.50** and **FW 13.52**; universal dynamic VID-First AOB scanner automatically supports all other GoldHEN firmware versions (5.05 – 11.00+).*
-> *(Note: The USB port is reserved for charging the DualSense battery — OneFamily will guide you to connect via Bluetooth if plugged into USB).*
+> *Firmware Compatibility:*
+> - **USB Controllers (All Models):** 100% supported across **all GoldHEN firmwares (FW 5.05 up to 13.52+)**.
+> - **DualSense Bluetooth (Wireless):** Supported on **FW 9.00 up to 13.52+** (pre-verified zero-delay static tables for **FW 12.50** and **FW 13.52**; universal dynamic VID-First AOB scanner for **FW 9.00 – 11.00**).
+> - *(Note for FW < 9.00 like 5.05/6.72/7.xx: PS5 DualSense Bluetooth is not supported by legacy PS4 kernels; OneFamily cleanly disables the BT subsystem on FW < 9.00 to guarantee 0 panics, while all USB gamepads function at full 250 Hz).*
+> - *(Note on USB: The USB port is reserved for charging the DualSense battery — OneFamily will guide you to connect via Bluetooth if plugged into USB).*
 
 ---
 

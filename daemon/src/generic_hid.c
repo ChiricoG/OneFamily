@@ -31,7 +31,8 @@ enum {
 #define MAX_BUTTONS 32
 #define MAX_REPORT_BITS (512 * 8)
 #define MAX_RUMBLE_TEMPLATE 16
-#define CONTROLLERS_DIR "/data/onefamily/controllers"
+#define CONTROLLERS_DIR      "/data/onefamily/controllers"
+#define CONTROLLERS_DIR_USER "/user/data/onefamily/controllers"
 
 enum {
     RUMBLE_TOKEN_CONST = 0,
@@ -60,6 +61,7 @@ typedef struct {
     hid_field button[MAX_BUTTONS];      /* usage n at index n - 1 */
     hid_field home, back;               /* consumer page: AC Home, AC Back */
     int nbuttons;
+    uint16_t in_report_len;             /* Expected main input report length in bytes (RID 0) */
 
     uint8_t role[ROLE_N];               /* AX_* per role */
     uint8_t invert[ROLE_N];
@@ -204,6 +206,9 @@ static int parse_descriptor(GenericHidContext *g, const uint8_t *d, int n) {
                     }
                 }
                 *off = (uint16_t)(*off + bits);
+                if (gl.rid == 0) {
+                    g->in_report_len = (uint16_t)((*off + 7) / 8);
+                }
             } else if (tag == 9) { /* output (force-feedback / rumble / LEDs) */
                 uint16_t *off = &out_offset[gl.rid];
                 uint32_t bits = gl.size * gl.count;
@@ -532,12 +537,24 @@ static void load_controller_ini(GenericHidContext *g, uint16_t vid, uint16_t pid
     snprintf(path, sizeof path, "%s/%04X_%04X.ini", CONTROLLERS_DIR, vid, pid);
     int fd = daemon_sys_open(path, 0 /* O_RDONLY */, 0);
     if (fd < 0) {
+        snprintf(path, sizeof path, "%s/%04X_%04X.ini", CONTROLLERS_DIR_USER, vid, pid);
+        fd = daemon_sys_open(path, 0, 0);
+    }
+    if (fd < 0) {
         snprintf(path, sizeof path, "%s/%04x_%04x.ini", CONTROLLERS_DIR, vid, pid);
+        fd = daemon_sys_open(path, 0, 0);
+    }
+    if (fd < 0) {
+        snprintf(path, sizeof path, "%s/%04x_%04x.ini", CONTROLLERS_DIR_USER, vid, pid);
         fd = daemon_sys_open(path, 0, 0);
     }
     if (fd < 0 && !has_builtin) {
         snprintf(path, sizeof path, "%s/default.ini", CONTROLLERS_DIR);
         fd = daemon_sys_open(path, 0, 0);
+        if (fd < 0) {
+            snprintf(path, sizeof path, "%s/default.ini", CONTROLLERS_DIR_USER);
+            fd = daemon_sys_open(path, 0, 0);
+        }
     }
     if (fd < 0) return;
 
@@ -730,6 +747,11 @@ void generic_hid_reload(uint16_t vid, uint16_t pid) {
 
 int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, const TranslatorConfig* cfg) {
     if (!rx || len <= 0 || !out) return 0;
+
+    // Discard stale packets from another controller mode (e.g. 20-byte Xbox packet on an 8-byte DirectInput controller)
+    if (s_ctx.in_report_len > 0 && !s_ctx.has_ids && len > s_ctx.in_report_len + 4) {
+        return 0;
+    }
 
     static const uint32_t dirs[8] = {
         DS4_BUTTON_DPAD_UP,

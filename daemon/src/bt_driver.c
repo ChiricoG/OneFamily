@@ -264,6 +264,12 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     int restore = req->restore;
     if (restore != 0 && restore != 1) return 22;
 
+    // Defense-in-depth: Never touch kernel memory or execute AOB scans on firmwares older than 9.00
+    if (req->fw_version < 0x0900) {
+        req->detail_code = 0x0505;
+        return 22; // EINVAL
+    }
+
     uint32_t lock_off = 0;
     uint32_t unlock_off = 0;
     uint32_t active_offsets[12];
@@ -892,6 +898,16 @@ int bt_driver_init(void) {
         }
     } else {
         daemon_log(LOG_LEVEL_WARN, "DualSense BT: sceKernelGetSystemSwVersion unresolved, defaulting to FW 0x1250 / dynamic.");
+    }
+
+    // FW Guard: DualSense Bluetooth stack and allowlist patches require FW 9.00 - 13.52.
+    // On FW < 9.00 (e.g. 5.05, 6.72, 7.xx), DualSense BT is not supported by the kernel stack.
+    // Cleanly skip the Bluetooth subsystem so USB controllers operate with zero crash risk.
+    if (s_current_fw_bcd != 0 && s_current_fw_bcd < 0x0900) {
+        daemon_log(LOG_LEVEL_INFO, "DualSense BT Subsystem skipped: FW 0x%04X < 0x0900 (BT requires FW 9.00+). USB controllers fully active.",
+                   s_current_fw_bcd);
+        s_bt_supported = false;
+        return -1;
     }
 
     // 2. Open /dev/bt device node

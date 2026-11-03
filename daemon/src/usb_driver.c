@@ -176,15 +176,7 @@ static uint16_t s_failed_cooldown_vid = 0;
 static uint16_t s_failed_cooldown_pid = 0;
 static uint64_t s_failed_cooldown_until_us = 0;
 
-// User picker cancellation state (applies to ALL controllers in AUTO mode)
-static bool     s_awaiting_user_pick = false;
-static bool     s_picker_cancel_sent = false;
-static uint64_t s_picker_cancel_time_us = 0;
 static int      s_usb_vpad_slot = -1;
-
-// Wait-for-physical-replug state after user cancels picker with B/Circle
-static uint16_t s_replug_vid = 0;
-static uint16_t s_replug_pid = 0;
 static bool     s_share_combo_active = false;
 
 static void close_controller(void) {
@@ -225,9 +217,6 @@ static void close_controller(void) {
     s_consecutive_transfer_errors = 0;
     s_consecutive_timeouts = 0;
     s_x360_ep_out_stalls = 0;
-    s_awaiting_user_pick = false;
-    s_picker_cancel_sent = false;
-    s_picker_cancel_time_us = 0;
     s_share_combo_active = false;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
     s_last_ds4.leftStick.x = 128;
@@ -474,12 +463,6 @@ static int scan_and_open(void) {
             s_failed_cooldown_pid = 0;
             s_failed_cooldown_until_us = 0;
         }
-        if (s_replug_vid != 0) {
-            daemon_log(LOG_LEVEL_INFO, "Controller VID:0x%04X PID:0x%04X physically unplugged (bus empty) — ready for reconnection",
-                       s_replug_vid, s_replug_pid);
-            s_replug_vid = 0;
-            s_replug_pid = 0;
-        }
         if (list) p_sceUsbdFreeDeviceList(list);
         return -1;
     }
@@ -491,7 +474,6 @@ static int scan_and_open(void) {
 
     int found = 0;
     int cooldown_seen = 0;
-    int replug_seen = 0;
 
     for (ssize_t i = 0; i < count && !found; i++) {
         libusb_device* dev = list[i];
@@ -500,12 +482,6 @@ static int scan_and_open(void) {
 
         daemon_log(LOG_LEVEL_INFO, "USB Device [%d]: VID:0x%04X PID:0x%04X (Class:0x%02X)",
                    (int)i, desc.idVendor, desc.idProduct, desc.bDeviceClass);
-
-        // Skip device if user cancelled the account selection menu (B/Circle) and hasn't unplugged it yet
-        if (s_replug_vid != 0 && desc.idVendor == s_replug_vid && desc.idProduct == s_replug_pid) {
-            replug_seen = 1;
-            continue;
-        }
 
         // Skip device if currently under failure cooldown to prevent notification loops
         if (s_failed_cooldown_vid != 0 && desc.idVendor == s_failed_cooldown_vid && desc.idProduct == s_failed_cooldown_pid) {
@@ -622,14 +598,6 @@ static int scan_and_open(void) {
                         init_switch_pro_controller();
                     }
 
-                    // In Auto Mode: SceShellCore automatically receives the PS pulse sent by vpad_slot_open!
-                    if (g_daemon_config.mode == CONFIG_MODE_AUTO) {
-                        s_awaiting_user_pick = true;
-                        s_picker_cancel_sent = false;
-                        s_picker_cancel_time_us = 0;
-                        daemon_log(LOG_LEVEL_INFO, "User picker launched — monitoring Circle/B (cancel) vs Cross/A (confirm)");
-                    }
-
                     int slot = vpad_get_assigned_slot_num(s_usb_vpad_slot);
                     if (slot == 2) {
                         daemon_notify("OneFamily: %s (Player 2)", controller_type_to_str(det.type));
@@ -647,13 +615,6 @@ static int scan_and_open(void) {
         s_failed_cooldown_vid = 0;
         s_failed_cooldown_pid = 0;
         s_failed_cooldown_until_us = 0;
-    }
-
-    if (s_replug_vid != 0 && !replug_seen) {
-        daemon_log(LOG_LEVEL_INFO, "Controller VID:0x%04X PID:0x%04X physically unplugged — ready for reconnection",
-                   s_replug_vid, s_replug_pid);
-        s_replug_vid = 0;
-        s_replug_pid = 0;
     }
 
     p_sceUsbdFreeDeviceList(list);
@@ -848,41 +809,6 @@ int usb_driver_init(void) {
     return 0;
 }
 
-static void execute_picker_cancel_teardown(void) {
-    // 1. Ensure the translated Cross press was held at least 100ms so SceShellCore latches it cleanly
-    uint64_t now = daemon_sys_time_us();
-    if (s_picker_cancel_time_us != 0 && now > s_picker_cancel_time_us && (now - s_picker_cancel_time_us) < 100000ULL) {
-        daemon_sys_usleep((unsigned int)(100000ULL - (now - s_picker_cancel_time_us)));
-    }
-
-    // 2. Send neutral release packet (buttons = 0) and keep Virtual Pad alive in neutral state
-    //    for 400ms so SceShellCore finishes closing the "Who is using this controller?" modal
-    //    AND completes powering off the physical DualShock 4 (turning its LED off) before teardown.
-    OrbisPadData neutral = s_last_ds4;
-    neutral.buttons = 0;
-    for (int i = 0; i < 20; i++) {
-        neutral.timestamp = daemon_sys_time_us();
-        vpad_send_data(&neutral);
-        daemon_sys_usleep(20000); // 20 * 20ms = 400ms
-    }
-
-    daemon_log(LOG_LEVEL_INFO, "User cancelled account selection (B/Circle) — physical DS4 powered off by OS, shutting down Virtual Pad until replug");
-    s_replug_vid = g_usb_state.vid;
-    s_replug_pid = g_usb_state.pid;
-    s_awaiting_user_pick = false;
-    s_picker_cancel_sent = false;
-    s_picker_cancel_time_us = 0;
-
-    // 3. Shut down Virtual Pad cleanly after the modal transition and DS4 power-off complete
-    //    (also prevents close_controller() from firing the generic "Controller Disconnected" toast)
-    if (s_usb_vpad_slot >= 0) {
-        vpad_slot_close(s_usb_vpad_slot);
-        s_usb_vpad_slot = -1;
-    }
-    close_controller();
-    daemon_notify("OneFamily: Reconnect controller to use");
-}
-
 static void apply_universal_shortcuts(OrbisPadData* ds4) {
     bool share_down = (ds4->buttons & DS4_BUTTON_SHARE) != 0;
 
@@ -925,38 +851,6 @@ static void apply_universal_shortcuts(OrbisPadData* ds4) {
 static void handle_pad_input_and_send(const OrbisPadData* ds4) {
     OrbisPadData out_ds4 = *ds4;
     apply_universal_shortcuts(&out_ds4);
-
-    if (s_awaiting_user_pick) {
-        bool circle = (ds4->buttons & DS4_BUTTON_CIRCLE) != 0;
-        bool cross  = (ds4->buttons & DS4_BUTTON_CROSS)  != 0;
-
-        if (s_picker_cancel_sent) {
-            // Phase 2: Wait for B/Circle release (or 400ms safety timeout) before tearing down
-            uint64_t now = daemon_sys_time_us();
-            if (!circle || (now - s_picker_cancel_time_us > 400000ULL)) {
-                execute_picker_cancel_teardown();
-                return;
-            }
-            // Keep sending DS4_BUTTON_CROSS while B/Circle is held so SceShellCore confirms User 1
-            // and automatically powers off the physical DS4 instead of leaving it in a zombie state
-            out_ds4.buttons = (ds4->buttons & ~DS4_BUTTON_CIRCLE) | DS4_BUTTON_CROSS;
-        } else if (circle && !cross) {
-            // Phase 1: User pressed B/Circle on the account selection screen.
-            // Native DS4_BUTTON_CIRCLE leaves the physical DS4 powered ON (LED lit) but unbound in SceMbus.
-            // By sending DS4_BUTTON_CROSS instead, SceShellCore dismisses the modal AND cleanly powers off
-            // the physical DS4 (LED off), after which we immediately tear down the Virtual Pad.
-            daemon_log(LOG_LEVEL_INFO, "User picker: B/Circle pressed — remapping to Cross so OS powers off physical DS4 before Virtual Pad teardown");
-            s_picker_cancel_sent = true;
-            s_picker_cancel_time_us = daemon_sys_time_us();
-            out_ds4.buttons = (ds4->buttons & ~DS4_BUTTON_CIRCLE) | DS4_BUTTON_CROSS;
-        } else if (cross) {
-            // User pressed A/Cross to select an account -> confirmed!
-            daemon_log(LOG_LEVEL_INFO, "User picker: A/Cross pressed — user profile confirmed");
-            s_awaiting_user_pick = false;
-            s_picker_cancel_sent = false;
-            s_picker_cancel_time_us = 0;
-        }
-    }
 
     s_last_ds4 = out_ds4;
     if (s_usb_vpad_slot >= 0) {
@@ -1207,11 +1101,6 @@ void usb_driver_poll_step(void) {
         }
 
         if (ret == 0x80240007 || ret == -7) {
-            // If user pressed B/Circle to cancel picker and held it without further USB packets for >400ms
-            if (s_awaiting_user_pick && s_picker_cancel_sent && (daemon_sys_time_us() - s_picker_cancel_time_us > 400000ULL)) {
-                execute_picker_cancel_teardown();
-                return;
-            }
             s_consecutive_timeouts++;
             // Active bus presence probe: if device has timed out for ~30 consecutive polls (~500ms),
             // verify if the device is still physically enumerated on the USB bus.

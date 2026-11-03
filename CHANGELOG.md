@@ -2,6 +2,23 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2] - Official Maintenance Release (2026-11-03)
+
+### PS4 FW 5.05 - 7.55 Stability & Zero-Panic Kernel Guard
+- **Legacy Firmware Kernel Panic Guard (`bt_driver.c`)**: Added explicit firmware boundary check (`s_current_fw_bcd < 0x0900`). On firmwares prior to 9.00 (e.g. FW 5.05, 6.72, 7.xx), the PS4 kernel binary text segment ends at ~4.5 MB (`~0x480000`), well before modern kernel addresses. The daemon cleanly and safely skips DualSense Bluetooth initialization on FW < 9.00 without touching `/dev/bt`, `kqueue`, or invoking Ring 0 allowlist scanning (`0x4E0000 - 0x660000`).
+- **Ring 0 Defense-in-Depth (`patch_allowlist`)**: Added immediate kernel-mode validation abort (`args->request->fw_version < 0x0900 -> return EINVAL`) preventing any out-of-bounds kernel memory dereferencing or Trap 12 (#PF) panics.
+- **Full USB Controller Support on FW 5.05**: All Xbox (Series X|S, One, 360), Nintendo Switch, Google Stadia, DualShock 3, ShanWan, Betop, 8BitDo, and Generic HID controllers operate flawlessly at full 250 Hz (4 ms) on FW 5.05 and Payload Guest / GoldHEN BinLoader.
+
+### DirectInput & Generic HID Robustness
+- **Elimination of Fragile Cancel-on-Circle State Machine (`usb_driver.c`)**: Completely removed `s_awaiting_user_pick`, `execute_picker_cancel_teardown`, and `s_replug_vid`. Physical DS4 controllers hand over full, uninterrupted control to the USB controller. Pressing Circle/B in games, menus, or single-user hot-swaps will never unexpectedly disconnect or unregister the controller.
+- **Stale Mode Packet Filter (`generic_hid.c`)**: Added report length validation discarding residual packets from prior controller modes (e.g. 20-byte Xbox packets on an 8-byte DirectInput controller) when switching modes.
+
+### Canonical User Data Path Fallback (`/user/data`)
+- **Resilient Logging on FW 5.05 (`log.c`)**: Added automatic fallback to canonical `/user/data/onefamily/onefamily.log` when `/data/onefamily/onefamily.log` cannot be opened (resolving missing log files on systems where `/data` is not symlinked).
+- **Configuration & Controller Profile Fallbacks (`config.c`, `generic_hid.c`, `main.c`)**: Added `/user/data/` fallback lookups for `onefamily.ini`, `/user/data/onefamily/controllers/*.ini`, IPC vibration (`onefamily.vibe`), and IPC mapping reload (`onefamily.reload`).
+
+---
+
 ## [v1.2.1] - Official Release (2026-11-02)
 
 ### Bluetooth DualSense Multi-Firmware Architecture & FW 13.52 Support

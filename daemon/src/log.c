@@ -12,7 +12,8 @@
 #include <stdarg.h>
 #include <fcntl.h>
 
-#define DAEMON_LOG_PATH "/data/onefamily/onefamily.log"
+#define DAEMON_LOG_PATH_PRIMARY  "/data/onefamily/onefamily.log"
+#define DAEMON_LOG_PATH_FALLBACK "/user/data/onefamily/onefamily.log"
 
 static int g_log_fd = -1;
 
@@ -20,7 +21,14 @@ void daemon_log_init(void) {
     if (g_log_fd < 0) {
         daemon_sys_mkdir("/data", 0777);
         daemon_sys_mkdir("/data/onefamily", 0777);
-        g_log_fd = daemon_sys_open(DAEMON_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        daemon_sys_mkdir("/user", 0777);
+        daemon_sys_mkdir("/user/data", 0777);
+        daemon_sys_mkdir("/user/data/onefamily", 0777);
+
+        g_log_fd = daemon_sys_open(DAEMON_LOG_PATH_PRIMARY, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (g_log_fd < 0) {
+            g_log_fd = daemon_sys_open(DAEMON_LOG_PATH_FALLBACK, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        }
     }
 }
 
