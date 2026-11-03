@@ -677,8 +677,11 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
             desc_len = ctrl_transfer(h, 0x80, 0x06, 0x2200, 0, report_desc, sizeof(report_desc), 500);
         }
         // Universal HID Wake-up: Send SET_IDLE (bmRequestType: 0x21, bRequest: 0x0A, wValue: 0, wIndex: iface)
-        // Many microcontroller pads/dongles stay in low-power idle until a SET_IDLE arrives
-        ctrl_transfer(h, 0x21, 0x0A, 0x0000, (uint16_t)iface, NULL, 0, 100);
+        // Many microcontroller pads/dongles stay in low-power idle until a SET_IDLE arrives.
+        // Skip SET_IDLE for ShanWan and Betop (0x2563, 0x20BC): their firmware crashes/stalls on SET_IDLE!
+        if (vid != 0x2563 && vid != 0x20BC) {
+            ctrl_transfer(h, 0x21, 0x0A, 0x0000, (uint16_t)iface, NULL, 0, 100);
+        }
     }
 
     if (desc_len > 0) {

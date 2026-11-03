@@ -1194,11 +1194,13 @@ void usb_driver_poll_step(void) {
         // Check for physical disconnect on any transfer error/timeout
         if (p_sceUsbdCheckConnected != NULL && p_sceUsbdCheckConnected(g_dev_handle) != 0) {
             s_consecutive_disconnects++;
-            if (s_consecutive_disconnects >= 3) {
-                daemon_log(LOG_LEVEL_INFO, "USB controller physical disconnect confirmed (ret=0x%08X)", ret);
-                close_controller();
-                s_consecutive_disconnects = 0;
-                return;
+            if (s_consecutive_disconnects >= 10 || ret == 0x80240004 || ret == -4) {
+                if (!is_current_device_present_on_bus()) {
+                    daemon_log(LOG_LEVEL_INFO, "USB controller physical disconnect confirmed (ret=0x%08X)", ret);
+                    close_controller();
+                    s_consecutive_disconnects = 0;
+                    return;
+                }
             }
         } else {
             s_consecutive_disconnects = 0;
@@ -1262,6 +1264,13 @@ void usb_driver_poll_step(void) {
                     daemon_log(LOG_LEVEL_WARN, "Generic HID interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
                                ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
                     s_logged_gen_err++;
+                }
+                int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors >= 10 && s_consecutive_transfer_errors % 25 == 0)) {
+                    daemon_log(LOG_LEVEL_WARN, "Generic HID EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
+                               ret, s_consecutive_transfer_errors);
+                    p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(1000);
                 }
             }
 
