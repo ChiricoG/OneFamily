@@ -111,8 +111,9 @@ int main() {
         return 0;
     }
 
-    int activeTab = 0;
+    int activeTabIndex = 0;
     int selectedCard = 0;
+    int dsSelectedCard = 0;
     int toastFrames = 0;
     std::string toastText = "Settings saved to /data/onefamily/onefamily.ini";
     int frameID = 0;
@@ -152,6 +153,8 @@ int main() {
                           hidStatus.type.find("hid") != std::string::npos ||
                           hidStatus.type.find("HID") != std::string::npos);
         bool hasHid = (hidStatus.connected && isHidType);
+        bool hasDualSense = (hidStatus.connected && (hidStatus.type == "dualsense_bt" || hidStatus.vid == 0x054C));
+
         if (hasHid && !hidLoaded) {
             hidProfile.load(hidStatus.vid, hidStatus.pid, hidStatus.nbuttons);
             hidLoaded = true;
@@ -159,10 +162,23 @@ int main() {
             hidLoaded = false;
         }
 
-        int numTabs = hasHid ? 4 : 3;
-        if (activeTab >= numTabs) {
-            activeTab = numTabs - 1;
+        // Dynamically build active tab list
+        std::vector<int> activeTabs;
+        activeTabs.push_back(TAB_SETTINGS);
+        activeTabs.push_back(TAB_TESTER);
+        if (hasDualSense) {
+            activeTabs.push_back(TAB_DUALSENSE);
         }
+        if (hasHid) {
+            activeTabs.push_back(TAB_REMAP_HID);
+        }
+        activeTabs.push_back(TAB_INFO);
+
+        int numTabs = (int)activeTabs.size();
+        if (activeTabIndex >= numTabs) {
+            activeTabIndex = numTabs - 1;
+        }
+        int currentTabId = activeTabs[activeTabIndex];
 
         AppConfig& cfg = configMgr.getConfig();
 
@@ -174,8 +190,9 @@ int main() {
         // Tab Switching via L1 / R1 (suspended during Remap Test Mode)
         if (!remapTestMode) {
             if (justPressed & ORBIS_PAD_BUTTON_L1) {
-                activeTab = (activeTab + numTabs - 1) % numTabs;
-                if (activeTab != 1 && tester.rumblePhase != 0) {
+                activeTabIndex = (activeTabIndex + numTabs - 1) % numTabs;
+                currentTabId = activeTabs[activeTabIndex];
+                if (currentTabId != TAB_TESTER && tester.rumblePhase != 0) {
                     tester.rumbleFrames = 0;
                     tester.rumblePhase = 0;
                     OrbisPadVibeParam vibe = { 0, 0 };
@@ -184,8 +201,9 @@ int main() {
                 }
             }
             if (justPressed & ORBIS_PAD_BUTTON_R1) {
-                activeTab = (activeTab + 1) % numTabs;
-                if (activeTab != 1 && tester.rumblePhase != 0) {
+                activeTabIndex = (activeTabIndex + 1) % numTabs;
+                currentTabId = activeTabs[activeTabIndex];
+                if (currentTabId != TAB_TESTER && tester.rumblePhase != 0) {
                     tester.rumbleFrames = 0;
                     tester.rumblePhase = 0;
                     OrbisPadVibeParam vibe = { 0, 0 };
@@ -195,11 +213,11 @@ int main() {
             }
         }
 
-        if (activeTab != 2) {
+        if (currentTabId != TAB_REMAP_HID) {
             remapTestMode = false;
         }
 
-        if (activeTab == 0) {
+        if (currentTabId == TAB_SETTINGS) {
             const int TOTAL_CARDS = 5;
 
             // Navigate Cards in Settings
@@ -251,7 +269,7 @@ int main() {
                     toastFrames = 180; // ~3 seconds toast feedback
                 }
             }
-        } else if (activeTab == 1) {
+        } else if (currentTabId == TAB_TESTER) {
             // --- TESTER & CALIBRATION TAB ---
             // Square: Start Vibration Test
             if (justPressed & ORBIS_PAD_BUTTON_SQUARE) {
@@ -337,7 +355,68 @@ int main() {
                     tester.calib.suggestedIndex = bestIdx;
                 }
             }
-        } else if (activeTab == 2 && hasHid) {
+        } else if (currentTabId == TAB_DUALSENSE && hasDualSense) {
+            // --- DUALSENSE MANAGEMENT TAB ---
+            const int TOTAL_DS_CARDS = 6;
+            if (justPressed & ORBIS_PAD_BUTTON_UP) {
+                dsSelectedCard = (dsSelectedCard + TOTAL_DS_CARDS - 1) % TOTAL_DS_CARDS;
+            }
+            if (justPressed & ORBIS_PAD_BUTTON_DOWN) {
+                dsSelectedCard = (dsSelectedCard + 1) % TOTAL_DS_CARDS;
+            }
+
+            // Value changes (LEFT)
+            if (justPressed & ORBIS_PAD_BUTTON_LEFT) {
+                if (dsSelectedCard == 0) {
+                    if (cfg.ds_lightbar_mode > 0) cfg.ds_lightbar_mode--;
+                } else if (dsSelectedCard == 1) {
+                    if (cfg.ds_lightbar_color > 0) cfg.ds_lightbar_color--;
+                } else if (dsSelectedCard == 2) {
+                    if (cfg.ds_brightness > 0) cfg.ds_brightness--;
+                } else if (dsSelectedCard == 3) {
+                    if (cfg.ds_trigger_mode > 0) cfg.ds_trigger_mode--;
+                } else if (dsSelectedCard == 4) {
+                    if (cfg.ds_player_leds > 0) cfg.ds_player_leds--;
+                } else if (dsSelectedCard == 5) {
+                    cfg.ds_mute_action ^= 1;
+                }
+            }
+
+            // Value changes (RIGHT)
+            if (justPressed & ORBIS_PAD_BUTTON_RIGHT) {
+                if (dsSelectedCard == 0) {
+                    if (cfg.ds_lightbar_mode < (int)ConfigManager::DS_LIGHTBAR_OPTIONS.size() - 1) {
+                        cfg.ds_lightbar_mode++;
+                    }
+                } else if (dsSelectedCard == 1) {
+                    if (cfg.ds_lightbar_color < (int)ConfigManager::DS_COLOR_OPTIONS.size() - 1) {
+                        cfg.ds_lightbar_color++;
+                    }
+                } else if (dsSelectedCard == 2) {
+                    if (cfg.ds_brightness < (int)ConfigManager::DS_BRIGHTNESS_OPTIONS.size() - 1) {
+                        cfg.ds_brightness++;
+                    }
+                } else if (dsSelectedCard == 3) {
+                    if (cfg.ds_trigger_mode < (int)ConfigManager::DS_TRIGGER_OPTIONS.size() - 1) {
+                        cfg.ds_trigger_mode++;
+                    }
+                } else if (dsSelectedCard == 4) {
+                    if (cfg.ds_player_leds < (int)ConfigManager::DS_PLAYER_LEDS_OPTIONS.size() - 1) {
+                        cfg.ds_player_leds++;
+                    }
+                } else if (dsSelectedCard == 5) {
+                    cfg.ds_mute_action ^= 1;
+                }
+            }
+
+            // Save on CROSS (X)
+            if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
+                if (configMgr.save()) {
+                    toastText = "DualSense settings saved & active!";
+                    toastFrames = 180;
+                }
+            }
+        } else if (currentTabId == TAB_REMAP_HID && hasHid) {
             // --- REMAP HID TAB ---
             // R3 toggles between Edit Mode and Test Mode (no intrusive toast needed)
             if (justPressed & ORBIS_PAD_BUTTON_R3) {
@@ -391,7 +470,7 @@ int main() {
 
             // In Info tab: CROSS or LEFT returns to Settings
             if ((justPressed & ORBIS_PAD_BUTTON_CROSS) || (justPressed & ORBIS_PAD_BUTTON_LEFT)) {
-                activeTab = 0;
+                activeTabIndex = 0;
             }
         }
 
@@ -408,8 +487,9 @@ int main() {
         }
 
         // Render UI
-        ui->render(scene, cfg, activeTab, selectedCard, toastFrames, padData, tester, toastText.c_str(),
-                   hasHid, &hidStatus, &hidProfile, remapSelectedRow, remapTestMode, &updater);
+        ui->render(scene, cfg, currentTabId, selectedCard, toastFrames, padData, tester, toastText.c_str(),
+                   hasHid, &hidStatus, &hidProfile, remapSelectedRow, remapTestMode, &updater,
+                   hasDualSense, dsSelectedCard);
 
         // Flip & VSync
         scene->SubmitFlip(frameID);

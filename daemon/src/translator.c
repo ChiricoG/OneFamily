@@ -590,6 +590,9 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
     TranslatorConfig default_config;
     if (!config) {
         translator_init(&default_config);
+        // Switch sticks don't need Y-axis inversion
+        default_config.invert_left_y = 0;
+        default_config.invert_right_y = 0;
         config = &default_config;
     }
 

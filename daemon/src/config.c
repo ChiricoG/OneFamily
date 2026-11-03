@@ -31,6 +31,14 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
     // [Remap]
     cfg->swap_triggers_bumpers = 0;
     cfg->switch_positional = 1;
+
+    // [DualSense]
+    cfg->dualsense_lightbar_mode = 0;
+    cfg->dualsense_lightbar_color = 0;
+    cfg->dualsense_brightness = 0;
+    cfg->dualsense_trigger_mode = 0;
+    cfg->dualsense_player_leds = 0;
+    cfg->dualsense_mute_action = 0;
 }
 
 void config_init_defaults(PluginConfig *cfg) {
@@ -178,6 +186,18 @@ void daemon_config_load(DaemonConfig *cfg) {
                 cfg->swap_triggers_bumpers = parse_int(val, 0);
             } else if (str_case_eq(key, "switch_positional_layout")) {
                 cfg->switch_positional = parse_int(val, 1);
+            } else if (str_case_eq(key, "dualsense_lightbar_mode") || str_case_eq(key, "lightbar_mode")) {
+                cfg->dualsense_lightbar_mode = parse_int(val, 0);
+            } else if (str_case_eq(key, "dualsense_lightbar_color") || str_case_eq(key, "lightbar_color")) {
+                cfg->dualsense_lightbar_color = parse_int(val, 0);
+            } else if (str_case_eq(key, "dualsense_brightness") || str_case_eq(key, "brightness")) {
+                cfg->dualsense_brightness = parse_int(val, 0);
+            } else if (str_case_eq(key, "dualsense_trigger_mode") || str_case_eq(key, "trigger_mode")) {
+                cfg->dualsense_trigger_mode = parse_int(val, 0);
+            } else if (str_case_eq(key, "dualsense_player_leds") || str_case_eq(key, "player_leds")) {
+                cfg->dualsense_player_leds = parse_int(val, 0);
+            } else if (str_case_eq(key, "dualsense_mute_action") || str_case_eq(key, "mute_action")) {
+                cfg->dualsense_mute_action = parse_int(val, 0);
             }
         }
 

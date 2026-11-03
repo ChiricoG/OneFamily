@@ -13,8 +13,10 @@ struct HidStatus {
     int nbuttons;
     int player_slot;
     std::string user_name;
+    int battery_pct;
+    bool battery_charging;
 
-    HidStatus() : connected(false), type("none"), vid(0), pid(0), name("Unknown"), nbuttons(16), player_slot(1), user_name("Player 1") {}
+    HidStatus() : connected(false), type("none"), vid(0), pid(0), name("Unknown"), nbuttons(16), player_slot(1), user_name("Player 1"), battery_pct(100), battery_charging(false) {}
 };
 
 enum Ds4ActionId {

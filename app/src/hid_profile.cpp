@@ -86,6 +86,12 @@ bool HidProfile::read_status(HidStatus& out) {
                     if (out.player_slot <= 0) out.player_slot = 1;
                 } else if (k == "user_name") {
                     out.user_name = v;
+                } else if (k == "battery_pct") {
+                    out.battery_pct = atoi(v.c_str());
+                    if (out.battery_pct < 0) out.battery_pct = 0;
+                    if (out.battery_pct > 100) out.battery_pct = 100;
+                } else if (k == "battery_charging") {
+                    out.battery_charging = (atoi(v.c_str()) != 0);
                 }
             }
         }

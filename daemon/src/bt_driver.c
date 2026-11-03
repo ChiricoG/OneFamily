@@ -10,6 +10,7 @@
 #include "daemon_syscalls.h"
 #include "vpad.h"
 #include "log.h"
+#include "config.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -39,6 +40,8 @@ static int s_bt_vpad_slot = -1;
 static uint64_t s_physical_address = 0;
 static uint64_t s_last_input_time = 0;
 static uint32_t s_current_fw_bcd = 0x1250;
+static uint8_t s_battery_pct = 100;
+static uint8_t s_battery_status = 0;
 
 // DualSense IMU Calibration & 3D Motion Orientation State
 typedef struct {
@@ -695,6 +698,11 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
     if (data[9] & 0x01) ds4.buttons |= DS4_BUTTON_PS;
     if (data[9] & 0x02) ds4.buttons |= DS4_BUTTON_TOUCHPAD;
 
+    // DualSense Mute Button (bit 2 of data[9])
+    if (g_daemon_config.dualsense_mute_action == 1 && (data[9] & 0x04)) {
+        ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+    }
+
     // Universal Shortcuts & De-ghosting for DualSense BT
     bool share_down = (ds4.buttons & DS4_BUTTON_SHARE) != 0;
 
@@ -739,8 +747,11 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
         uint8_t battery_status = (data[52] >> 4) & 0x0F;
         uint8_t battery_pct = (battery_status == 2) ? 100 : (raw_battery < 10 ? (raw_battery * 10 + 5) : 100);
 
+        s_battery_pct = battery_pct;
+        s_battery_status = battery_status;
+
         static uint64_t s_last_battery_update = 0;
-        if (s_last_input_time - s_last_battery_update >= 30000000ULL) { // Telemetry & status update every 30s
+        if (s_last_battery_update == 0 || s_last_input_time - s_last_battery_update >= 30000000ULL) { // Immediate first write, then every 30s
             s_last_battery_update = s_last_input_time;
             bt_write_status_file(true, battery_pct, battery_status);
             daemon_log(LOG_LEVEL_INFO, "DualSense BT Battery: %d%% (status=%s)",
@@ -1058,20 +1069,105 @@ void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3])
     out[0] = 0x31;                  // Report ID
     out[1] = (seq++ & 0x0F) << 4;   // Sequence tag
     out[2] = 0x10;
-    out[3] = 0x03;                  // Enable motors
+    out[3] = 0x03 | 0x0C;           // Enable motors (0x03) + Enable trigger effects L2/R2 (0x0C)
     out[4] = 0x14;
     out[5] = small;                 // Weak motor
     out[6] = large;                 // Strong motor
-    out[46] = 0x04;                 // Enable lightbar color
 
-    if (color) {
-        out[47] = color[0];
-        out[48] = color[1];
-        out[49] = color[2];
+    // 1. Adaptive Trigger Effects (out[13] mode, out[14..23] params for R2; out[24] mode, out[25..34] params for L2)
+    int trig = g_daemon_config.dualsense_trigger_mode;
+    if (trig == 1) {
+        // Hair Trigger (rigid snap click at ~10% travel)
+        out[13] = 0x02; out[14] = 0x01; out[15] = 0x02; out[16] = 0x08;
+        out[24] = 0x02; out[25] = 0x01; out[26] = 0x02; out[27] = 0x08;
+    } else if (trig == 2) {
+        // Continuous Resistance
+        out[13] = 0x01; out[14] = 0x00; out[15] = 0x06;
+        out[24] = 0x01; out[25] = 0x00; out[26] = 0x06;
+    } else if (trig == 3) {
+        // Vibration / Pulsation
+        out[13] = 0x06; out[14] = 0x01; out[15] = 0x04; out[16] = 0x20;
+        out[24] = 0x06; out[25] = 0x01; out[26] = 0x04; out[27] = 0x20;
     } else {
+        // Standard / Off
+        out[13] = 0x00;
+        out[24] = 0x00;
+    }
+
+    // 2. Control Flags
+    // out[4] (valid_flag1): 0x10 = Player Indicator Control Enable, 0x04 = Lightbar Control Enable
+    out[4] = 0x14;
+    // out[41] (valid_flag2): 0x02 = Lightbar Setup Control Enable (enables brightness & setup)
+    out[41] = 0x02;
+
+    // 3. Lightbar Setup & LED Brightness
+    out[44] = 0x00; // Standard lightbar setup
+    int br = g_daemon_config.dualsense_brightness;
+    if (br < 0 || br > 2) br = 0;
+    out[45] = (uint8_t)br; // 0=High, 1=Medium, 2=Low
+
+    // 4. Player Indicator LEDs (out[46])
+    int p_led = g_daemon_config.dualsense_player_leds;
+    if (p_led == 1) {
+        out[46] = 0x1F; // All 5 LEDs On
+    } else if (p_led == 2) {
+        out[46] = 0x00; // Off
+    } else {
+        // Player Slot (0)
+        int slot = vpad_get_assigned_slot_num(s_bt_vpad_slot);
+        if (slot == 2) {
+            out[46] = 0x0A; // Player 2: 2 LEDs
+        } else if (slot == 3) {
+            out[46] = 0x15; // Player 3: 3 LEDs
+        } else if (slot == 4) {
+            out[46] = 0x1B; // Player 4: 4 LEDs
+        } else {
+            out[46] = 0x04; // Player 1: Center LED
+        }
+    }
+
+    // 5. Lightbar RGB (out[47..49])
+    int lb_mode = g_daemon_config.dualsense_lightbar_mode;
+    if (lb_mode == 1) {
+        // Static Color
+        static const uint8_t static_colors[6][3] = {
+            { 0, 112, 209 },  // 0: PlayStation Blue
+            { 255, 0, 0 },    // 1: Red
+            { 0, 255, 0 },    // 2: Green
+            { 128, 0, 255 },  // 3: Purple
+            { 0, 255, 255 },  // 4: Cyan
+            { 255, 255, 255 } // 5: White
+        };
+        int c_idx = g_daemon_config.dualsense_lightbar_color;
+        if (c_idx < 0 || c_idx > 5) c_idx = 0;
+        out[47] = static_colors[c_idx][0];
+        out[48] = static_colors[c_idx][1];
+        out[49] = static_colors[c_idx][2];
+    } else if (lb_mode == 2) {
+        // Battery Indicator
+        if (s_battery_pct > 60) {
+            out[47] = 0; out[48] = 255; out[49] = 0; // Green
+        } else if (s_battery_pct >= 20) {
+            out[47] = 255; out[48] = 200; out[49] = 0; // Yellow
+        } else {
+            out[47] = 255; out[48] = 0; out[49] = 0; // Red
+        }
+    } else if (lb_mode == 3) {
+        // Off
         out[47] = 0;
-        out[48] = 112;
-        out[49] = 209; // Default PlayStation Blue
+        out[48] = 0;
+        out[49] = 0;
+    } else {
+        // Mode 0: Game Sync
+        if (color && (color[0] || color[1] || color[2])) {
+            out[47] = color[0];
+            out[48] = color[1];
+            out[49] = color[2];
+        } else {
+            out[47] = 0;
+            out[48] = 112;
+            out[49] = 209; // Default PlayStation Blue
+        }
     }
 
     // Compute CRC32 checksum for Bluetooth output packet

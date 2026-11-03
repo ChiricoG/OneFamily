@@ -15,6 +15,14 @@ struct AppConfig {
     int rumble_index;       // 0 = Enabled, 1 = Disabled
     int switch_index;       // 0 = Positional, 1 = By Letter
 
+    // [DualSense]
+    int ds_lightbar_mode;   // 0=Game Sync, 1=Static Color, 2=Battery, 3=Off
+    int ds_lightbar_color;  // 0=PlayStation Blue, 1=Red, 2=Green, 3=Purple, 4=Cyan, 5=White
+    int ds_brightness;      // 0=High, 1=Medium, 2=Low
+    int ds_trigger_mode;    // 0=Standard / Off, 1=Hair Trigger, 2=Resistance, 3=Vibration
+    int ds_player_leds;     // 0=Player Slot, 1=All On, 2=Off
+    int ds_mute_action;     // 0=Default, 1=Touchpad Click
+
     AppConfig() {
         set_defaults();
     }
@@ -25,6 +33,12 @@ struct AppConfig {
         swap_index = 0;         // Disabled
         rumble_index = 0;       // Enabled
         switch_index = 0;       // Positional
+        ds_lightbar_mode = 0;
+        ds_lightbar_color = 0;
+        ds_brightness = 0;
+        ds_trigger_mode = 0;
+        ds_player_leds = 0;
+        ds_mute_action = 0;
     }
 };
 
@@ -37,6 +51,14 @@ public:
     static const std::vector<std::string> SWAP_OPTIONS;
     static const std::vector<std::string> RUMBLE_OPTIONS;
     static const std::vector<std::string> SWITCH_OPTIONS;
+
+    // DualSense Options
+    static const std::vector<std::string> DS_LIGHTBAR_OPTIONS;
+    static const std::vector<std::string> DS_COLOR_OPTIONS;
+    static const std::vector<std::string> DS_BRIGHTNESS_OPTIONS;
+    static const std::vector<std::string> DS_TRIGGER_OPTIONS;
+    static const std::vector<std::string> DS_PLAYER_LEDS_OPTIONS;
+    static const std::vector<std::string> DS_MUTE_OPTIONS;
 
     ConfigManager();
     bool load();

@@ -7,7 +7,6 @@
 #define INI_PARSER_H
 
 #include <stdint.h>
-#include "translator.h"
 
 // Configuration file paths on PS4 (/data with /user/data fallback for FW 5.05)
 #define ONEFAMILY_CONFIG_PATH               "/data/onefamily/onefamily.ini"
@@ -53,6 +52,14 @@ typedef struct {
     // [Remap]
     int                 swap_triggers_bumpers;  // 0 = normal (default), 1 = swapped
     int                 switch_positional;      // 1 = positional (default), 0 = by letter
+
+    // [DualSense]
+    int                 dualsense_lightbar_mode;  // 0=Game Sync, 1=Static Color, 2=Battery, 3=Off
+    int                 dualsense_lightbar_color; // 0..5 (Blue, Red, Green, Purple, Cyan, White)
+    int                 dualsense_brightness;     // 0=High, 1=Medium, 2=Low
+    int                 dualsense_trigger_mode;   // 0=Standard/Off, 1=Hair Trigger, 2=Resistance, 3=Vibration
+    int                 dualsense_player_leds;    // 0=Player Slot, 1=All On, 2=Off
+    int                 dualsense_mute_action;    // 0=Default, 1=Touchpad Click
 } PluginConfig;
 
 // Global configuration instance

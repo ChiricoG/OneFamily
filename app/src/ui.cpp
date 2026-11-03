@@ -317,13 +317,14 @@ void UI::draw_btn_badge(Scene2D* scene, int x, int y, int w, int h, const char* 
     draw_text_centered(scene, label, fontCardDesc, x + w / 2, y + 21, pressed ? COLOR_WHITE : COLOR_TEXT_DIM);
 }
 
-void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selectedCard,
+void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int selectedCard,
                 int toastFrames, const OrbisPadData& padData, const TesterState& tester,
                 const char* toastMsg,
                 bool hidConnected, const HidStatus* hidStatus,
                 const HidProfile* hidProfile, int remapSelectedRow,
                 bool remapTestMode,
-                const PkgUpdater* updater) {
+                const PkgUpdater* updater,
+                bool dualsenseConnected, int dsSelectedCard) {
     if (!scene) return;
 
     // 1. Blit native background + Animated PlayStation XMB Wave & Bokeh Sparkles
@@ -345,85 +346,51 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_text(scene, badgeStr, fontCardTitle, bX + 22, bY + 31, Color{ 0, 255, 150 });
     }
 
-    // 3. Left Sidebar (3 or 4 Tabs based on HID controller connection)
-    // Tab 0: Settings (Y = 280)
-    if (activeTab == 0) {
-        draw_rounded_rect(scene, SIDEBAR_X, 280, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
-        draw_rounded_outline(scene, SIDEBAR_X, 280, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
-        draw_image(scene, iconGear, SIDEBAR_X + 16, 285);
-        draw_text(scene, "Settings", fontCardTitle, SIDEBAR_X + 72, 316, COLOR_WHITE);
-    } else {
-        draw_rounded_rect(scene, SIDEBAR_X, 280, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
-        draw_rounded_outline(scene, SIDEBAR_X, 280, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
-        draw_image(scene, iconGear, SIDEBAR_X + 16, 285);
-        draw_text(scene, "Settings", fontCardTitle, SIDEBAR_X + 72, 316, COLOR_TEXT_DIM);
+    // 3. Dynamic Left Sidebar (Settings, Tester, [DualSense], [Remap HID], Info)
+    struct SidebarTab {
+        int tabId;
+        const char* label;
+        const ImageRGBA* icon;
+    };
+    std::vector<SidebarTab> sidebarTabs;
+    sidebarTabs.push_back({ TAB_SETTINGS, "Settings", &iconGear });
+    sidebarTabs.push_back({ TAB_TESTER, "Input Tester", &iconMode });
+    if (dualsenseConnected) {
+        sidebarTabs.push_back({ TAB_DUALSENSE, "DualSense", &btnPs });
     }
-    draw_image(scene, btnL1, SIDEBAR_X + 250, 292);
-
-    // Tab 1: Input Tester (Y = 348)
-    if (activeTab == 1) {
-        draw_rounded_rect(scene, SIDEBAR_X, 348, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
-        draw_rounded_outline(scene, SIDEBAR_X, 348, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
-        draw_image(scene, iconMode, SIDEBAR_X + 16, 353);
-        draw_text(scene, "Input Tester", fontCardTitle, SIDEBAR_X + 72, 384, COLOR_WHITE);
-    } else {
-        draw_rounded_rect(scene, SIDEBAR_X, 348, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
-        draw_rounded_outline(scene, SIDEBAR_X, 348, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
-        draw_image(scene, iconMode, SIDEBAR_X + 16, 353);
-        draw_text(scene, "Input Tester", fontCardTitle, SIDEBAR_X + 72, 384, COLOR_TEXT_DIM);
-    }
-
     if (hidConnected) {
-        // Tab 2: Remap HID (Y = 416)
-        if (activeTab == 2) {
-            draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
-            draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
-            draw_image(scene, iconRemap, SIDEBAR_X + 16, 427);
-            draw_text(scene, "Remap HID", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_WHITE);
+        sidebarTabs.push_back({ TAB_REMAP_HID, "Remap HID", &iconRemap });
+    }
+    sidebarTabs.push_back({ TAB_INFO, "Info", &iconInfo });
+
+    int totalSidebarTabs = (int)sidebarTabs.size();
+    for (int i = 0; i < totalSidebarTabs; i++) {
+        int tabY = 280 + i * 68;
+        bool isCurrent = (sidebarTabs[i].tabId == currentTabId);
+        if (isCurrent) {
+            draw_rounded_rect(scene, SIDEBAR_X, tabY, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
+            draw_rounded_outline(scene, SIDEBAR_X, tabY, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
+            if (sidebarTabs[i].icon) draw_image(scene, *sidebarTabs[i].icon, SIDEBAR_X + 16, tabY + 5);
+            draw_text(scene, sidebarTabs[i].label, fontCardTitle, SIDEBAR_X + 72, tabY + 36, COLOR_WHITE);
         } else {
-            draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
-            draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
-            draw_image(scene, iconRemap, SIDEBAR_X + 16, 427);
-            draw_text(scene, "Remap HID", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_TEXT_DIM);
+            draw_rounded_rect(scene, SIDEBAR_X, tabY, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
+            draw_rounded_outline(scene, SIDEBAR_X, tabY, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
+            if (sidebarTabs[i].icon) draw_image(scene, *sidebarTabs[i].icon, SIDEBAR_X + 16, tabY + 5);
+            draw_text(scene, sidebarTabs[i].label, fontCardTitle, SIDEBAR_X + 72, tabY + 36, COLOR_TEXT_DIM);
         }
 
-        // Tab 3: Info (Y = 484)
-        if (activeTab == 3) {
-            draw_rounded_rect(scene, SIDEBAR_X, 484, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
-            draw_rounded_outline(scene, SIDEBAR_X, 484, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
-            draw_image(scene, iconInfo, SIDEBAR_X + 16, 489);
-            draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 520, COLOR_WHITE);
-        } else {
-            draw_rounded_rect(scene, SIDEBAR_X, 484, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
-            draw_rounded_outline(scene, SIDEBAR_X, 484, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
-            draw_image(scene, iconInfo, SIDEBAR_X + 16, 489);
-            draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 520, COLOR_TEXT_DIM);
-        }
-        draw_image(scene, btnR1, SIDEBAR_X + 250, 496);
-        if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
-            draw_circle(scene, SIDEBAR_X + 132, 511, 5, Color{ 0, 255, 150 });
-        }
-    } else {
-        // Tab 2: Info (Y = 416)
-        if (activeTab == 2) {
-            draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_BLUE);
-            draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BLUE_MAIN, 2);
-            draw_image(scene, iconInfo, SIDEBAR_X + 16, 421);
-            draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_WHITE);
-        } else {
-            draw_rounded_rect(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_SIDEBAR_DARK);
-            draw_rounded_outline(scene, SIDEBAR_X, 416, SIDEBAR_W, 54, 10, COLOR_BORDER_DIM, 1);
-            draw_image(scene, iconInfo, SIDEBAR_X + 16, 421);
-            draw_text(scene, "Info", fontCardTitle, SIDEBAR_X + 72, 452, COLOR_TEXT_DIM);
-        }
-        draw_image(scene, btnR1, SIDEBAR_X + 250, 428);
-        if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
-            draw_circle(scene, SIDEBAR_X + 132, 443, 5, Color{ 0, 255, 150 });
+        if (i == 0) {
+            draw_image(scene, btnL1, SIDEBAR_X + 250, tabY + 12);
+        } else if (i == totalSidebarTabs - 1) {
+            draw_image(scene, btnR1, SIDEBAR_X + 250, tabY + 12);
+            if (updater && updater->get_state() == UPDATER_UPDATE_AVAILABLE) {
+                draw_circle(scene, SIDEBAR_X + 132, tabY + 27, 5, Color{ 0, 255, 150 });
+            }
         }
     }
 
     // 4. Main Content Area
-    if (activeTab == 0) {
+    if (currentTabId == TAB_SETTINGS) {
         // --- SETTINGS VIEW (5 Cards) ---
         const int TOTAL_CARDS = 5;
         const int VISIBLE_CARDS = 5;
@@ -534,11 +501,15 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_image(scene, btnOptions, 1690, 900);
         draw_text(scene, "Exit", fontFooter, 1770, 922, COLOR_TEXT_DIM);
 
-    } else if (activeTab == 1) {
+    } else if (currentTabId == TAB_TESTER) {
         // --- INPUT TESTER & CALIBRATION VIEW ---
         render_tester(scene, cfg, padData, tester);
 
-    } else if (activeTab == 2 && hidConnected && hidStatus && hidProfile) {
+    } else if (currentTabId == TAB_DUALSENSE && dualsenseConnected && hidStatus) {
+        // --- DUALSENSE MANAGEMENT & TELEMETRY VIEW ---
+        render_dualsense(scene, cfg, dsSelectedCard, *hidStatus);
+
+    } else if (currentTabId == TAB_REMAP_HID && hidConnected && hidStatus && hidProfile) {
         // --- REMAP HID VIEW ---
         render_remap(scene, *hidStatus, *hidProfile, remapSelectedRow, padData, remapTestMode);
 
@@ -549,7 +520,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_rounded_outline(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BORDER, 1);
         draw_image(scene, iconInfo, CARD_X + 24, 298);
         draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 312, COLOR_WHITE);
-        draw_text(scene, "Version: v1.2.1 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Version: v1.2.2 (Native System-Wide Virtual Pad & XMB Control)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
         draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 372, COLOR_TEXT_DIM);
         draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 400, COLOR_TEXT_DIM);
 
@@ -1248,4 +1219,226 @@ void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile&
         draw_image(scene, btnOptions, 1720, 900);
         draw_text(scene, "Exit", fontFooter, 1800, 922, COLOR_TEXT_DIM);
     }
+}
+
+void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard, const HidStatus& status) {
+    const int TOTAL_CARDS = 6;
+    const int VISIBLE_CARDS = 5;
+
+    int scrollOffset = 0;
+    if (selectedCard >= VISIBLE_CARDS) {
+        scrollOffset = selectedCard - VISIBLE_CARDS + 1;
+    }
+    if (scrollOffset > TOTAL_CARDS - VISIBLE_CARDS) {
+        scrollOffset = TOTAL_CARDS - VISIBLE_CARDS;
+    }
+
+    const char* cardTitles[TOTAL_CARDS] = {
+        "Lightbar Mode",
+        "Lightbar Color",
+        "LED Brightness",
+        "Adaptive Triggers",
+        "Player Indicator LEDs",
+        "Mute Button Remap"
+    };
+
+    const char* cardDescs[TOTAL_CARDS] = {
+        "DualSense lightbar illumination behavior during gameplay.",
+        "Static LED color (active when Lightbar Mode is Static Color).",
+        "Overall brightness intensity for lightbar and player LEDs.",
+        "Hardware adaptive trigger motor resistance for L2 and R2.",
+        "White LEDs below the touchpad indicating assigned player slot.",
+        "Remap the physical microphone mute button to Touchpad Click."
+    };
+
+    const ImageRGBA* cardIcons[TOTAL_CARDS] = {
+        &iconGear,
+        &iconMode,
+        &iconGear,
+        &iconSwap,
+        &iconMode,
+        &iconRemap
+    };
+
+    std::string cardValues[TOTAL_CARDS];
+    if (cfg.ds_lightbar_mode >= 0 && cfg.ds_lightbar_mode < (int)ConfigManager::DS_LIGHTBAR_OPTIONS.size()) {
+        cardValues[0] = ConfigManager::DS_LIGHTBAR_OPTIONS[cfg.ds_lightbar_mode];
+    } else cardValues[0] = "Game Sync";
+
+    if (cfg.ds_lightbar_color >= 0 && cfg.ds_lightbar_color < (int)ConfigManager::DS_COLOR_OPTIONS.size()) {
+        cardValues[1] = ConfigManager::DS_COLOR_OPTIONS[cfg.ds_lightbar_color];
+    } else cardValues[1] = "PlayStation Blue";
+
+    if (cfg.ds_brightness >= 0 && cfg.ds_brightness < (int)ConfigManager::DS_BRIGHTNESS_OPTIONS.size()) {
+        cardValues[2] = ConfigManager::DS_BRIGHTNESS_OPTIONS[cfg.ds_brightness];
+    } else cardValues[2] = "High";
+
+    if (cfg.ds_trigger_mode >= 0 && cfg.ds_trigger_mode < (int)ConfigManager::DS_TRIGGER_OPTIONS.size()) {
+        cardValues[3] = ConfigManager::DS_TRIGGER_OPTIONS[cfg.ds_trigger_mode];
+    } else cardValues[3] = "Standard / Off";
+
+    if (cfg.ds_player_leds >= 0 && cfg.ds_player_leds < (int)ConfigManager::DS_PLAYER_LEDS_OPTIONS.size()) {
+        cardValues[4] = ConfigManager::DS_PLAYER_LEDS_OPTIONS[cfg.ds_player_leds];
+    } else cardValues[4] = "Player Slot";
+
+    if (cfg.ds_mute_action >= 0 && cfg.ds_mute_action < (int)ConfigManager::DS_MUTE_OPTIONS.size()) {
+        cardValues[5] = ConfigManager::DS_MUTE_OPTIONS[cfg.ds_mute_action];
+    } else cardValues[5] = "Default";
+
+    // Static color preview table
+    static const Color colorPreviews[6] = {
+        Color{ 0, 112, 209 },  // Blue
+        Color{ 255, 40, 40 },  // Red
+        Color{ 40, 220, 40 },  // Green
+        Color{ 160, 40, 255 }, // Purple
+        Color{ 0, 230, 255 },  // Cyan
+        Color{ 245, 245, 245 } // White
+    };
+
+    // Render Cards (Width 880 to leave space for right telemetry box)
+    const int CARD_X = 380;
+    const int CARD_W = 880;
+    const int CARD_H = 96;
+    const int CARD_SPACING = 14;
+
+    for (int i = 0; i < VISIBLE_CARDS; i++) {
+        int cardIdx = i + scrollOffset;
+        if (cardIdx >= TOTAL_CARDS) break;
+
+        int cardY = 280 + i * (CARD_H + CARD_SPACING);
+        bool isSelected = (cardIdx == selectedCard);
+
+        draw_rounded_rect(scene, CARD_X, cardY, CARD_W, CARD_H, 12, COLOR_CARD_BG);
+
+        if (isSelected) {
+            draw_rounded_outline(scene, CARD_X - 1, cardY - 1, CARD_W + 2, CARD_H + 2, 12, COLOR_BLUE_GLOW, 2);
+            draw_rounded_outline(scene, CARD_X, cardY, CARD_W, CARD_H, 12, COLOR_BLUE_MAIN, 2);
+        } else {
+            draw_rounded_outline(scene, CARD_X, cardY, CARD_W, CARD_H, 12, COLOR_CARD_BORDER, 1);
+        }
+
+        // Icon
+        if (cardIcons[cardIdx]) {
+            draw_image(scene, *cardIcons[cardIdx], CARD_X + 20, cardY + 24);
+        }
+
+        // Title and description
+        draw_text(scene, cardTitles[cardIdx], fontCardTitle, CARD_X + 80, cardY + 38, COLOR_WHITE);
+        draw_text(scene, cardDescs[cardIdx], fontCardDesc, CARD_X + 80, cardY + 70, COLOR_TEXT_DIM);
+
+        // Value on right of card
+        if (isSelected) {
+            draw_text(scene, "<", fontValue, CARD_X + CARD_W - 310, cardY + 54, COLOR_BLUE_BRIGHT);
+            draw_text(scene, ">", fontValue, CARD_X + CARD_W - 35, cardY + 54, COLOR_BLUE_BRIGHT);
+        }
+
+        // If card is Lightbar Color, draw a small preview dot
+        if (cardIdx == 1) {
+            int c_idx = cfg.ds_lightbar_color;
+            if (c_idx >= 0 && c_idx < 6) {
+                draw_circle(scene, CARD_X + CARD_W - 275, cardY + 48, 7, colorPreviews[c_idx]);
+                draw_circle_outline(scene, CARD_X + CARD_W - 275, cardY + 48, 7, COLOR_WHITE, 1);
+            }
+            draw_text_centered(scene, cardValues[cardIdx], fontValue, CARD_X + CARD_W - 165, cardY + 54, COLOR_WHITE);
+        } else {
+            draw_text_centered(scene, cardValues[cardIdx], fontValue, CARD_X + CARD_W - 170, cardY + 54, COLOR_WHITE);
+        }
+    }
+
+    // Scroll Indicator if scrollable
+    if (scrollOffset > 0) {
+        draw_text(scene, "^", fontCardTitle, CARD_X + CARD_W / 2, 275, COLOR_BLUE_BRIGHT);
+    }
+    if (scrollOffset + VISIBLE_CARDS < TOTAL_CARDS) {
+        draw_text(scene, "v", fontCardTitle, CARD_X + CARD_W / 2, 280 + VISIBLE_CARDS * (CARD_H + CARD_SPACING) - 2, COLOR_BLUE_BRIGHT);
+    }
+
+    // Right-Hand Telemetry Box
+    const int BOX_X = 1300;
+    const int BOX_Y = 280;
+    const int BOX_W = 540;
+    const int BOX_H = 536;
+
+    draw_rounded_rect(scene, BOX_X, BOX_Y, BOX_W, BOX_H, 12, COLOR_CARD_BG);
+    draw_rounded_outline(scene, BOX_X, BOX_Y, BOX_W, BOX_H, 12, COLOR_CARD_BORDER, 1);
+
+    // Box Header
+    draw_image(scene, btnPs, BOX_X + 24, BOX_Y + 22);
+    draw_text(scene, "DualSense Wireless", fontCardTitle, BOX_X + 76, BOX_Y + 40, COLOR_WHITE);
+    draw_text(scene, "Live Hardware Status via Bluetooth", fontCardDesc, BOX_X + 76, BOX_Y + 62, COLOR_BLUE_BRIGHT);
+
+    // Divider 1
+    draw_rounded_rect(scene, BOX_X + 24, BOX_Y + 76, BOX_W - 48, 1, 0, COLOR_CARD_BORDER);
+
+    // 1. Connection Status
+    draw_circle(scene, BOX_X + 36, BOX_Y + 104, 6, Color{ 0, 255, 120 });
+    draw_text(scene, "Status:", fontCardTitle, BOX_X + 54, BOX_Y + 110, COLOR_TEXT_DIM);
+    draw_text(scene, "Connected (Bluetooth 0x31)", fontCardTitle, BOX_X + 130, BOX_Y + 110, Color{ 0, 255, 120 });
+
+    // 2. Battery Meter
+    draw_text(scene, "Battery Level:", fontCardTitle, BOX_X + 30, BOX_Y + 150, COLOR_WHITE);
+    char battStr[64];
+    snprintf(battStr, sizeof(battStr), "%d%%%s", status.battery_pct, status.battery_charging ? " [Charging]" : "");
+    draw_text(scene, battStr, fontCardTitle, BOX_X + BOX_W - 170, BOX_Y + 150, status.battery_charging ? Color{ 0, 255, 200 } : COLOR_BLUE_BRIGHT);
+
+    int barX = BOX_X + 30;
+    int barY = BOX_Y + 165;
+    int barW = BOX_W - 60;
+    int barH = 18;
+    draw_rounded_rect(scene, barX, barY, barW, barH, 5, Color{ 15, 25, 40 });
+    draw_rounded_outline(scene, barX, barY, barW, barH, 5, COLOR_BORDER_DIM, 1);
+
+    int fillW = (barW * status.battery_pct) / 100;
+    Color battColor = Color{ 0, 230, 120 };
+    if (status.battery_pct <= 20) {
+        battColor = Color{ 255, 50, 50 };
+    } else if (status.battery_pct <= 50) {
+        battColor = Color{ 240, 200, 30 };
+    }
+    if (fillW > 0) {
+        draw_rounded_rect(scene, barX + 2, barY + 2, fillW - 4, barH - 4, 3, battColor);
+    }
+
+    std::string pwrState = status.battery_charging ? "Power: Charging via USB" : "Power: Operating on Internal Battery";
+    draw_text(scene, pwrState, fontCardDesc, BOX_X + 30, BOX_Y + 206, COLOR_TEXT_DIM);
+
+    // Divider 2
+    draw_rounded_rect(scene, BOX_X + 24, BOX_Y + 224, BOX_W - 48, 1, 0, COLOR_CARD_BORDER);
+
+    // 3. User & Slot Info
+    draw_text(scene, "Assigned Console User:", fontCardTitle, BOX_X + 30, BOX_Y + 252, COLOR_WHITE);
+    std::string userDisplay = status.user_name.empty() ? "None" : status.user_name;
+    draw_text(scene, userDisplay, fontCardTitle, BOX_X + 30, BOX_Y + 280, COLOR_BLUE_BRIGHT);
+
+    char slotDisplay[64];
+    snprintf(slotDisplay, sizeof(slotDisplay), "Virtual Slot: %d (Player %d)", status.player_slot, status.player_slot);
+    draw_text(scene, slotDisplay, fontCardDesc, BOX_X + 30, BOX_Y + 304, COLOR_TEXT_DIM);
+
+    // Divider 3
+    draw_rounded_rect(scene, BOX_X + 24, BOX_Y + 322, BOX_W - 48, 1, 0, COLOR_CARD_BORDER);
+
+    // 4. Hardware Details
+    draw_text(scene, "Hardware Details:", fontCardTitle, BOX_X + 30, BOX_Y + 350, COLOR_WHITE);
+    draw_text(scene, "Vendor ID: 0x054C (Sony Interactive Entertainment)", fontCardDesc, BOX_X + 30, BOX_Y + 378, COLOR_TEXT_DIM);
+    draw_text(scene, "Product ID: 0x0CE6 (DualSense Wireless)", fontCardDesc, BOX_X + 30, BOX_Y + 402, COLOR_TEXT_DIM);
+    draw_text(scene, "Transport: Bluetooth 78-byte extended (CRC32)", fontCardDesc, BOX_X + 30, BOX_Y + 426, COLOR_TEXT_DIM);
+    draw_text(scene, "Active Features: Motion (Gyro/Accel), Touchpad", fontCardDesc, BOX_X + 30, BOX_Y + 450, COLOR_TEXT_DIM);
+    draw_text(scene, "Force Feedback: Dual Motors + Trigger Effects", fontCardDesc, BOX_X + 30, BOX_Y + 474, COLOR_TEXT_DIM);
+    draw_text(scene, "Subsystem: Ring-0 /dev/bt allowlist dynamic patch", fontCardDesc, BOX_X + 30, BOX_Y + 498, COLOR_TEXT_DIM);
+
+    // Footer
+    scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);
+
+    draw_image(scene, iconGear, 60, 890);
+    draw_text(scene, "DualSense Wireless Controller", fontCardTitle, 120, 912, COLOR_WHITE);
+    draw_text(scene, "Hardware configuration active in /data/onefamily/onefamily.ini", fontFooter, 120, 938, COLOR_BLUE_BRIGHT);
+
+    draw_image(scene, btnArrows, 1370, 901);
+    draw_text(scene, "Change", fontFooter, 1424, 922, COLOR_TEXT_DIM);
+
+    draw_image(scene, btnCross, 1540, 897);
+    draw_text(scene, "Save", fontFooter, 1585, 922, COLOR_BLUE_BRIGHT);
+
+    draw_image(scene, btnOptions, 1690, 900);
+    draw_text(scene, "Exit", fontFooter, 1770, 922, COLOR_TEXT_DIM);
 }

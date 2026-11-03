@@ -35,6 +35,30 @@ const std::vector<std::string> ConfigManager::SWITCH_OPTIONS = {
     "Positional", "By Letter"
 };
 
+const std::vector<std::string> ConfigManager::DS_LIGHTBAR_OPTIONS = {
+    "Game Sync", "Static Color", "Battery Status", "Off"
+};
+
+const std::vector<std::string> ConfigManager::DS_COLOR_OPTIONS = {
+    "PlayStation Blue", "Red", "Green", "Purple", "Cyan", "White"
+};
+
+const std::vector<std::string> ConfigManager::DS_BRIGHTNESS_OPTIONS = {
+    "High", "Medium", "Low"
+};
+
+const std::vector<std::string> ConfigManager::DS_TRIGGER_OPTIONS = {
+    "Standard / Off", "Hair Trigger (Click)", "Continuous Resistance", "Vibration / Bow"
+};
+
+const std::vector<std::string> ConfigManager::DS_PLAYER_LEDS_OPTIONS = {
+    "Player Slot", "All On", "Off"
+};
+
+const std::vector<std::string> ConfigManager::DS_MUTE_OPTIONS = {
+    "Default", "Touchpad Click"
+};
+
 ConfigManager::ConfigManager() {
     config.set_defaults();
 }
@@ -134,6 +158,24 @@ bool ConfigManager::load() {
                 } else if (strcasecmp(key.c_str(), "switch_positional_layout") == 0) {
                     int v = atoi(val.c_str());
                     config.switch_index = (v != 0) ? 0 : 1; // 0=Positional (1), 1=By Letter (0)
+                } else if (strcasecmp(key.c_str(), "dualsense_lightbar_mode") == 0 || strcasecmp(key.c_str(), "lightbar_mode") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)DS_LIGHTBAR_OPTIONS.size()) config.ds_lightbar_mode = v;
+                } else if (strcasecmp(key.c_str(), "dualsense_lightbar_color") == 0 || strcasecmp(key.c_str(), "lightbar_color") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)DS_COLOR_OPTIONS.size()) config.ds_lightbar_color = v;
+                } else if (strcasecmp(key.c_str(), "dualsense_brightness") == 0 || strcasecmp(key.c_str(), "brightness") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)DS_BRIGHTNESS_OPTIONS.size()) config.ds_brightness = v;
+                } else if (strcasecmp(key.c_str(), "dualsense_trigger_mode") == 0 || strcasecmp(key.c_str(), "trigger_mode") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)DS_TRIGGER_OPTIONS.size()) config.ds_trigger_mode = v;
+                } else if (strcasecmp(key.c_str(), "dualsense_player_leds") == 0 || strcasecmp(key.c_str(), "player_leds") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)DS_PLAYER_LEDS_OPTIONS.size()) config.ds_player_leds = v;
+                } else if (strcasecmp(key.c_str(), "dualsense_mute_action") == 0 || strcasecmp(key.c_str(), "mute_action") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)DS_MUTE_OPTIONS.size()) config.ds_mute_action = v;
                 }
             }
         }
@@ -179,12 +221,26 @@ bool ConfigManager::save() {
         "\n"
         "[Remap]\n"
         "swap_triggers_bumpers = %d\n"
-        "switch_positional_layout = %d\n",
+        "switch_positional_layout = %d\n"
+        "\n"
+        "[DualSense]\n"
+        "dualsense_lightbar_mode = %d\n"
+        "dualsense_lightbar_color = %d\n"
+        "dualsense_brightness = %d\n"
+        "dualsense_trigger_mode = %d\n"
+        "dualsense_player_leds = %d\n"
+        "dualsense_mute_action = %d\n",
         deadzone_val,
         trigger_val,
         rumble_val,
         swap_val,
-        switch_val
+        switch_val,
+        config.ds_lightbar_mode,
+        config.ds_lightbar_color,
+        config.ds_brightness,
+        config.ds_trigger_mode,
+        config.ds_player_leds,
+        config.ds_mute_action
     );
 
     if (len > 0) {

@@ -36,19 +36,28 @@ struct TesterState {
     TesterState() : rumbleFrames(0), rumblePhase(0) {}
 };
 
+enum AppTabId {
+    TAB_SETTINGS = 0,
+    TAB_TESTER = 1,
+    TAB_DUALSENSE = 2,
+    TAB_REMAP_HID = 3,
+    TAB_INFO = 4
+};
+
 class UI {
 public:
     UI();
     ~UI();
 
     bool init(Scene2D* scene);
-    void render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selectedCard,
+    void render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int selectedCard,
                 int toastFrames, const OrbisPadData& padData, const TesterState& tester,
                 const char* toastMsg = NULL,
                 bool hidConnected = false, const HidStatus* hidStatus = NULL,
                 const HidProfile* hidProfile = NULL, int remapSelectedRow = 0,
                 bool remapTestMode = false,
-                const PkgUpdater* updater = NULL);
+                const PkgUpdater* updater = NULL,
+                bool dualsenseConnected = false, int dsSelectedCard = 0);
     void render_wizard(Scene2D* scene, const InstallResult& res, int frameID);
 
 private:
@@ -103,6 +112,7 @@ private:
     void draw_text_centered(Scene2D* scene, const std::string& text, FT_Face face, int centerX, int baselineY, Color color);
 
     void render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData& padData, const TesterState& tester);
+    void render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard, const HidStatus& status);
     void render_remap(Scene2D* scene, const HidStatus& status, const HidProfile& profile,
                       int selectedRow, const OrbisPadData& padData, bool testMode = false);
 };

@@ -291,6 +291,12 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
         uint8_t led_pkt[3] = { 0x01, 0x03, 0x02 }; // LED 1 ON (Player 1)
         int ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 5);
         daemon_log(LOG_LEVEL_INFO, "Xbox 360 LED 1 command sent (ret=0x%08X)", ir);
+        if (ir == 0x802400FF || ir == 0x80240009) {
+            // Wireless dongles (e.g. GuliKit KK3 Max 2.4GHz adapter) do not have LEDs and return 0x802400FF (Pipe Stall).
+            // Permanently disable EP_OUT commands to avoid stalling the dongle's USB engine or flooding retries.
+            // Note: Transient timeouts (0x80240007) are ignored to preserve rumble for wired controllers that answer slowly.
+            s_x360_ep_out_stalls = 5;
+        }
     }
 }
 
@@ -445,7 +451,16 @@ static const char* controller_type_to_id(ControllerType type) {
     }
 }
 
-static int s_logged_first_scan = 0;
+#define USB_MAX_SNAPSHOT_DEVICES 16
+
+typedef struct {
+    uint16_t vid;
+    uint16_t pid;
+    uint8_t  bDeviceClass;
+} UsbDeviceSnapshot;
+
+static UsbDeviceSnapshot s_last_bus_devices[USB_MAX_SNAPSHOT_DEVICES];
+static int s_last_bus_device_count = -1; // -1 = first scan pending
 
 static int scan_and_open(void) {
     if (g_dev_handle != NULL) return 0;
@@ -454,9 +469,10 @@ static int scan_and_open(void) {
     libusb_device** list = NULL;
     ssize_t count = p_sceUsbdGetDeviceList(&list);
     if (count <= 0 || !list) {
-        if (!s_logged_first_scan) {
-            daemon_log(LOG_LEVEL_INFO, "USB Bus Scan: no devices found (count=%d)", (int)count);
-            s_logged_first_scan = 1;
+        if (s_last_bus_device_count != 0) {
+            daemon_log(LOG_LEVEL_INFO, "USB Bus: 0 devices detected (bus empty)");
+            s_last_bus_device_count = 0;
+            memset(s_last_bus_devices, 0, sizeof(s_last_bus_devices));
         }
         if (s_failed_cooldown_vid != 0) {
             s_failed_cooldown_vid = 0;
@@ -467,9 +483,41 @@ static int scan_and_open(void) {
         return -1;
     }
 
-    if (!s_logged_first_scan) {
-        daemon_log(LOG_LEVEL_INFO, "USB Bus Scan: %d devices detected on bus", (int)count);
-        s_logged_first_scan = 1;
+    // Capture current bus topology snapshot
+    UsbDeviceSnapshot cur_devices[USB_MAX_SNAPSHOT_DEVICES];
+    int cur_count = (count > USB_MAX_SNAPSHOT_DEVICES) ? USB_MAX_SNAPSHOT_DEVICES : (int)count;
+    memset(cur_devices, 0, sizeof(cur_devices));
+
+    for (int i = 0; i < cur_count; i++) {
+        struct libusb_device_descriptor d;
+        if (p_sceUsbdGetDeviceDescriptor(list[i], &d) == 0) {
+            cur_devices[i].vid = d.idVendor;
+            cur_devices[i].pid = d.idProduct;
+            cur_devices[i].bDeviceClass = d.bDeviceClass;
+        }
+    }
+
+    // Detect topology changes (device connected, disconnected, or changed)
+    bool bus_changed = (cur_count != s_last_bus_device_count);
+    if (!bus_changed) {
+        for (int i = 0; i < cur_count; i++) {
+            if (cur_devices[i].vid != s_last_bus_devices[i].vid ||
+                cur_devices[i].pid != s_last_bus_devices[i].pid ||
+                cur_devices[i].bDeviceClass != s_last_bus_devices[i].bDeviceClass) {
+                bus_changed = true;
+                break;
+            }
+        }
+    }
+
+    if (bus_changed) {
+        daemon_log(LOG_LEVEL_INFO, "USB Bus topology change detected (%d devices on bus):", (int)count);
+        for (int i = 0; i < cur_count; i++) {
+            daemon_log(LOG_LEVEL_INFO, "  USB Device [%d]: VID:0x%04X PID:0x%04X (Class:0x%02X)",
+                       i, cur_devices[i].vid, cur_devices[i].pid, cur_devices[i].bDeviceClass);
+        }
+        memcpy(s_last_bus_devices, cur_devices, sizeof(cur_devices));
+        s_last_bus_device_count = cur_count;
     }
 
     int found = 0;
@@ -479,9 +527,6 @@ static int scan_and_open(void) {
         libusb_device* dev = list[i];
         struct libusb_device_descriptor desc;
         if (p_sceUsbdGetDeviceDescriptor(dev, &desc) != 0) continue;
-
-        daemon_log(LOG_LEVEL_INFO, "USB Device [%d]: VID:0x%04X PID:0x%04X (Class:0x%02X)",
-                   (int)i, desc.idVendor, desc.idProduct, desc.bDeviceClass);
 
         // Skip device if currently under failure cooldown to prevent notification loops
         if (s_failed_cooldown_vid != 0 && desc.idVendor == s_failed_cooldown_vid && desc.idProduct == s_failed_cooldown_pid) {
@@ -654,6 +699,11 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         return;
     }
 
+    // Switch input-only pads (PowerA, PDP, etc.) have no rumble hardware or endpoint OUT
+    if (g_usb_state.type == CONTROLLER_SWITCH) {
+        return;
+    }
+
     uint8_t ep = g_usb_state.endpoint_out;
     if (ep == 0) {
         ep = (g_usb_state.type == CONTROLLER_XBOXONE) ? 0x02 : 0x01;
@@ -678,16 +728,13 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
             uint8_t pkt[8] = { 0x00, 0x08, 0x00, large_motor, small_motor, 0x00, 0x00, 0x00 };
             int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
             if (ret != 0) {
-                if ((ret == 0x802400FF || ret == 0x80240009) && p_sceUsbdClearHalt) {
-                    p_sceUsbdClearHalt(g_dev_handle, ep);
+                if (ret == 0x802400FF || ret == 0x80240009) {
+                    s_x360_ep_out_stalls += 2;
                 }
                 uint8_t pkt4[4] = { 0x00, 0x04, large_motor, small_motor };
                 int ret4 = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, 2);
                 if (ret4 != 0) {
-                    if ((ret4 == 0x802400FF || ret4 == 0x80240009) && p_sceUsbdClearHalt) {
-                        p_sceUsbdClearHalt(g_dev_handle, ep);
-                    }
-                    s_x360_ep_out_stalls++;
+                    s_x360_ep_out_stalls += 3;
                 } else {
                     s_x360_ep_out_stalls = 0;
                 }
@@ -863,9 +910,9 @@ static void handle_pad_input_and_send(const OrbisPadData* ds4) {
 void usb_driver_poll_step(void) {
     uint64_t now_us = daemon_sys_time_us();
 
-    // 1. If disconnected, rescan USB bus at 1 Hz
+    // 1. If disconnected, rescan USB bus at throttled pace (every 1.5 seconds)
     if (!g_usb_state.connected || g_dev_handle == NULL) {
-        if (now_us - s_last_rescan_us >= 1000000ULL) {
+        if (now_us - s_last_rescan_us >= 1500000ULL) {
             s_last_rescan_us = now_us;
             scan_and_open();
         }
@@ -877,8 +924,9 @@ void usb_driver_poll_step(void) {
     int transferred = 0;
     // 64-byte max packet size covers all supported controllers (Xbox, Switch, DualSense, Stadia, Generic HID)
     int read_len = 64;
-    // 4ms timeout matches 250 Hz pacing: returns immediately if packet is ready, or unblocks within 4ms
-    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 4);
+    // 2ms timeout matches low-latency 250 Hz pacing: returns immediately if packet is ready,
+    // or unblocks within 2ms so the main loop never starves other subsystems (BT, rumble, vpad).
+    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 2);
 
     if (ret == 0 && transferred > 0) {
         s_consecutive_disconnects = 0;
@@ -900,10 +948,14 @@ void usb_driver_poll_step(void) {
         if (g_usb_state.type == CONTROLLER_SWITCH || g_usb_state.type == CONTROLLER_SWITCH_PRO) {
             s_trans_cfg.swap_ab = (g_daemon_config.switch_positional == 0);
             s_trans_cfg.swap_xy = (g_daemon_config.switch_positional == 0);
+            s_trans_cfg.invert_left_y = 0;
+            s_trans_cfg.invert_right_y = 0;
         } else {
             // Xbox and PlayStation controllers: never swap face buttons (A=Cross, B=Circle, X=Square, Y=Triangle)
             s_trans_cfg.swap_ab = 0;
             s_trans_cfg.swap_xy = 0;
+            s_trans_cfg.invert_left_y = 1;
+            s_trans_cfg.invert_right_y = 1;
         }
 
         if (g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) {
@@ -922,7 +974,7 @@ void usb_driver_poll_step(void) {
                 if (rx[1] == 0x01 || rx[1] == 0x00) {
                     x360 = (const Xbox360Report*)(&rx[4]);
                 }
-            } else if (rx[0] == XBOX360_REPORT_INPUT) {
+            } else if (!g_usb_state.is_wireless && rx[0] == XBOX360_REPORT_INPUT) {
                 // Wired Xbox 360 report (Linux xpad style: accepts any report starting with type 0x00)
                 if (transferred < (int)sizeof(Xbox360Report)) {
                     memset(&temp_report, 0, sizeof(temp_report));
@@ -1139,7 +1191,6 @@ void usb_driver_poll_step(void) {
                     daemon_log(LOG_LEVEL_WARN, "%s EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                controller_type_to_str(g_usb_state.type), ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
-                    daemon_sys_usleep(1000);
                 }
             } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
                 daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
@@ -1159,7 +1210,6 @@ void usb_driver_poll_step(void) {
                     daemon_log(LOG_LEVEL_WARN, "Generic HID EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
-                    daemon_sys_usleep(1000);
                 }
             }
 
