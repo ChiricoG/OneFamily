@@ -11,6 +11,7 @@
 #include "vpad.h"
 #include "log.h"
 #include <string.h>
+#include <stdio.h>
 
 // Sony DualSense Identifiers
 #define SONY_VID                 0x054C
@@ -37,6 +38,31 @@ static int s_bt_vpad_slot = -1;
 static uint64_t s_physical_address = 0;
 static uint64_t s_last_input_time = 0;
 static uint32_t s_current_fw_bcd = 0x1250;
+
+// DualSense IMU Calibration & 3D Motion Orientation State
+typedef struct {
+    float gyro_scale[3];
+    float accel_scale[3];
+    float accel_bias[3];
+} DualSenseCalibration;
+
+static DualSenseCalibration s_calibration;
+static bool s_calibration_valid = false;
+static bool s_calibration_requested = false;
+static uint64_t s_last_calibration_attempt = 0;
+static float s_orientation[4] = { 0.0f, 0.0f, 0.0f, 1.0f }; // x, y, z, w
+static uint64_t s_last_motion_time = 0;
+
+static void reset_calibration(void) {
+    for (int i = 0; i < 3; ++i) {
+        s_calibration.gyro_scale[i] = (2000.0f * 0.01745329252f) / 32768.0f;
+        s_calibration.accel_scale[i] = 1.0f / 8192.0f;
+        s_calibration.accel_bias[i] = 0.0f;
+    }
+    s_calibration_valid = false;
+    s_calibration_requested = false;
+    s_last_calibration_attempt = 0;
+}
 
 // -------------------------------------------------------------
 // CRC32 Calculation for DualSense Bluetooth Reports
@@ -389,6 +415,175 @@ static int apply_kernel_allowlist_patch(int restore, uint32_t fw_version) {
 }
 
 // -------------------------------------------------------------
+// Helper Routines for IMU Calibration & Motion Processing
+// -------------------------------------------------------------
+
+static inline int16_t read_signed_le16(const uint8_t *data) {
+    return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+}
+
+static int dualsense_calibration_bluetooth(const uint8_t *report, size_t length, DualSenseCalibration *calibration) {
+    if (!report || !calibration || length != 41 || report[0] != 5) return -1;
+    uint32_t crc = bt_calc_crc32(0xA3, report, 37);
+    uint32_t expected = (uint32_t)report[37] | ((uint32_t)report[38] << 8) |
+                        ((uint32_t)report[39] << 16) | ((uint32_t)report[40] << 24);
+    if (crc != expected) return -2;
+
+    int speed = (int)read_signed_le16(report + 19) + (int)read_signed_le16(report + 21);
+    if (speed <= 0 || speed > 10000) return -3;
+
+    DualSenseCalibration result;
+    for (unsigned i = 0; i < 3; ++i) {
+        int bias = read_signed_le16(report + 1 + i * 2);
+        int plus = (int)read_signed_le16(report + 7 + i * 4) - bias;
+        int minus = (int)read_signed_le16(report + 9 + i * 4) - bias;
+        int denominator = (plus < 0 ? -plus : plus) + (minus < 0 ? -minus : minus);
+        int accel_plus = read_signed_le16(report + 23 + i * 4);
+        int accel_minus = read_signed_le16(report + 25 + i * 4);
+        int range = accel_plus - accel_minus;
+        if (!denominator || range <= 0) return -3;
+        result.gyro_scale[i] = (float)speed * 0.01745329252f / (float)denominator;
+        result.accel_scale[i] = 2.0f / (float)range;
+        result.accel_bias[i] = (float)accel_plus - (float)range / 2.0f;
+    }
+    *calibration = result;
+    return 0;
+}
+
+static inline float root_positive(float value) {
+    if (value <= 0.0f) return 0.0f;
+    float result = value > 1.0f ? value : 1.0f;
+    for (unsigned i = 0; i < 12; ++i) {
+        result = (result + value / result) * 0.5f;
+    }
+    return result;
+}
+
+static void bt_write_status_file(bool connected, uint8_t battery_pct, uint8_t battery_status) {
+    daemon_sys_mkdir("/data", 0777);
+    daemon_sys_mkdir("/data/onefamily", 0777);
+    int fd = daemon_sys_open("/data/onefamily/onefamily.status", 0x0001 | 0x0200 | 0x0400, 0666);
+    if (fd >= 0) {
+        char buf[320];
+        int len = snprintf(buf, sizeof(buf),
+            "connected = %d\n"
+            "type = dualsense_bt\n"
+            "vid = 0x054C\n"
+            "pid = 0x0CE6\n"
+            "name = DualSense Wireless\n"
+            "nbuttons = 16\n"
+            "player_slot = %d\n"
+            "user_name = %s\n"
+            "battery_pct = %d\n"
+            "battery_charging = %d\n",
+            connected ? 1 : 0,
+            connected ? vpad_get_assigned_slot_num(s_bt_vpad_slot) : 1,
+            connected ? vpad_get_assigned_user() : "None",
+            battery_pct,
+            (battery_status == 1) ? 1 : 0
+        );
+        daemon_sys_write(fd, buf, len);
+        daemon_sys_close(fd);
+    }
+}
+
+static void extended_sample(OrbisPadData* ds4, const uint8_t* report, float dt) {
+    const uint8_t* data = report + 2;
+
+    // 1. Touchpad Multitouch (2 contact points)
+    // Points start at data[32] (report[34])
+    memset(&ds4->touch, 0, sizeof(ds4->touch));
+    uint8_t contacts = 0;
+    for (unsigned i = 0; i < 2; ++i) {
+        const uint8_t* point = data + 32 + (i * 4);
+        bool active = !(point[0] & 0x80);
+        if (!active) continue;
+
+        uint8_t id = point[0] & 0x7F;
+        uint16_t raw_x = (uint16_t)point[1] | (((uint16_t)(point[2] & 0x0F)) << 8);
+        uint16_t raw_y = (uint16_t)(point[2] >> 4) | (((uint16_t)point[3]) << 4);
+
+        uint16_t x = (raw_x < 1920) ? raw_x : 1919;
+        // DualSense resolution is 1920x1080. DualShock 4 is 1920x942.
+        uint16_t y = (raw_y < 1080) ? (uint16_t)(((uint32_t)raw_y * 942ULL) / 1080ULL) : 941;
+
+        ds4->touch.touch[contacts].x = x;
+        ds4->touch.touch[contacts].y = y;
+        ds4->touch.touch[contacts].finger = id;
+        contacts++;
+    }
+    ds4->touch.fingers = contacts;
+
+    // 2. Gyroscope and Accelerometer (16-bit signed LE)
+    int16_t raw_gyro[3];
+    int16_t raw_accel[3];
+    for (unsigned i = 0; i < 3; ++i) {
+        raw_gyro[i]  = (int16_t)((uint16_t)data[15 + i * 2] | ((uint16_t)data[16 + i * 2] << 8));
+        raw_accel[i] = (int16_t)((uint16_t)data[21 + i * 2] | ((uint16_t)data[22 + i * 2] << 8));
+    }
+
+    float omega[3];
+    // Angular velocity in rad/s
+    ds4->vel.x = (float)raw_gyro[0] * s_calibration.gyro_scale[0];
+    ds4->vel.y = (float)raw_gyro[1] * s_calibration.gyro_scale[1];
+    ds4->vel.z = (float)raw_gyro[2] * s_calibration.gyro_scale[2];
+    omega[0] = ds4->vel.x;
+    omega[1] = ds4->vel.y;
+    omega[2] = ds4->vel.z;
+
+    // Acceleration in g
+    ds4->acell.x = ((float)raw_accel[0] - s_calibration.accel_bias[0]) * s_calibration.accel_scale[0];
+    ds4->acell.y = ((float)raw_accel[1] - s_calibration.accel_bias[1]) * s_calibration.accel_scale[1];
+    ds4->acell.z = ((float)raw_accel[2] - s_calibration.accel_bias[2]) * s_calibration.accel_scale[2];
+
+    // 3. 3D Orientation Quaternion Integration (Diram1x complementary filter)
+    if (dt > 0.0f && dt <= 0.1f) {
+        float x = s_orientation[0];
+        float y = s_orientation[1];
+        float z = s_orientation[2];
+        float w = s_orientation[3];
+
+        float magnitude = root_positive(ds4->acell.x * ds4->acell.x +
+                                        ds4->acell.y * ds4->acell.y +
+                                        ds4->acell.z * ds4->acell.z);
+        if (magnitude > 0.8f && magnitude < 1.2f) {
+            float ax = ds4->acell.x / magnitude;
+            float ay = ds4->acell.y / magnitude;
+            float az = ds4->acell.z / magnitude;
+            float gx = 2.0f * (x * y + w * z);
+            float gy = 1.0f - 2.0f * (x * x + z * z);
+            float gz = 2.0f * (y * z - w * x);
+            omega[0] += 2.0f * (ay * gz - az * gy);
+            omega[1] += 2.0f * (az * gx - ax * gz);
+            omega[2] += 2.0f * (ax * gy - ay * gx);
+        }
+
+        float half = dt * 0.5f;
+        s_orientation[0] += ( w * omega[0] + y * omega[2] - z * omega[1]) * half;
+        s_orientation[1] += ( w * omega[1] + z * omega[0] - x * omega[2]) * half;
+        s_orientation[2] += ( w * omega[2] + x * omega[1] - y * omega[0]) * half;
+        s_orientation[3] += (-x * omega[0] - y * omega[1] - z * omega[2]) * half;
+
+        float norm = s_orientation[0] * s_orientation[0] +
+                     s_orientation[1] * s_orientation[1] +
+                     s_orientation[2] * s_orientation[2] +
+                     s_orientation[3] * s_orientation[3];
+        norm = root_positive(norm);
+        if (norm > 0.0001f) {
+            s_orientation[0] /= norm;
+            s_orientation[1] /= norm;
+            s_orientation[2] /= norm;
+            s_orientation[3] /= norm;
+        }
+    }
+
+    ds4->quat.x = s_orientation[0];
+    ds4->quat.y = s_orientation[1];
+    ds4->quat.z = s_orientation[2];
+    ds4->quat.w = s_orientation[3];
+}
+
+// -------------------------------------------------------------
 // Bluetooth Report 0x31 / 0x01 Decoder
 // -------------------------------------------------------------
 
@@ -452,6 +647,7 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
         }
         daemon_log(LOG_LEVEL_INFO, "controller_connected: DualSense BT (Slot %d, Player %d)",
                    s_bt_vpad_slot, slot_num);
+        bt_write_status_file(true, 100, 0);
     }
 
     s_last_input_time = daemon_sys_time_us();
@@ -507,6 +703,32 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
     ds4.connected = 1;
     ds4.timestamp = s_last_input_time;
 
+    if (length == 78) {
+        // Battery status & level from report 0x31 (data[52])
+        uint8_t raw_battery = data[52] & 0x0F;
+        uint8_t battery_status = (data[52] >> 4) & 0x0F;
+        uint8_t battery_pct = (battery_status == 2) ? 100 : (raw_battery < 10 ? (raw_battery * 10 + 5) : 100);
+
+        static uint64_t s_last_battery_update = 0;
+        if (s_last_input_time - s_last_battery_update >= 30000000ULL) { // Telemetry & status update every 30s
+            s_last_battery_update = s_last_input_time;
+            bt_write_status_file(true, battery_pct, battery_status);
+            daemon_log(LOG_LEVEL_INFO, "DualSense BT Battery: %d%% (status=%s)",
+                       battery_pct,
+                       battery_status == 1 ? "Charging" : (battery_status == 2 ? "Full" : "Discharging"));
+        }
+
+        float dt = 0.0f;
+        if (s_last_motion_time > 0 && s_last_input_time > s_last_motion_time) {
+            dt = (float)(s_last_input_time - s_last_motion_time) / 1000000.0f;
+        }
+        s_last_motion_time = s_last_input_time;
+
+        extended_sample(&ds4, report, dt);
+    } else {
+        ds4.quat.w = 1.0f;
+    }
+
     // Send translated controller packet to Virtual DualShock 4
     if (s_bt_vpad_slot >= 0) {
         vpad_send_data_slot(s_bt_vpad_slot, &ds4);
@@ -521,6 +743,19 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
 
 void bt_driver_poll_step(void) {
     if (!s_bt_running || s_bt_fd < 0 || s_bt_queue < 0) return;
+
+    // Feature Report 0x05 request for factory IMU calibration
+    uint64_t now_us = daemon_sys_time_us();
+    if (s_dualsense_connected && s_physical_address && !s_calibration_requested &&
+        (now_us - s_last_calibration_attempt > 1000000ULL)) {
+        s_last_calibration_attempt = now_us;
+        struct { uint64_t address; uint8_t report_id; uint8_t reserved[7]; } feature = { s_physical_address, 5, {0} };
+        long rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8010622FUL, (long)&feature);
+        if (rc == 0) {
+            s_calibration_requested = true;
+            daemon_log(LOG_LEVEL_INFO, "DualSense BT: requested IMU factory calibration (Feature Report 0x05)");
+        }
+    }
 
     struct {
         long seconds;
@@ -542,10 +777,14 @@ void bt_driver_poll_step(void) {
         if (s_dualsense_connected && (daemon_sys_time_us() - s_last_input_time > 3000000ULL)) {
             s_dualsense_connected = false;
             s_physical_address = 0;
+            reset_calibration();
+            s_orientation[0] = 0.0f; s_orientation[1] = 0.0f; s_orientation[2] = 0.0f; s_orientation[3] = 1.0f;
+            s_last_motion_time = 0;
             if (s_bt_vpad_slot >= 0) {
                 vpad_slot_close(s_bt_vpad_slot);
                 s_bt_vpad_slot = -1;
             }
+            bt_write_status_file(false, 0, 0);
             daemon_log(LOG_LEVEL_INFO, "controller_disconnected: DualSense BT timed out");
             daemon_notify("OneFamily: DualSense Disconnected");
         }
@@ -557,6 +796,9 @@ void bt_driver_poll_step(void) {
     if (count > 0 && count <= (long)sizeof(buffer)) {
         for (long pos = 0; pos + 16 <= count; pos += 16) {
             uint8_t ev_type = buffer[pos];
+            if (ev_type == 0x18 || ev_type == 0x19) {
+                s_calibration_requested = false;
+            }
             if (ev_type < 0x18 || ev_type > 0x20) continue;
 
             uint64_t address = 0;
@@ -574,7 +816,15 @@ void bt_driver_poll_step(void) {
             } req = { address, report, sizeof(report), 0 };
 
             long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
-            if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
+            if (result == 43 && report[0] == 41 && report[2] == 5) {
+                int rc = dualsense_calibration_bluetooth(report + 2, 41, &s_calibration);
+                if (rc == 0) {
+                    s_calibration_valid = true;
+                    daemon_log(LOG_LEVEL_INFO, "DualSense BT: factory calibration loaded successfully");
+                } else {
+                    daemon_log(LOG_LEVEL_WARN, "DualSense BT: calibration decode failed (rc=%d), using nominal scales", rc);
+                }
+            } else if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
                 s_physical_address = address;
                 decode_dualsense_bt_report(report + 2, (size_t)(result - 2));
             }
@@ -588,6 +838,9 @@ void bt_driver_poll_step(void) {
 
 int bt_driver_init(void) {
     daemon_log(LOG_LEVEL_INFO, "Initializing DualSense Bluetooth Subsystem...");
+    reset_calibration();
+    s_orientation[0] = 0.0f; s_orientation[1] = 0.0f; s_orientation[2] = 0.0f; s_orientation[3] = 1.0f;
+    s_last_motion_time = 0;
 
     // 1. Verify firmware version (sceKernelGetSystemSwVersion)
     struct {
@@ -739,6 +992,10 @@ void bt_driver_shutdown(void) {
     }
     s_dualsense_connected = false;
     s_physical_address = 0;
+    reset_calibration();
+    s_orientation[0] = 0.0f; s_orientation[1] = 0.0f; s_orientation[2] = 0.0f; s_orientation[3] = 1.0f;
+    s_last_motion_time = 0;
+    bt_write_status_file(false, 0, 0);
 }
 
 bool bt_driver_is_supported(void) {

@@ -87,6 +87,9 @@ typedef struct {
     int logged_insert_packets;
     uint8_t last_rumble_lg;
     uint8_t last_rumble_sm;
+    uint8_t last_color_r;
+    uint8_t last_color_g;
+    uint8_t last_color_b;
     uint64_t last_rumble_send_us;
     int assigned_slot;
     char assigned_username[64];
@@ -677,8 +680,15 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
     VPadSlotState *s = &g_slots[slot];
     uint64_t now = daemon_sys_time_us();
 
+    // Check for active touch or motion inputs
+    bool has_touch = (data->touch.fingers > 0);
+    bool has_motion = (data->vel.x > 0.05f || data->vel.x < -0.05f ||
+                       data->vel.y > 0.05f || data->vel.y < -0.05f ||
+                       data->vel.z > 0.05f || data->vel.z < -0.05f);
+
     // Determine if pad is in neutral / resting state
     bool is_neutral = (data->buttons == 0 &&
+                       !has_touch && !has_motion &&
                        data->analogButtons.l2 <= 4 &&
                        data->analogButtons.r2 <= 4 &&
                        abs_diff(data->leftStick.x, 128) <= 4 &&
@@ -698,6 +708,12 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
         state_changed = true;
     } else if (abs_diff(data->analogButtons.l2, s->last_sent_data.analogButtons.l2) > 2 ||
                abs_diff(data->analogButtons.r2, s->last_sent_data.analogButtons.r2) > 2) {
+        state_changed = true;
+    } else if (data->touch.fingers != s->last_sent_data.touch.fingers ||
+               (data->touch.fingers > 0 && (data->touch.touch[0].x != s->last_sent_data.touch.touch[0].x ||
+                                            data->touch.touch[0].y != s->last_sent_data.touch.touch[0].y))) {
+        state_changed = true;
+    } else if (has_motion) {
         state_changed = true;
     }
 
@@ -768,19 +784,28 @@ void vpad_poll_rumble(void) {
         if (ret == 0) {
             uint8_t lg = setting[3];
             uint8_t sm = setting[4];
+            uint8_t cr = setting[5];
+            uint8_t cg = setting[6];
+            uint8_t cb = setting[7];
             uint64_t now = daemon_sys_time_us();
 
-            bool changed = (lg != g_slots[i].last_rumble_lg || sm != g_slots[i].last_rumble_sm);
+            bool rumble_changed = (lg != g_slots[i].last_rumble_lg || sm != g_slots[i].last_rumble_sm);
+            bool color_changed = (g_slots[i].source == VPAD_SOURCE_BT &&
+                                 (cr != g_slots[i].last_color_r || cg != g_slots[i].last_color_g || cb != g_slots[i].last_color_b));
             bool keepalive = ((lg > 0 || sm > 0) && (now - g_slots[i].last_rumble_send_us >= 100000ULL));
 
             // Stop condition (lg=0, sm=0): send immediately so vibration cuts off without latency
-            // Dynamic condition (lg>0 || sm>0): rate-limit to at most 50 Hz (20ms interval)
-            // to avoid saturating the USB OUT pipe and starving controller input polling.
+            // Dynamic condition (lg>0 || sm>0 or color change): rate-limit to at most 50 Hz (20ms interval)
+            // to avoid saturating the link and starving controller input polling.
             bool should_send = false;
-            if (changed) {
+            if (rumble_changed) {
                 if (lg == 0 && sm == 0) {
                     should_send = true;
                 } else if (now - g_slots[i].last_rumble_send_us >= 20000ULL) {
+                    should_send = true;
+                }
+            } else if (color_changed) {
+                if (now - g_slots[i].last_rumble_send_us >= 20000ULL) {
                     should_send = true;
                 }
             } else if (keepalive) {
@@ -790,10 +815,13 @@ void vpad_poll_rumble(void) {
             if (should_send) {
                 g_slots[i].last_rumble_lg = lg;
                 g_slots[i].last_rumble_sm = sm;
+                g_slots[i].last_color_r = cr;
+                g_slots[i].last_color_g = cg;
+                g_slots[i].last_color_b = cb;
                 g_slots[i].last_rumble_send_us = now;
 
                 if (g_slots[i].source == VPAD_SOURCE_BT) {
-                    uint8_t color[3] = { setting[5], setting[6], setting[7] };
+                    uint8_t color[3] = { cr, cg, cb };
                     bt_driver_send_rumble(lg, sm, color);
                 } else if (g_slots[i].source == VPAD_SOURCE_USB) {
                     if (g_rumble_cb) {
