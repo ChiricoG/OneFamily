@@ -298,12 +298,8 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
     if (ep_out && p_sceUsbdInterruptTransfer && h) {
         int transferred = 0;
         uint8_t led_pkt[3] = { 0x01, 0x03, 0x02 }; // LED 1 ON (Player 1)
-        int ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 100);
+        int ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 5);
         daemon_log(LOG_LEVEL_INFO, "Xbox 360 LED 1 command sent (ret=0x%08X)", ir);
-        if (ir != 0 && p_sceUsbdClearHalt) {
-            daemon_log(LOG_LEVEL_WARN, "Xbox 360 LED command rejected (0x%08X), executing ClearHalt on ep_out=0x%02X", ir, ep_out);
-            p_sceUsbdClearHalt(h, ep_out);
-        }
     }
 }
 
@@ -1091,11 +1087,10 @@ void usb_driver_poll_step(void) {
     // 2. Read from connected controller
     uint8_t rx[128];
     int transferred = 0;
-    int read_len = sizeof(rx);
-    if (g_usb_state.type == CONTROLLER_DUALSENSE || g_usb_state.type == CONTROLLER_GENERIC_HID) {
-        read_len = 64; // DualSense and Generic HID endpoints have wMaxPacketSize <= 64 bytes
-    }
-    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 16);
+    // 64-byte max packet size covers all supported controllers (Xbox, Switch, DualSense, Stadia, Generic HID)
+    int read_len = 64;
+    // 4ms timeout matches 250 Hz pacing: returns immediately if packet is ready, or unblocks within 4ms
+    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 4);
 
     if (ret == 0 && transferred > 0) {
         s_consecutive_disconnects = 0;
@@ -1494,11 +1489,11 @@ void usb_driver_poll_step(void) {
                 // attempt ClearHalt to reset the endpoint data toggle and retry.
                 // 0x802400FF after probe sequence likely means toggle desync, not a true STALL.
                 int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
-                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors <= 3 || s_consecutive_transfer_errors % 25 == 1)) {
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors >= 10 && s_consecutive_transfer_errors % 25 == 0)) {
                     daemon_log(LOG_LEVEL_WARN, "DualSense EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
-                    daemon_sys_usleep(10000);
+                    daemon_sys_usleep(1000);
                 }
             } else if (g_usb_state.type == CONTROLLER_XBOX360 || g_usb_state.type == CONTROLLER_XBOXONE) {
                 static int s_logged_xb_err = 0;
@@ -1508,11 +1503,11 @@ void usb_driver_poll_step(void) {
                     s_logged_xb_err++;
                 }
                 int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
-                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors % 25 == 1)) {
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors >= 10 && s_consecutive_transfer_errors % 25 == 0)) {
                     daemon_log(LOG_LEVEL_WARN, "%s EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                controller_type_to_str(g_usb_state.type), ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
-                    daemon_sys_usleep(10000);
+                    daemon_sys_usleep(1000);
                 }
             } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
                 daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
