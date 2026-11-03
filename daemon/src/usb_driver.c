@@ -185,6 +185,7 @@ static int      s_usb_vpad_slot = -1;
 // Wait-for-physical-replug state after user cancels picker with B/Circle
 static uint16_t s_replug_vid = 0;
 static uint16_t s_replug_pid = 0;
+static bool     s_share_combo_active = false;
 
 static void close_controller(void) {
     bool had_vpad = (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active());
@@ -227,6 +228,7 @@ static void close_controller(void) {
     s_awaiting_user_pick = false;
     s_picker_cancel_sent = false;
     s_picker_cancel_time_us = 0;
+    s_share_combo_active = false;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
     s_last_ds4.leftStick.x = 128;
     s_last_ds4.leftStick.y = 128;
@@ -881,8 +883,48 @@ static void execute_picker_cancel_teardown(void) {
     daemon_notify("OneFamily: Reconnect controller to use");
 }
 
+static void apply_universal_shortcuts(OrbisPadData* ds4) {
+    bool share_down = (ds4->buttons & DS4_BUTTON_SHARE) != 0;
+
+    if (share_down) {
+        bool combo_matched = false;
+
+        // 1. Share + Options (Back + Start / Minus + Plus / Select + Start) -> Touchpad Click
+        if (ds4->buttons & DS4_BUTTON_OPTIONS) {
+            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
+            ds4->buttons |= DS4_BUTTON_TOUCHPAD;
+            combo_matched = true;
+        }
+        // 2. Share + D-Pad Up (Back + D-Pad Up) -> Touchpad Click
+        else if (ds4->buttons & DS4_BUTTON_DPAD_UP) {
+            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
+            ds4->buttons |= DS4_BUTTON_TOUCHPAD;
+            combo_matched = true;
+        }
+        // 3. Share + D-Pad Down (Back + D-Pad Down) -> PS Button (Home)
+        else if (ds4->buttons & DS4_BUTTON_DPAD_DOWN) {
+            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
+            ds4->buttons |= DS4_BUTTON_PS;
+            combo_matched = true;
+        }
+
+        if (combo_matched) {
+            s_share_combo_active = true;
+        } else if (s_share_combo_active) {
+            // Asynchronous release de-ghosting:
+            // The secondary button was released slightly before Share.
+            // Suppress Share until Share is physically released to avoid accidental screenshots / Share menu.
+            ds4->buttons &= ~DS4_BUTTON_SHARE;
+        }
+    } else {
+        // Share was fully released: reset the combo lock
+        s_share_combo_active = false;
+    }
+}
+
 static void handle_pad_input_and_send(const OrbisPadData* ds4) {
     OrbisPadData out_ds4 = *ds4;
+    apply_universal_shortcuts(&out_ds4);
 
     if (s_awaiting_user_pick) {
         bool circle = (ds4->buttons & DS4_BUTTON_CIRCLE) != 0;
@@ -1011,16 +1053,6 @@ void usb_driver_poll_step(void) {
                 if (guide_pressed) {
                     ds4.buttons |= get_guide_button_mask();
                 }
-                // Combo: Back (Share) + Start (Options) -> Touchpad Click (Map/Inventory in games)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-                }
-                // Combo: Back (Share) + D-Pad Down -> PS Button (Home)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-                    ds4.buttons |= DS4_BUTTON_PS;
-                }
                 handle_pad_input_and_send(&ds4);
             }
         } else if (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4) {
@@ -1028,16 +1060,6 @@ void usb_driver_poll_step(void) {
                 translator_convert_xboxone((const XboxOneReport*)rx, &ds4, &s_trans_cfg);
                 if (s_xboxone_guide) {
                     ds4.buttons |= get_guide_button_mask();
-                }
-                // Combo: Back (Share) + Start (Options) -> Touchpad Click (Map/Inventory in games)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-                }
-                // Combo: Back (Share) + D-Pad Down -> PS Button (Home)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-                    ds4.buttons |= DS4_BUTTON_PS;
                 }
                 handle_pad_input_and_send(&ds4);
             } else if (rx[0] == XBOXONE_REPORT_GUIDE) {
@@ -1057,12 +1079,16 @@ void usb_driver_poll_step(void) {
                                guide_pressed ? "PRESSED" : "RELEASED", gval, transferred, get_guide_button_mask());
                 }
                 s_xboxone_guide = guide_pressed;
-                s_last_ds4.buttons &= ~DS4_BUTTON_PS;
+                s_last_ds4.buttons &= ~(DS4_BUTTON_PS | DS4_BUTTON_TOUCHPAD | DS4_BUTTON_SHARE);
                 if (s_xboxone_guide) {
                     s_last_ds4.buttons |= get_guide_button_mask();
                 }
                 s_last_ds4.timestamp = daemon_sys_time_us();
-                vpad_send_data(&s_last_ds4);
+                if (s_usb_vpad_slot >= 0) {
+                    vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
+                } else {
+                    vpad_send_data(&s_last_ds4);
+                }
             } else {
                 // Handle general GIP control / status / announce packets requiring host ACK
                 if (transferred >= 3 && ((rx[1] & 0x10) || (rx[1] & 0x01))) {
@@ -1079,14 +1105,6 @@ void usb_driver_poll_step(void) {
             if (sw->buttons1 & SWITCH_BTN_HOME) {
                 ds4.buttons |= get_guide_button_mask();
             }
-            if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
-                ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-                ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-            }
-            if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
-                ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-                ds4.buttons |= DS4_BUTTON_PS;
-            }
             handle_pad_input_and_send(&ds4);
         } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO && transferred >= 11) {
             static int s_logged_sw_report = 0;
@@ -1099,17 +1117,6 @@ void usb_driver_poll_step(void) {
             if (rx[0] == 0x30 || rx[0] == 0x21 || rx[0] == 0x31) {
                 if (transferred >= 12) {
                     translator_convert_switch_pro((const SwitchFullReport*)rx, &ds4, &s_trans_cfg);
-
-                    // Combo: Minus (Share) + Plus (Options) -> Touchpad Click
-                    if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
-                        ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-                        ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-                    }
-                    // Combo: Minus (Share) + D-Pad Down -> PS Button (Home)
-                    if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
-                        ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-                        ds4.buttons |= DS4_BUTTON_PS;
-                    }
 
                     static uint32_t s_last_sw_btn = 0;
                     if (ds4.buttons != s_last_sw_btn) {
@@ -1138,10 +1145,6 @@ void usb_driver_poll_step(void) {
             }
         } else if (g_usb_state.type == CONTROLLER_DS3 && transferred >= sizeof(DS3Report)) {
             translator_convert_ds3((const DS3Report*)rx, &ds4, &s_trans_cfg);
-            if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
-                ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-                ds4.buttons |= DS4_BUTTON_PS;
-            }
             handle_pad_input_and_send(&ds4);
         } else if (g_usb_state.type == CONTROLLER_STADIA && transferred >= 9) {
             static int s_logged_stadia_report = 0;
@@ -1167,17 +1170,6 @@ void usb_driver_poll_step(void) {
             if (stadia) {
                 translator_convert_stadia(stadia, &ds4, &s_trans_cfg);
 
-                // Combo: Options (Share) + Menu (Options) -> Touchpad Click (Map/Inventory in games)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-                }
-                // Combo: Options (Share) + D-Pad Down -> PS Button (Home)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-                    ds4.buttons |= DS4_BUTTON_PS;
-                }
-
                 static uint32_t s_last_stadia_btn = 0;
                 if (ds4.buttons != s_last_stadia_btn) {
                     s_last_stadia_btn = ds4.buttons;
@@ -1195,22 +1187,6 @@ void usb_driver_poll_step(void) {
             }
 
             if (generic_hid_parse_report(rx, transferred, &ds4, &s_trans_cfg)) {
-                // Combo: Share + Options (Back + Start) -> PS Button (Home)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-                    ds4.buttons |= DS4_BUTTON_PS;
-                }
-                // Combo: Share + D-Pad Down -> PS Button (Home)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-                    ds4.buttons |= DS4_BUTTON_PS;
-                }
-                // Combo: Share + D-Pad Up -> Touchpad Click (Map/Inventory in games)
-                if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP)) {
-                    ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
-                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-                }
-
                 handle_pad_input_and_send(&ds4);
             }
         }

@@ -681,7 +681,7 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
     uint64_t now = daemon_sys_time_us();
 
     // Check for active touch or motion inputs
-    bool has_touch = (data->touch.fingers > 0);
+    bool has_touch = (data->touch.fingers > 0) || ((data->buttons & DS4_BUTTON_TOUCHPAD) != 0);
     bool has_motion = (data->vel.x > 0.05f || data->vel.x < -0.05f ||
                        data->vel.y > 0.05f || data->vel.y < -0.05f ||
                        data->vel.z > 0.05f || data->vel.z < -0.05f);
@@ -734,6 +734,19 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
     send_data.count = s->packet_counter;
     if (send_data.timestamp == 0) {
         send_data.timestamp = now;
+    }
+
+    // Capacitive Touchpad Emulation for Touchpad Click:
+    // On official DualShock 4 hardware, clicking the touchpad microswitch physically requires
+    // resting a finger on the capacitive touch surface. Games like Ghost of Tsushima, Horizon,
+    // God of War, Spider-Man, The Last of Us, and The Witcher 3 verify touch.fingers > 0
+    // when ORBIS_PAD_BUTTON_TOUCH_PAD is pressed, completely ignoring the click if fingers == 0.
+    // If the controller has no native capacitive touch data, synthesize a valid centered touch point.
+    if ((send_data.buttons & DS4_BUTTON_TOUCHPAD) && send_data.touch.fingers == 0) {
+        send_data.touch.fingers = 1;
+        send_data.touch.touch[0].finger = 0;
+        send_data.touch.touch[0].x = 960;
+        send_data.touch.touch[0].y = 470;
     }
 
     int ret = p_scePadVirtualDeviceInsertData(s->handle, &send_data);

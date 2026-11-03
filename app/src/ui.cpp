@@ -630,7 +630,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int activeTab, int selecte
         draw_image(scene, iconGuide, CARD_X + 24, 736);
         draw_text(scene, "Virtual Pad Shortcuts & System Integration", fontCardTitle, CARD_X + 90, 750, COLOR_WHITE);
         draw_text(scene, "- Central Guide / Home: Always acts as native PS Button (tap = Home, hold = Quick Menu).", fontCardDesc, CARD_X + 90, 778, COLOR_TEXT_DIM);
-        draw_text(scene, "- Shortcuts: Back + Start or Share + Down = PS Button | Share + Up = Touchpad Click.", fontCardDesc, CARD_X + 90, 806, COLOR_TEXT_DIM);
+        draw_text(scene, "- Shortcuts: Back + Start or Share + Up = Touchpad Click | Share + Down = PS Button.", fontCardDesc, CARD_X + 90, 806, COLOR_TEXT_DIM);
 
         // 5. Footer for Info
         scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);

@@ -34,6 +34,7 @@ static int s_bt_queue = -1;
 static bool s_bt_registered = false;
 static bool s_bt_supported = false;
 static bool s_dualsense_connected = false;
+static bool s_bt_share_combo_active = false;
 static int s_bt_vpad_slot = -1;
 static uint64_t s_physical_address = 0;
 static uint64_t s_last_input_time = 0;
@@ -688,16 +689,39 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
     if (data[9] & 0x01) ds4.buttons |= DS4_BUTTON_PS;
     if (data[9] & 0x02) ds4.buttons |= DS4_BUTTON_TOUCHPAD;
 
-    // Quick Combo: Create + Options -> Touchpad Click
-    if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) == (DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS)) {
-        ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-        ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-    }
+    // Universal Shortcuts & De-ghosting for DualSense BT
+    bool share_down = (ds4.buttons & DS4_BUTTON_SHARE) != 0;
 
-    // Quick Combo: Create + D-Pad Down -> PS Button
-    if ((ds4.buttons & (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) == (DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN)) {
-        ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-        ds4.buttons |= DS4_BUTTON_PS;
+    if (share_down) {
+        bool combo_matched = false;
+
+        // 1. Create + Options -> Touchpad Click
+        if (ds4.buttons & DS4_BUTTON_OPTIONS) {
+            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
+            ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+            combo_matched = true;
+        }
+        // 2. Create + D-Pad Up -> Touchpad Click
+        else if (ds4.buttons & DS4_BUTTON_DPAD_UP) {
+            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
+            ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+            combo_matched = true;
+        }
+        // 3. Create + D-Pad Down -> PS Button
+        else if (ds4.buttons & DS4_BUTTON_DPAD_DOWN) {
+            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
+            ds4.buttons |= DS4_BUTTON_PS;
+            combo_matched = true;
+        }
+
+        if (combo_matched) {
+            s_bt_share_combo_active = true;
+        } else if (s_bt_share_combo_active) {
+            // Asynchronous release de-ghosting: suppress Share/Create
+            ds4.buttons &= ~DS4_BUTTON_SHARE;
+        }
+    } else {
+        s_bt_share_combo_active = false;
     }
 
     ds4.connected = 1;
@@ -776,6 +800,7 @@ void bt_driver_poll_step(void) {
         // Check 3-second timeout for disconnection
         if (s_dualsense_connected && (daemon_sys_time_us() - s_last_input_time > 3000000ULL)) {
             s_dualsense_connected = false;
+            s_bt_share_combo_active = false;
             s_physical_address = 0;
             reset_calibration();
             s_orientation[0] = 0.0f; s_orientation[1] = 0.0f; s_orientation[2] = 0.0f; s_orientation[3] = 1.0f;
@@ -991,6 +1016,7 @@ void bt_driver_shutdown(void) {
         s_bt_vpad_slot = -1;
     }
     s_dualsense_connected = false;
+    s_bt_share_combo_active = false;
     s_physical_address = 0;
     reset_calibration();
     s_orientation[0] = 0.0f; s_orientation[1] = 0.0f; s_orientation[2] = 0.0f; s_orientation[3] = 1.0f;
