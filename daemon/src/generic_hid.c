@@ -856,14 +856,14 @@ static void send_hid_output_packet(libusb_device_handle* h, uint8_t ep_out, uint
     int transferred = 0;
     int sent = 0;
     if (ep_out != 0 && intr_transfer) {
-        if (intr_transfer(h, ep_out, pkt, len, &transferred, 50) == 0) {
+        if (intr_transfer(h, ep_out, pkt, len, &transferred, 2) == 0) {
             sent = 1;
         }
     }
     if (!sent && ctrl_transfer) {
         // HID Class-Specific Request: SET_REPORT (bRequest=0x09), Report Type: Output (0x02)
         uint16_t wValue = (uint16_t)(0x0200 | report_id);
-        ctrl_transfer(h, 0x21, 0x09, wValue, (uint16_t)iface, pkt, (uint16_t)len, 50);
+        ctrl_transfer(h, 0x21, 0x09, wValue, (uint16_t)iface, pkt, (uint16_t)len, 2);
     }
 }
 
@@ -925,10 +925,10 @@ void generic_hid_send_rumble(libusb_device_handle* h, uint16_t vid, uint16_t pid
         // 81 11 04 08 <dur16 LE> <left> <right> (duration: 0x0400 = 1024 ms)
         uint8_t pkt81[8] = { 0x81, 0x11, 0x04, 0x08, 0x00, 0x04, large_motor, small_motor };
         if (ep_out != 0 && intr_transfer) {
-            intr_transfer(h, ep_out, pkt81, sizeof(pkt81), &transferred, 50);
+            intr_transfer(h, ep_out, pkt81, sizeof(pkt81), &transferred, 2);
         }
         if (ctrl_transfer) {
-            ctrl_transfer(h, 0x21, 0x09, 0x0281, (uint16_t)iface, pkt81, sizeof(pkt81), 50);
+            ctrl_transfer(h, 0x21, 0x09, 0x0281, (uint16_t)iface, pkt81, sizeof(pkt81), 2);
         }
         if (s_ctx.out_present && s_ctx.out_rid == 0x05) {
             uint8_t pkt05[5] = { 0x05, large_motor, small_motor, 0x00, 0x00 };

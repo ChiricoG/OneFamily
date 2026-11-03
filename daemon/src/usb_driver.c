@@ -829,15 +829,7 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         ep = (g_usb_state.type == CONTROLLER_XBOXONE) ? 0x02 : 0x01;
     }
 
-    static uint8_t s_log_lg = 0xFF;
-    static uint8_t s_log_sm = 0xFF;
-    if (large_motor != s_log_lg || small_motor != s_log_sm) {
-        s_log_lg = large_motor;
-        s_log_sm = small_motor;
-        daemon_log(LOG_LEVEL_INFO, "Rumble requested: L=%d R=%d (type=%d ep=0x%02X)",
-                   large_motor, small_motor, g_usb_state.type, ep);
-    }
-
+    // Do not spam synchronous disk I/O on dynamic rumble steps to avoid thread latency
     int transferred = 0;
     if (g_usb_state.type == CONTROLLER_XBOX360) {
         if (g_usb_state.is_wireless) {
@@ -847,20 +839,20 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
                 0x00, large_motor, small_motor, 0x00,
                 0x00, 0x00, 0x00, 0x00
             };
-            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt12, sizeof(pkt12), &transferred, 50);
+            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt12, sizeof(pkt12), &transferred, 2);
         } else {
             if (s_x360_ep_out_stalls >= 5) {
                 // If endpoint OUT is permanently stalled on this controller, avoid flooding
                 return;
             }
             uint8_t pkt[8] = { 0x00, 0x08, 0x00, large_motor, small_motor, 0x00, 0x00, 0x00 };
-            int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+            int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
             if (ret != 0) {
                 if ((ret == 0x802400FF || ret == 0x80240009) && p_sceUsbdClearHalt) {
                     p_sceUsbdClearHalt(g_dev_handle, ep);
                 }
                 uint8_t pkt4[4] = { 0x00, 0x04, large_motor, small_motor };
-                int ret4 = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, 50);
+                int ret4 = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, 2);
                 if (ret4 != 0) {
                     if ((ret4 == 0x802400FF || ret4 == 0x80240009) && p_sceUsbdClearHalt) {
                         p_sceUsbdClearHalt(g_dev_handle, ep);
@@ -884,10 +876,13 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
             small_motor,
             0xFF, 0x00, 0xFF
         };
-        p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
+        if (ret != 0 && p_sceUsbdClearHalt && (ret == 0x80240009 || ret == 0x802400FF)) {
+            p_sceUsbdClearHalt(g_dev_handle, ep);
+        }
     } else if (g_usb_state.type == CONTROLLER_DS3) {
         uint8_t pkt[8] = { 0x00, 0xFF, 0x00, (small_motor > 0) ? 1 : 0, large_motor, 0x00, 0x00, 0x00 };
-        p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+        p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
     } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO || g_usb_state.type == CONTROLLER_SWITCH) {
         uint8_t pkt[10];
         static uint8_t s_switch_rumble_cnt = 0;
@@ -897,9 +892,9 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         encode_switch_rumble(&pkt[2], large_motor, small_motor); // Left motor
         encode_switch_rumble(&pkt[6], large_motor, small_motor); // Right motor
 
-        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
         if (ret != 0 && p_sceUsbdControlTransfer) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0210, g_claimed_interface, pkt, sizeof(pkt), 50);
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0210, g_claimed_interface, pkt, sizeof(pkt), 2);
         }
     } else if (g_usb_state.type == CONTROLLER_STADIA) {
         // Stadia Rumble Output Report (Report ID 0x05, 5 bytes)
@@ -917,12 +912,12 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         };
         int sent = 0;
         if (ep != 0) {
-            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50) == 0) {
+            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2) == 0) {
                 sent = 1;
             }
         }
         if (!sent && p_sceUsbdControlTransfer) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, pkt, sizeof(pkt), 50);
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, pkt, sizeof(pkt), 2);
         }
     } else if (g_usb_state.type == CONTROLLER_DUALSENSE) {
         if (!vpad_is_active()) return;
@@ -941,7 +936,7 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         pkt[44] = 0x04;       // player_leds: BIT(2) (Player 1 center LED)
         pkt[47] = 128;        // lightbar_blue (128, Linux default)
         if (ep != 0 && p_sceUsbdInterruptTransfer) {
-            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 50);
+            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
         }
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         generic_hid_send_rumble(g_dev_handle, g_usb_state.vid, g_usb_state.pid,

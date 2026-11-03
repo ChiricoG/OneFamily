@@ -760,7 +760,21 @@ void vpad_poll_rumble(void) {
             bool changed = (lg != g_slots[i].last_rumble_lg || sm != g_slots[i].last_rumble_sm);
             bool keepalive = ((lg > 0 || sm > 0) && (now - g_slots[i].last_rumble_send_us >= 100000ULL));
 
-            if (changed || keepalive) {
+            // Stop condition (lg=0, sm=0): send immediately so vibration cuts off without latency
+            // Dynamic condition (lg>0 || sm>0): rate-limit to at most 50 Hz (20ms interval)
+            // to avoid saturating the USB OUT pipe and starving controller input polling.
+            bool should_send = false;
+            if (changed) {
+                if (lg == 0 && sm == 0) {
+                    should_send = true;
+                } else if (now - g_slots[i].last_rumble_send_us >= 20000ULL) {
+                    should_send = true;
+                }
+            } else if (keepalive) {
+                should_send = true;
+            }
+
+            if (should_send) {
                 g_slots[i].last_rumble_lg = lg;
                 g_slots[i].last_rumble_sm = sm;
                 g_slots[i].last_rumble_send_us = now;
