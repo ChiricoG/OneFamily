@@ -31,9 +31,13 @@ struct CalibrationState {
 struct TesterState {
     int rumbleFrames;       // countdown for active rumble test (e.g. 180 frames = 3s)
     int rumblePhase;        // 0 = none, 1 = left (heavy), 2 = right (light), 3 = both
+    int selectedSlot;       // 0..3 (Player 1..4)
+    bool slotConnected[4];  // whether each slot is currently active/connected
     CalibrationState calib;
 
-    TesterState() : rumbleFrames(0), rumblePhase(0) {}
+    TesterState() : rumbleFrames(0), rumblePhase(0), selectedSlot(0) {
+        for (int i = 0; i < 4; i++) slotConnected[i] = false;
+    }
 };
 
 enum AppTabId {

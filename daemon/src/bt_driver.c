@@ -33,15 +33,10 @@ static volatile bool s_bt_running = false;
 static int s_bt_fd = -1;
 static int s_bt_queue = -1;
 static bool s_bt_registered = false;
+static int s_bt_reg_count = 0;
+static int s_bt_edge_reg_count = 0;
 static bool s_bt_supported = false;
-static bool s_dualsense_connected = false;
-static bool s_bt_share_combo_active = false;
-static int s_bt_vpad_slot = -1;
-static uint64_t s_physical_address = 0;
-static uint64_t s_last_input_time = 0;
 static uint32_t s_current_fw_bcd = 0x1250;
-static uint8_t s_battery_pct = 100;
-static uint8_t s_battery_status = 0;
 
 // DualSense IMU Calibration & 3D Motion Orientation State
 typedef struct {
@@ -50,22 +45,141 @@ typedef struct {
     float accel_bias[3];
 } DualSenseCalibration;
 
-static DualSenseCalibration s_calibration;
-static bool s_calibration_valid = false;
-static bool s_calibration_requested = false;
-static uint64_t s_last_calibration_attempt = 0;
-static float s_orientation[4] = { 0.0f, 0.0f, 0.0f, 1.0f }; // x, y, z, w
-static uint64_t s_last_motion_time = 0;
+#define BT_INPUT_TIMEOUT_US 10000000ULL
+#define BT_PAD_GRACE_US     600000000ULL
 
-static void reset_calibration(void) {
-    for (int i = 0; i < 3; ++i) {
-        s_calibration.gyro_scale[i] = (2000.0f * 0.01745329252f) / 32768.0f;
-        s_calibration.accel_scale[i] = 1.0f / 8192.0f;
-        s_calibration.accel_bias[i] = 0.0f;
+typedef struct {
+    uint64_t address;         // Bluetooth MAC address (0 = free entry)
+    int      vpad_slot;       // virtual pad slot index (0..3, or -1)
+    bool     connected;       // reports currently arriving
+    uint64_t last_input_time; // timestamp of last report
+    uint64_t away_since;      // timestamp when pad went silent during grace period
+    uint32_t reports_seen;
+    uint32_t decode_drops;
+    uint8_t  last_drop_len;
+    uint8_t  last_drop_id;
+    uint8_t  rumble_seq;      // sequence tag for output reports
+    uint8_t  battery_pct;
+    uint8_t  battery_status;
+    bool     share_combo_active;
+    float    orientation[4];  // x, y, z, w
+    uint64_t last_motion_time;
+    DualSenseCalibration calibration;
+    bool     calibration_valid;
+    bool     calibration_requested;
+    uint64_t last_calibration_attempt;
+} BtDevice;
+
+static BtDevice s_devices[BT_MAX_DEVICES];
+
+static void bt_device_init_entry(BtDevice *dev) {
+    if (!dev) return;
+    memset(dev, 0, sizeof(*dev));
+    dev->vpad_slot = -1;
+    dev->battery_pct = 100;
+    dev->orientation[3] = 1.0f;
+    for (int a = 0; a < 3; ++a) {
+        dev->calibration.gyro_scale[a] = (2000.0f * 0.01745329252f) / 32768.0f;
+        dev->calibration.accel_scale[a] = 1.0f / 8192.0f;
+        dev->calibration.accel_bias[a] = 0.0f;
     }
-    s_calibration_valid = false;
-    s_calibration_requested = false;
-    s_last_calibration_attempt = 0;
+}
+
+static void bt_devices_reset(void) {
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        bt_device_init_entry(&s_devices[i]);
+    }
+}
+
+static void bt_dev_release(BtDevice *dev) {
+    if (!dev) return;
+    if (dev->vpad_slot >= 0) {
+        vpad_slot_close(dev->vpad_slot);
+    }
+    bt_device_init_entry(dev);
+}
+
+static void bt_dev_mark_away(BtDevice *dev, uint64_t now) {
+    if (!dev) return;
+    dev->connected = false;
+    dev->away_since = now;
+
+    if (dev->vpad_slot >= 0) {
+        OrbisPadData neutral;
+        memset(&neutral, 0, sizeof(neutral));
+        neutral.leftStick.x = 128;
+        neutral.leftStick.y = 128;
+        neutral.rightStick.x = 128;
+        neutral.rightStick.y = 128;
+        vpad_send_data_slot(dev->vpad_slot, &neutral);
+    }
+}
+
+static BtDevice* bt_dev_find(uint64_t address) {
+    if (!address) return NULL;
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (s_devices[i].address == address) return &s_devices[i];
+    }
+    return NULL;
+}
+
+static BtDevice* bt_dev_acquire(uint64_t address) {
+    BtDevice *dev = bt_dev_find(address);
+    if (dev) return dev;
+    if (!address) return NULL;
+
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (s_devices[i].address == 0) {
+            bt_device_init_entry(&s_devices[i]);
+            s_devices[i].address = address;
+            s_devices[i].last_input_time = daemon_sys_time_us();
+            daemon_log(LOG_LEVEL_INFO, "DualSense BT: new device 0x%llX (entry %d)",
+                       (unsigned long long)address, i);
+            return &s_devices[i];
+        }
+    }
+
+    BtDevice *oldest = NULL;
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (s_devices[i].away_since != 0) {
+            if (!oldest || s_devices[i].away_since < oldest->away_since) {
+                oldest = &s_devices[i];
+            }
+        }
+    }
+    if (oldest) {
+        daemon_log(LOG_LEVEL_INFO,
+                   "DualSense BT: all %d entries in use; reclaiming 0x%llX (Slot %d), away longest, for 0x%llX",
+                   BT_MAX_DEVICES, (unsigned long long)oldest->address, oldest->vpad_slot,
+                   (unsigned long long)address);
+        bt_dev_release(oldest);
+        return bt_dev_acquire(address);
+    }
+
+    daemon_log(LOG_LEVEL_WARN,
+               "DualSense BT: all %d device entries in use and connected, ignoring address 0x%llX",
+               BT_MAX_DEVICES, (unsigned long long)address);
+    return NULL;
+}
+
+static long bt_register_pair(uint16_t vid, uint16_t pid, const char *what) {
+    struct {
+        uint16_t vendor;
+        uint16_t product;
+    } device = { vid, pid };
+    long rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8004622BUL, (long)&device);
+    daemon_log(LOG_LEVEL_INFO, "register %s (%04X:%04X) = %ld", what, vid, pid, rc);
+    return rc;
+}
+
+static long bt_unregister_pair(uint16_t vid, uint16_t pid) {
+    struct {
+        uint16_t vendor;
+        uint16_t product;
+    } device = { vid, pid };
+    long rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8004622CUL, (long)&device);
+    daemon_log(LOG_LEVEL_INFO, "unregister (%04X:%04X) = %ld", vid, pid, rc);
+    return rc;
 }
 
 // -------------------------------------------------------------
@@ -469,35 +583,44 @@ static inline float root_positive(float value) {
     return result;
 }
 
-static void bt_write_status_file(bool connected, uint8_t battery_pct, uint8_t battery_status) {
+static void bt_write_status_file(void) {
     daemon_sys_mkdir("/data", 0777);
     daemon_sys_mkdir("/data/onefamily", 0777);
     int fd = daemon_sys_open("/data/onefamily/onefamily.status", 0x0001 | 0x0200 | 0x0400, 0666);
     if (fd >= 0) {
-        char buf[320];
-        int len = snprintf(buf, sizeof(buf),
+        char buf[1024];
+        int count = bt_driver_connected_count();
+        int offset = snprintf(buf, sizeof(buf),
             "connected = %d\n"
             "type = dualsense_bt\n"
             "vid = 0x054C\n"
             "pid = 0x0CE6\n"
             "name = DualSense Wireless\n"
             "nbuttons = 16\n"
-            "player_slot = %d\n"
-            "user_name = %s\n"
-            "battery_pct = %d\n"
-            "battery_charging = %d\n",
-            connected ? 1 : 0,
-            connected ? vpad_get_assigned_slot_num(s_bt_vpad_slot) : 1,
-            connected ? vpad_get_assigned_user() : "None",
-            battery_pct,
-            (battery_status == 1) ? 1 : 0
-        );
-        daemon_sys_write(fd, buf, len);
+            "count = %d\n",
+            count > 0 ? 1 : 0, count);
+
+        for (int i = 0; i < BT_MAX_DEVICES && offset < (int)sizeof(buf) - 120; ++i) {
+            if (s_devices[i].connected) {
+                int slot = vpad_get_assigned_slot_num(s_devices[i].vpad_slot);
+                offset += snprintf(buf + offset, sizeof(buf) - offset,
+                    "dev_%d_slot = %d\n"
+                    "dev_%d_mac = %llX\n"
+                    "dev_%d_battery = %d\n"
+                    "dev_%d_charging = %d\n",
+                    i, slot,
+                    i, (unsigned long long)s_devices[i].address,
+                    i, s_devices[i].battery_pct,
+                    i, s_devices[i].battery_status == 1 ? 1 : 0);
+            }
+        }
+        daemon_sys_write(fd, buf, offset);
         daemon_sys_close(fd);
     }
 }
 
-static void extended_sample(OrbisPadData* ds4, const uint8_t* report, float dt) {
+static void extended_sample(BtDevice* dev, OrbisPadData* ds4, const uint8_t* report, float dt) {
+    if (!dev) return;
     const uint8_t* data = report + 2;
 
     // 1. Touchpad Multitouch (2 contact points)
@@ -534,24 +657,24 @@ static void extended_sample(OrbisPadData* ds4, const uint8_t* report, float dt) 
 
     float omega[3];
     // Angular velocity in rad/s
-    ds4->vel.x = (float)raw_gyro[0] * s_calibration.gyro_scale[0];
-    ds4->vel.y = (float)raw_gyro[1] * s_calibration.gyro_scale[1];
-    ds4->vel.z = (float)raw_gyro[2] * s_calibration.gyro_scale[2];
+    ds4->vel.x = (float)raw_gyro[0] * dev->calibration.gyro_scale[0];
+    ds4->vel.y = (float)raw_gyro[1] * dev->calibration.gyro_scale[1];
+    ds4->vel.z = (float)raw_gyro[2] * dev->calibration.gyro_scale[2];
     omega[0] = ds4->vel.x;
     omega[1] = ds4->vel.y;
     omega[2] = ds4->vel.z;
 
     // Acceleration in g
-    ds4->acell.x = ((float)raw_accel[0] - s_calibration.accel_bias[0]) * s_calibration.accel_scale[0];
-    ds4->acell.y = ((float)raw_accel[1] - s_calibration.accel_bias[1]) * s_calibration.accel_scale[1];
-    ds4->acell.z = ((float)raw_accel[2] - s_calibration.accel_bias[2]) * s_calibration.accel_scale[2];
+    ds4->acell.x = ((float)raw_accel[0] - dev->calibration.accel_bias[0]) * dev->calibration.accel_scale[0];
+    ds4->acell.y = ((float)raw_accel[1] - dev->calibration.accel_bias[1]) * dev->calibration.accel_scale[1];
+    ds4->acell.z = ((float)raw_accel[2] - dev->calibration.accel_bias[2]) * dev->calibration.accel_scale[2];
 
     // 3. 3D Orientation Quaternion Integration (Diram1x complementary filter)
     if (dt > 0.0f && dt <= 0.1f) {
-        float x = s_orientation[0];
-        float y = s_orientation[1];
-        float z = s_orientation[2];
-        float w = s_orientation[3];
+        float x = dev->orientation[0];
+        float y = dev->orientation[1];
+        float z = dev->orientation[2];
+        float w = dev->orientation[3];
 
         float magnitude = root_positive(ds4->acell.x * ds4->acell.x +
                                         ds4->acell.y * ds4->acell.y +
@@ -569,35 +692,35 @@ static void extended_sample(OrbisPadData* ds4, const uint8_t* report, float dt) 
         }
 
         float half = dt * 0.5f;
-        s_orientation[0] += ( w * omega[0] + y * omega[2] - z * omega[1]) * half;
-        s_orientation[1] += ( w * omega[1] + z * omega[0] - x * omega[2]) * half;
-        s_orientation[2] += ( w * omega[2] + x * omega[1] - y * omega[0]) * half;
-        s_orientation[3] += (-x * omega[0] - y * omega[1] - z * omega[2]) * half;
+        dev->orientation[0] += ( w * omega[0] + y * omega[2] - z * omega[1]) * half;
+        dev->orientation[1] += ( w * omega[1] + z * omega[0] - x * omega[2]) * half;
+        dev->orientation[2] += ( w * omega[2] + x * omega[1] - y * omega[0]) * half;
+        dev->orientation[3] += (-x * omega[0] - y * omega[1] - z * omega[2]) * half;
 
-        float norm = s_orientation[0] * s_orientation[0] +
-                     s_orientation[1] * s_orientation[1] +
-                     s_orientation[2] * s_orientation[2] +
-                     s_orientation[3] * s_orientation[3];
+        float norm = dev->orientation[0] * dev->orientation[0] +
+                     dev->orientation[1] * dev->orientation[1] +
+                     dev->orientation[2] * dev->orientation[2] +
+                     dev->orientation[3] * dev->orientation[3];
         norm = root_positive(norm);
         if (norm > 0.0001f) {
-            s_orientation[0] /= norm;
-            s_orientation[1] /= norm;
-            s_orientation[2] /= norm;
-            s_orientation[3] /= norm;
+            dev->orientation[0] /= norm;
+            dev->orientation[1] /= norm;
+            dev->orientation[2] /= norm;
+            dev->orientation[3] /= norm;
         }
     }
 
-    ds4->quat.x = s_orientation[0];
-    ds4->quat.y = s_orientation[1];
-    ds4->quat.z = s_orientation[2];
-    ds4->quat.w = s_orientation[3];
+    ds4->quat.x = dev->orientation[0];
+    ds4->quat.y = dev->orientation[1];
+    ds4->quat.z = dev->orientation[2];
+    ds4->quat.w = dev->orientation[3];
 }
 
 // -------------------------------------------------------------
 // Bluetooth Report 0x31 / 0x01 Decoder
 // -------------------------------------------------------------
 
-static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
+static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, size_t length) {
     static const uint32_t dpad_map[9] = {
         DS4_BUTTON_DPAD_UP,
         DS4_BUTTON_DPAD_UP | DS4_BUTTON_DPAD_RIGHT,
@@ -610,10 +733,13 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
         0
     };
 
-    if (!report) return;
+    if (!dev || !report) return;
 
     uint8_t simple[10] = {0};
     const uint8_t* data = NULL;
+
+    dev->last_drop_len = (uint8_t)(length > 255 ? 255 : length);
+    dev->last_drop_id = report[0];
 
     if (length == 10 && report[0] == 0x01) {
         // Remap 10-byte simple report to match 78-byte payload indices (Diram1x logic)
@@ -632,35 +758,51 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
                                 ((uint32_t)report[77] << 24);
         uint32_t computed_crc = bt_calc_crc32(0xA1, report, 74);
         if (computed_crc != expected_crc) {
+            dev->decode_drops++;
             return; // CRC mismatch: corrupted Bluetooth packet
         }
         data = report + 2; // Data payload begins at offset 2
     } else {
+        dev->decode_drops++;
         return;
     }
 
     if (!data) return;
 
     unsigned direction = data[7] & 0x0F;
-    if (direction > 8) return;
-
-    if (!s_dualsense_connected) {
-        s_dualsense_connected = true;
-        if (s_bt_vpad_slot < 0) {
-            vpad_slot_open(VPAD_SOURCE_BT, &s_bt_vpad_slot);
-        }
-        int slot_num = vpad_get_assigned_slot_num(s_bt_vpad_slot);
-        if (slot_num == 2) {
-            daemon_notify("OneFamily: DualSense Wireless (Player 2)");
-        } else {
-            daemon_notify("OneFamily: DualSense Wireless Connected");
-        }
-        daemon_log(LOG_LEVEL_INFO, "controller_connected: DualSense BT (Slot %d, Player %d)",
-                   s_bt_vpad_slot, slot_num);
-        bt_write_status_file(true, 100, 0);
+    if (direction > 8) {
+        dev->decode_drops++;
+        return;
     }
 
-    s_last_input_time = daemon_sys_time_us();
+    if (!dev->connected) {
+        if (dev->vpad_slot >= 0) {
+            // Reconnecting within grace period!
+            dev->connected = true;
+            dev->away_since = 0;
+            int slot_num = vpad_get_assigned_slot_num(dev->vpad_slot);
+            daemon_notify("OneFamily: DualSense (Player %d) Reconnected", slot_num);
+            daemon_log(LOG_LEVEL_INFO, "controller_reconnected: DualSense BT 0x%llX (Slot %d, Player %d)",
+                       (unsigned long long)dev->address, dev->vpad_slot, slot_num);
+        } else {
+            // New device connection
+            if (vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot) != 0 || dev->vpad_slot < 0) {
+                daemon_log(LOG_LEVEL_WARN, "DualSense BT 0x%llX: no virtual pad slot available",
+                           (unsigned long long)dev->address);
+                dev->vpad_slot = -1;
+                return;
+            }
+            dev->connected = true;
+            dev->away_since = 0;
+            int slot_num = vpad_get_assigned_slot_num(dev->vpad_slot);
+            daemon_notify("OneFamily: DualSense Wireless (Player %d)", slot_num);
+            daemon_log(LOG_LEVEL_INFO, "controller_connected: DualSense BT 0x%llX (Slot %d, Player %d)",
+                       (unsigned long long)dev->address, dev->vpad_slot, slot_num);
+        }
+        bt_write_status_file();
+    }
+
+    dev->last_input_time = daemon_sys_time_us();
 
     OrbisPadData ds4;
     memset(&ds4, 0, sizeof(ds4));
@@ -729,17 +871,17 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
         }
 
         if (combo_matched) {
-            s_bt_share_combo_active = true;
-        } else if (s_bt_share_combo_active) {
+            dev->share_combo_active = true;
+        } else if (dev->share_combo_active) {
             // Asynchronous release de-ghosting: suppress Share/Create
             ds4.buttons &= ~DS4_BUTTON_SHARE;
         }
     } else {
-        s_bt_share_combo_active = false;
+        dev->share_combo_active = false;
     }
 
     ds4.connected = 1;
-    ds4.timestamp = s_last_input_time;
+    ds4.timestamp = dev->last_input_time;
 
     if (length == 78) {
         // Battery status & level from report 0x31 (data[52])
@@ -747,34 +889,75 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
         uint8_t battery_status = (data[52] >> 4) & 0x0F;
         uint8_t battery_pct = (battery_status == 2) ? 100 : (raw_battery < 10 ? (raw_battery * 10 + 5) : 100);
 
-        s_battery_pct = battery_pct;
-        s_battery_status = battery_status;
+        dev->battery_pct = battery_pct;
+        dev->battery_status = battery_status;
 
         static uint64_t s_last_battery_update = 0;
-        if (s_last_battery_update == 0 || s_last_input_time - s_last_battery_update >= 30000000ULL) { // Immediate first write, then every 30s
-            s_last_battery_update = s_last_input_time;
-            bt_write_status_file(true, battery_pct, battery_status);
-            daemon_log(LOG_LEVEL_INFO, "DualSense BT Battery: %d%% (status=%s)",
+        if (s_last_battery_update == 0 || dev->last_input_time - s_last_battery_update >= 30000000ULL) { // Immediate first write, then every 30s
+            s_last_battery_update = dev->last_input_time;
+            bt_write_status_file();
+            daemon_log(LOG_LEVEL_INFO, "DualSense BT 0x%llX Battery: %d%% (status=%s)",
+                       (unsigned long long)dev->address,
                        battery_pct,
                        battery_status == 1 ? "Charging" : (battery_status == 2 ? "Full" : "Discharging"));
         }
 
         float dt = 0.0f;
-        if (s_last_motion_time > 0 && s_last_input_time > s_last_motion_time) {
-            dt = (float)(s_last_input_time - s_last_motion_time) / 1000000.0f;
+        if (dev->last_motion_time > 0 && dev->last_input_time > dev->last_motion_time) {
+            dt = (float)(dev->last_input_time - dev->last_motion_time) / 1000000.0f;
         }
-        s_last_motion_time = s_last_input_time;
+        dev->last_motion_time = dev->last_input_time;
 
-        extended_sample(&ds4, report, dt);
+        extended_sample(dev, &ds4, report, dt);
     } else {
         ds4.quat.w = 1.0f;
     }
 
     // Send translated controller packet to Virtual DualShock 4
-    if (s_bt_vpad_slot >= 0) {
-        vpad_send_data_slot(s_bt_vpad_slot, &ds4);
-    } else {
-        vpad_send_data(&ds4);
+    if (dev->vpad_slot >= 0) {
+        vpad_send_data_slot(dev->vpad_slot, &ds4);
+    }
+}
+
+static void bt_check_timeouts(void) {
+    uint64_t now = daemon_sys_time_us();
+
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        BtDevice *dev = &s_devices[i];
+        if (!dev->address) continue;
+
+        // If already away, check if grace window expired
+        if (dev->away_since != 0) {
+            if (now - dev->away_since <= BT_PAD_GRACE_US) continue;
+
+            int player = dev->vpad_slot >= 0 ? vpad_get_assigned_slot_num(dev->vpad_slot) : 0;
+            daemon_log(LOG_LEVEL_INFO,
+                       "controller_disconnected: DualSense BT 0x%llX grace window expired, releasing Slot %d (Player %d)",
+                       (unsigned long long)dev->address, dev->vpad_slot, player);
+            bt_dev_release(dev);
+            daemon_notify("OneFamily: DualSense (Player %d) Disconnected", player);
+            bt_write_status_file();
+            continue;
+        }
+
+        if (now - dev->last_input_time <= BT_INPUT_TIMEOUT_US) continue;
+
+        if (!dev->connected) {
+            daemon_log(LOG_LEVEL_INFO, "DualSense BT: dropping silent device 0x%llX (entry %d)",
+                       (unsigned long long)dev->address, i);
+            bt_dev_release(dev);
+            continue;
+        }
+
+        // Just went quiet: mark away, hold pad/account, send neutral sample
+        int player = dev->vpad_slot >= 0 ? vpad_get_assigned_slot_num(dev->vpad_slot) : 0;
+        daemon_log(LOG_LEVEL_INFO,
+                   "controller_away: DualSense BT 0x%llX quiet %llu ms, holding Slot %d (Player %d)",
+                   (unsigned long long)dev->address,
+                   (unsigned long long)((now - dev->last_input_time) / 1000ULL),
+                   dev->vpad_slot, player);
+        bt_dev_mark_away(dev, now);
+        bt_write_status_file();
     }
 }
 
@@ -785,16 +968,22 @@ static void decode_dualsense_bt_report(const uint8_t* report, size_t length) {
 void bt_driver_poll_step(void) {
     if (!s_bt_running || s_bt_fd < 0 || s_bt_queue < 0) return;
 
+    bt_check_timeouts();
+
     // Feature Report 0x05 request for factory IMU calibration
     uint64_t now_us = daemon_sys_time_us();
-    if (s_dualsense_connected && s_physical_address && !s_calibration_requested &&
-        (now_us - s_last_calibration_attempt > 1000000ULL)) {
-        s_last_calibration_attempt = now_us;
-        struct { uint64_t address; uint8_t report_id; uint8_t reserved[7]; } feature = { s_physical_address, 5, {0} };
-        long rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8010622FUL, (long)&feature);
-        if (rc == 0) {
-            s_calibration_requested = true;
-            daemon_log(LOG_LEVEL_INFO, "DualSense BT: requested IMU factory calibration (Feature Report 0x05)");
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        BtDevice *dev = &s_devices[i];
+        if (dev->connected && dev->address && !dev->calibration_requested &&
+            (now_us - dev->last_calibration_attempt > 1000000ULL)) {
+            dev->last_calibration_attempt = now_us;
+            struct { uint64_t address; uint8_t report_id; uint8_t reserved[7]; } feature = { dev->address, 5, {0} };
+            long rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8010622FUL, (long)&feature);
+            if (rc == 0) {
+                dev->calibration_requested = true;
+                daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): requested IMU factory calibration",
+                           (unsigned long long)dev->address);
+            }
         }
     }
 
@@ -813,34 +1002,13 @@ void bt_driver_poll_step(void) {
     } event;
 
     long ready = daemon_sys_call6(SYS_KEVENT, s_bt_queue, 0, 0, (long)&event, 1, (long)&timeout);
-    if (ready <= 0) {
-        // Check 3-second timeout for disconnection
-        if (s_dualsense_connected && (daemon_sys_time_us() - s_last_input_time > 3000000ULL)) {
-            s_dualsense_connected = false;
-            s_bt_share_combo_active = false;
-            s_physical_address = 0;
-            reset_calibration();
-            s_orientation[0] = 0.0f; s_orientation[1] = 0.0f; s_orientation[2] = 0.0f; s_orientation[3] = 1.0f;
-            s_last_motion_time = 0;
-            if (s_bt_vpad_slot >= 0) {
-                vpad_slot_close(s_bt_vpad_slot);
-                s_bt_vpad_slot = -1;
-            }
-            bt_write_status_file(false, 0, 0);
-            daemon_log(LOG_LEVEL_INFO, "controller_disconnected: DualSense BT timed out");
-            daemon_notify("OneFamily: DualSense Disconnected");
-        }
-        return;
-    }
+    if (ready <= 0) return;
 
     uint8_t buffer[256];
     long count = daemon_sys_read(s_bt_fd, buffer, sizeof(buffer));
     if (count > 0 && count <= (long)sizeof(buffer)) {
         for (long pos = 0; pos + 16 <= count; pos += 16) {
             uint8_t ev_type = buffer[pos];
-            if (ev_type == 0x18 || ev_type == 0x19) {
-                s_calibration_requested = false;
-            }
             if (ev_type < 0x18 || ev_type > 0x20) continue;
 
             uint64_t address = 0;
@@ -858,17 +1026,24 @@ void bt_driver_poll_step(void) {
             } req = { address, report, sizeof(report), 0 };
 
             long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
-            if (result == 43 && report[0] == 41 && report[2] == 5) {
-                int rc = dualsense_calibration_bluetooth(report + 2, 41, &s_calibration);
-                if (rc == 0) {
-                    s_calibration_valid = true;
-                    daemon_log(LOG_LEVEL_INFO, "DualSense BT: factory calibration loaded successfully");
-                } else {
-                    daemon_log(LOG_LEVEL_WARN, "DualSense BT: calibration decode failed (rc=%d), using nominal scales", rc);
+            if (result > 0) {
+                BtDevice* dev = bt_dev_acquire(address);
+                if (dev) {
+                    if (result == 43 && report[0] == 41 && report[2] == 5) {
+                        int rc = dualsense_calibration_bluetooth(report + 2, 41, &dev->calibration);
+                        if (rc == 0) {
+                            dev->calibration_valid = true;
+                            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): factory calibration loaded",
+                                       (unsigned long long)address);
+                        } else {
+                            daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): calibration decode failed (rc=%d)",
+                                       (unsigned long long)address, rc);
+                        }
+                    } else if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
+                        dev->reports_seen++;
+                        decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
+                    }
                 }
-            } else if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
-                s_physical_address = address;
-                decode_dualsense_bt_report(report + 2, (size_t)(result - 2));
             }
         }
     }
@@ -879,10 +1054,8 @@ void bt_driver_poll_step(void) {
 // -------------------------------------------------------------
 
 int bt_driver_init(void) {
-    daemon_log(LOG_LEVEL_INFO, "Initializing DualSense Bluetooth Subsystem...");
-    reset_calibration();
-    s_orientation[0] = 0.0f; s_orientation[1] = 0.0f; s_orientation[2] = 0.0f; s_orientation[3] = 1.0f;
-    s_last_motion_time = 0;
+    daemon_log(LOG_LEVEL_INFO, "Initializing DualSense Bluetooth Subsystem (up to %d controllers)...", BT_MAX_DEVICES);
+    bt_devices_reset();
 
     // 1. Verify firmware version (sceKernelGetSystemSwVersion)
     struct {
@@ -912,8 +1085,6 @@ int bt_driver_init(void) {
     }
 
     // FW Guard: DualSense Bluetooth stack and allowlist patches require FW 9.00 - 13.52.
-    // On FW < 9.00 (e.g. 5.05, 6.72, 7.xx), DualSense BT is not supported by the kernel stack.
-    // Cleanly skip the Bluetooth subsystem so USB controllers operate with zero crash risk.
     if (s_current_fw_bcd != 0 && s_current_fw_bcd < 0x0900) {
         daemon_log(LOG_LEVEL_INFO, "DualSense BT Subsystem skipped: FW 0x%04X < 0x0900 (BT requires FW 9.00+). USB controllers fully active.",
                    s_current_fw_bcd);
@@ -984,15 +1155,9 @@ int bt_driver_init(void) {
         return -6;
     }
 
-    // 7. Register DualSense device with Bluetooth driver (ioctl 0x8004622B)
-    struct {
-        uint16_t vendor;
-        uint16_t product;
-    } device = { SONY_VID, SONY_DUALSENSE_PID };
-    long reg_rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8004622BUL, (long)&device);
-    daemon_log(LOG_LEVEL_INFO, "register_dualsense = %ld", reg_rc);
+    // 7. Register DualSense devices with Bluetooth driver (ioctl 0x8004622B)
+    long reg_rc = bt_register_pair(SONY_VID, SONY_DUALSENSE_PID, "dualsense");
     if (reg_rc != 0) {
-        // Registration failed: restore allowlist, close descriptors, return cleanly
         apply_kernel_allowlist_patch(1 /* restore */, s_current_fw_bcd);
         daemon_sys_close(s_bt_queue);
         s_bt_queue = -1;
@@ -1003,9 +1168,27 @@ int bt_driver_init(void) {
     }
 
     s_bt_registered = true;
+    s_bt_reg_count = 1;
+
+    // Register remaining slots for DualSense (up to BT_MAX_DEVICES)
+    for (int i = 1; i < BT_MAX_DEVICES; ++i) {
+        if (bt_register_pair(SONY_VID, SONY_DUALSENSE_PID, "dualsense (slot)") == 0) {
+            ++s_bt_reg_count;
+        }
+    }
+
+    // Also register DualSense Edge (0x0DF2)
+    s_bt_edge_reg_count = 0;
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (bt_register_pair(SONY_VID, SONY_DUALSENSE_EDGE_PID, "dualsense_edge") == 0) {
+            ++s_bt_edge_reg_count;
+        }
+    }
+
     s_bt_running = true;
     s_bt_supported = true;
-    daemon_log(LOG_LEVEL_INFO, "DualSense Bluetooth Subsystem initialized successfully (FW 0x%04X)", s_current_fw_bcd);
+    daemon_log(LOG_LEVEL_INFO, "DualSense Bluetooth Subsystem initialized (FW 0x%04X, reg_count=%d, edge_reg=%d)",
+               s_current_fw_bcd, s_bt_reg_count, s_bt_edge_reg_count);
     return 0;
 }
 
@@ -1017,12 +1200,14 @@ void bt_driver_shutdown(void) {
     s_bt_supported = false;
 
     if (s_bt_registered && s_bt_fd >= 0) {
-        struct {
-            uint16_t vendor;
-            uint16_t product;
-        } device = { SONY_VID, SONY_DUALSENSE_PID };
-        long unreg_rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8004622CUL, (long)&device);
-        daemon_log(LOG_LEVEL_INFO, "unregister_dualsense = %ld", unreg_rc);
+        for (int i = 0; i < s_bt_reg_count; ++i) {
+            bt_unregister_pair(SONY_VID, SONY_DUALSENSE_PID);
+        }
+        for (int i = 0; i < s_bt_edge_reg_count; ++i) {
+            bt_unregister_pair(SONY_VID, SONY_DUALSENSE_EDGE_PID);
+        }
+        s_bt_reg_count = 0;
+        s_bt_edge_reg_count = 0;
         s_bt_registered = false;
     }
 
@@ -1038,17 +1223,13 @@ void bt_driver_shutdown(void) {
         s_bt_fd = -1;
     }
 
-    if (s_bt_vpad_slot >= 0) {
-        vpad_slot_close(s_bt_vpad_slot);
-        s_bt_vpad_slot = -1;
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (s_devices[i].address) {
+            bt_dev_release(&s_devices[i]);
+        }
     }
-    s_dualsense_connected = false;
-    s_bt_share_combo_active = false;
-    s_physical_address = 0;
-    reset_calibration();
-    s_orientation[0] = 0.0f; s_orientation[1] = 0.0f; s_orientation[2] = 0.0f; s_orientation[3] = 1.0f;
-    s_last_motion_time = 0;
-    bt_write_status_file(false, 0, 0);
+    bt_devices_reset();
+    bt_write_status_file();
 }
 
 bool bt_driver_is_supported(void) {
@@ -1056,25 +1237,33 @@ bool bt_driver_is_supported(void) {
 }
 
 bool bt_driver_is_connected(void) {
-    return s_dualsense_connected;
+    return bt_driver_connected_count() > 0;
 }
 
-void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3]) {
-    if (!s_bt_running || s_bt_fd < 0 || !s_dualsense_connected || !s_physical_address) return;
+int bt_driver_connected_count(void) {
+    int count = 0;
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (s_devices[i].connected) count++;
+    }
+    return count;
+}
 
-    static uint8_t seq = 0;
+static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, const uint8_t color[3]) {
+    if (!dev || !dev->connected || s_bt_fd < 0 || !dev->address) return;
+
     uint8_t out[78];
     memset(out, 0, sizeof(out));
 
-    out[0] = 0x31;                  // Report ID
-    out[1] = (seq++ & 0x0F) << 4;   // Sequence tag
+    out[0] = 0x31;                  // Extended BT Output Report ID
+    dev->rumble_seq = (dev->rumble_seq + 1) & 0x0F;
+    out[1] = dev->rumble_seq << 4;   // Sequence tag
     out[2] = 0x10;
     out[3] = 0x03 | 0x0C;           // Enable motors (0x03) + Enable trigger effects L2/R2 (0x0C)
-    out[4] = 0x14;
+    out[4] = 0x14;                  // Player Indicator Control Enable (0x10) | Lightbar Control Enable (0x04)
     out[5] = small;                 // Weak motor
     out[6] = large;                 // Strong motor
 
-    // 1. Adaptive Trigger Effects (out[13] mode, out[14..23] params for R2; out[24] mode, out[25..34] params for L2)
+    // 1. Adaptive Trigger Effects
     int trig = g_daemon_config.dualsense_trigger_mode;
     if (trig == 1) {
         // Hair Trigger (rigid snap click at ~10% travel)
@@ -1095,10 +1284,7 @@ void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3])
     }
 
     // 2. Control Flags
-    // out[4] (valid_flag1): 0x10 = Player Indicator Control Enable, 0x04 = Lightbar Control Enable
-    out[4] = 0x14;
-    // out[41] (valid_flag2): 0x02 = Lightbar Setup Control Enable (enables brightness & setup)
-    out[41] = 0x02;
+    out[41] = 0x02; // Lightbar Setup Control Enable (enables brightness & setup)
 
     // 3. Lightbar Setup & LED Brightness
     out[44] = 0x00; // Standard lightbar setup
@@ -1113,8 +1299,8 @@ void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3])
     } else if (p_led == 2) {
         out[46] = 0x00; // Off
     } else {
-        // Player Slot (0)
-        int slot = vpad_get_assigned_slot_num(s_bt_vpad_slot);
+        // Dynamic Player Slot (1..4)
+        int slot = vpad_get_assigned_slot_num(dev->vpad_slot);
         if (slot == 2) {
             out[46] = 0x0A; // Player 2: 2 LEDs
         } else if (slot == 3) {
@@ -1145,9 +1331,9 @@ void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3])
         out[49] = static_colors[c_idx][2];
     } else if (lb_mode == 2) {
         // Battery Indicator
-        if (s_battery_pct > 60) {
+        if (dev->battery_pct > 60) {
             out[47] = 0; out[48] = 255; out[49] = 0; // Green
-        } else if (s_battery_pct >= 20) {
+        } else if (dev->battery_pct >= 20) {
             out[47] = 255; out[48] = 200; out[49] = 0; // Yellow
         } else {
             out[47] = 255; out[48] = 0; out[49] = 0; // Red
@@ -1176,13 +1362,33 @@ void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3])
         out[74 + i] = (uint8_t)(crc >> (8 * i));
     }
 
-    // Send Bluetooth output request via ioctl with actual controller physical address
+    // Send Bluetooth output request via ioctl addressed directly to this controller
     struct {
         uint64_t address;
         void* buffer;
         uint64_t size;
         uint64_t report_id;
-    } req = { s_physical_address, out, 78, 0x31 };
+    } req = { dev->address, out, 78, 0x31 };
 
     daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206232UL, (long)&req);
+}
+
+void bt_driver_send_rumble_slot(int vpad_slot, uint8_t large, uint8_t small, const uint8_t color[3]) {
+    if (vpad_slot < 0) return;
+
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (s_devices[i].connected && s_devices[i].vpad_slot == vpad_slot) {
+            bt_send_rumble_dev(&s_devices[i], large, small, color);
+            return;
+        }
+    }
+}
+
+void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3]) {
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (s_devices[i].connected) {
+            bt_send_rumble_dev(&s_devices[i], large, small, color);
+            return;
+        }
+    }
 }

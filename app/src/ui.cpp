@@ -753,7 +753,44 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
     int deadzone_val = ConfigManager::DEADZONE_VALUES[cfg.deadzone_index];
     int thresh_val = ConfigManager::TRIGGER_VALUES[cfg.trigger_index];
 
-    // Check if pure Xbox controller is connected
+    // ========================================================
+    // CONTROLLER SLOT SELECTION BAR (Player 1..4)
+    // ========================================================
+    int barX = CARD_X;
+    int barY = 222;
+    int barH = 46;
+    int barW = CARD_W;
+
+    draw_image(scene, btnL2, barX + 6, barY + 9);
+
+    int pillsStartX = barX + 54;
+    int pillW = 210;
+    int pillGap = 16;
+    for (int s = 0; s < 4; s++) {
+        int px = pillsStartX + s * (pillW + pillGap);
+        int py = barY + 4;
+        int ph = 38;
+        bool isSel = (s == tester.selectedSlot);
+        bool isConn = tester.slotConnected[s];
+
+        Color bg = isSel ? COLOR_SIDEBAR_BLUE : COLOR_CARD_BG;
+        Color border = isSel ? COLOR_BLUE_BRIGHT : COLOR_CARD_BORDER;
+        draw_rounded_rect(scene, px, py, pillW, ph, 8, bg);
+        draw_rounded_outline(scene, px, py, pillW, ph, 8, border, isSel ? 2 : 1);
+
+        // Status LED dot
+        Color dotColor = isConn ? Color{ 0, 255, 150 } : Color{ 80, 95, 110 };
+        draw_circle(scene, px + 20, py + 19, 5, dotColor);
+
+        char slotLabel[48];
+        snprintf(slotLabel, sizeof(slotLabel), "Player %d %s", s + 1, isConn ? "(Active)" : "(Off)");
+        draw_text(scene, slotLabel, fontCardTitle, px + 36, py + 26, isSel ? COLOR_WHITE : (isConn ? Color{ 200, 220, 240 } : COLOR_TEXT_DIM));
+    }
+
+    draw_image(scene, btnR2, pillsStartX + 4 * (pillW + pillGap) - pillGap + 12, barY + 9);
+    draw_text(scene, "Switch: [L2]/[R2] or [D-Pad]", fontCardDesc, pillsStartX + 4 * (pillW + pillGap) + 52, barY + 27, COLOR_TEXT_DIM);
+
+    // Check if selected controller slot is connected
     if (!padData.connected) {
         int warnX = CARD_X;
         int warnY = 280;
@@ -767,23 +804,32 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
         draw_rounded_outline(scene, warnX, warnY, warnW, warnH, 12, warnBorder, 2);
 
         draw_image(scene, iconInfo, warnX + 40, warnY + 42);
-        draw_text(scene, "No USB Controller Detected", fontCardTitle, warnX + 105, warnY + 68, COLOR_WHITE);
+        char noPadTitle[64];
+        snprintf(noPadTitle, sizeof(noPadTitle), "Slot %d (Player %d): Disconnected", tester.selectedSlot + 1, tester.selectedSlot + 1);
+        draw_text(scene, noPadTitle, fontCardTitle, warnX + 105, warnY + 68, COLOR_WHITE);
 
         int textY = warnY + 130;
-        draw_text(scene, "The Input Tester operates in pure hardware mode to isolate controller inputs from DualShock 4.",
+        draw_text(scene, "The Input Tester operates in pure hardware mode to isolate inputs per player slot.",
                   fontCardDesc, warnX + 40, textY, COLOR_TEXT_DIM);
         textY += 40;
-        draw_text(scene, "Please connect an Xbox (360, One, Series X|S), Switch, PS3, PS5, or Stadia USB controller to your PS4.",
-                  fontCardDesc, warnX + 40, textY, COLOR_WHITE);
+        snprintf(buf, sizeof(buf), "No controller is currently active on Slot %d (Player %d).", tester.selectedSlot + 1, tester.selectedSlot + 1);
+        draw_text(scene, buf, fontCardDesc, warnX + 40, textY, COLOR_WHITE);
         textY += 40;
-        draw_text(scene, "Once connected via USB cable, the controller will be recognized immediately without restarting.",
+        draw_text(scene, "Press [L2] / [R2] or [LEFT] / [RIGHT] to switch to another player slot,",
                   fontCardDesc, warnX + 40, textY, COLOR_BLUE_BRIGHT);
+        textY += 36;
+        draw_text(scene, "or connect a DualSense (Bluetooth) / USB controller to assign it to this slot.",
+                  fontCardDesc, warnX + 40, textY, COLOR_TEXT_DIM);
 
         // Footer for disconnected state
         scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);
         draw_image(scene, iconMode, 60, 890);
-        draw_text(scene, "Input Tester & Calibration", fontCardTitle, 120, 912, COLOR_WHITE);
-        draw_text(scene, "Waiting for USB controller connection...", fontFooter, 120, 938, Color{ 220, 80, 60 });
+        snprintf(buf, sizeof(buf), "Input Tester - Slot %d (Player %d)", tester.selectedSlot + 1, tester.selectedSlot + 1);
+        draw_text(scene, buf, fontCardTitle, 120, 912, COLOR_WHITE);
+        draw_text(scene, "Waiting for controller connection on this slot...", fontFooter, 120, 938, Color{ 220, 80, 60 });
+
+        draw_image(scene, btnArrows, 1500, 901);
+        draw_text(scene, "Switch Slot", fontFooter, 1545, 922, COLOR_BLUE_BRIGHT);
 
         draw_image(scene, btnOptions, 1680, 900);
         draw_text(scene, "Exit", fontFooter, 1760, 922, COLOR_TEXT_DIM);
@@ -1043,10 +1089,14 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
     scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);
 
     draw_image(scene, iconMode, 60, 890);
-    draw_text(scene, "Input Tester & Calibration", fontCardTitle, 120, 912, COLOR_WHITE);
-    draw_text(scene, "Pure USB hardware mode (isolated from DualShock 4)", fontFooter, 120, 938, COLOR_BLUE_BRIGHT);
+    snprintf(buf, sizeof(buf), "Input Tester - Slot %d (Player %d)", tester.selectedSlot + 1, tester.selectedSlot + 1);
+    draw_text(scene, buf, fontCardTitle, 120, 912, COLOR_WHITE);
+    draw_text(scene, "Pure hardware mode (isolated per-player inputs)", fontFooter, 120, 938, COLOR_BLUE_BRIGHT);
 
     // Hints with authentic button icons
+    draw_image(scene, btnArrows, 980, 901);
+    draw_text(scene, "Slot", fontFooter, 1025, 922, COLOR_TEXT_DIM);
+
     draw_image(scene, btnSquare, 1140, 897);
     draw_text(scene, "Rumble", fontFooter, 1185, 922, COLOR_TEXT_DIM);
 
@@ -1364,67 +1414,118 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
 
     // Box Header
     draw_image(scene, btnPs, BOX_X + 24, BOX_Y + 22);
-    draw_text(scene, "DualSense Wireless", fontCardTitle, BOX_X + 76, BOX_Y + 40, COLOR_WHITE);
+    char dsHeader[64];
+    if (status.devices.size() > 1) {
+        snprintf(dsHeader, sizeof(dsHeader), "DualSense (%d Active)", (int)status.devices.size());
+    } else {
+        snprintf(dsHeader, sizeof(dsHeader), "DualSense Wireless");
+    }
+    draw_text(scene, dsHeader, fontCardTitle, BOX_X + 76, BOX_Y + 40, COLOR_WHITE);
     draw_text(scene, "Live Hardware Status via Bluetooth", fontCardDesc, BOX_X + 76, BOX_Y + 62, COLOR_BLUE_BRIGHT);
 
     // Divider 1
     draw_rounded_rect(scene, BOX_X + 24, BOX_Y + 76, BOX_W - 48, 1, 0, COLOR_CARD_BORDER);
 
-    // 1. Connection Status
-    draw_circle(scene, BOX_X + 36, BOX_Y + 104, 6, Color{ 0, 255, 120 });
-    draw_text(scene, "Status:", fontCardTitle, BOX_X + 54, BOX_Y + 110, COLOR_TEXT_DIM);
-    draw_text(scene, "Connected (Bluetooth 0x31)", fontCardTitle, BOX_X + 130, BOX_Y + 110, Color{ 0, 255, 120 });
+    if (status.devices.size() > 1) {
+        // Multi-Controller Connected View
+        int devStartY = BOX_Y + 92;
+        int devH = 96;
+        for (size_t d = 0; d < status.devices.size() && d < 4; d++) {
+            const DualSenseDeviceInfo& dev = status.devices[d];
+            int itemY = devStartY + (int)d * (devH + 10);
 
-    // 2. Battery Meter
-    draw_text(scene, "Battery Level:", fontCardTitle, BOX_X + 30, BOX_Y + 150, COLOR_WHITE);
-    char battStr[64];
-    snprintf(battStr, sizeof(battStr), "%d%%%s", status.battery_pct, status.battery_charging ? " [Charging]" : "");
-    draw_text(scene, battStr, fontCardTitle, BOX_X + BOX_W - 170, BOX_Y + 150, status.battery_charging ? Color{ 0, 255, 200 } : COLOR_BLUE_BRIGHT);
+            draw_rounded_rect(scene, BOX_X + 20, itemY, BOX_W - 40, devH, 8, Color{ 14, 24, 38 });
+            draw_rounded_outline(scene, BOX_X + 20, itemY, BOX_W - 40, devH, 8, COLOR_CARD_BORDER, 1);
 
-    int barX = BOX_X + 30;
-    int barY = BOX_Y + 165;
-    int barW = BOX_W - 60;
-    int barH = 18;
-    draw_rounded_rect(scene, barX, barY, barW, barH, 5, Color{ 15, 25, 40 });
-    draw_rounded_outline(scene, barX, barY, barW, barH, 5, COLOR_BORDER_DIM, 1);
+            // Slot badge circle
+            draw_circle(scene, BOX_X + 46, itemY + 30, 14, COLOR_BLUE_MAIN);
+            char pStr[8];
+            snprintf(pStr, sizeof(pStr), "P%d", dev.player_slot);
+            draw_text_centered(scene, pStr, fontCardTitle, BOX_X + 46, itemY + 37, COLOR_WHITE);
 
-    int fillW = (barW * status.battery_pct) / 100;
-    Color battColor = Color{ 0, 230, 120 };
-    if (status.battery_pct <= 20) {
-        battColor = Color{ 255, 50, 50 };
-    } else if (status.battery_pct <= 50) {
-        battColor = Color{ 240, 200, 30 };
+            // User / MAC
+            std::string uName = dev.user_name.empty() ? "Unassigned User" : dev.user_name;
+            draw_text(scene, uName, fontCardTitle, BOX_X + 74, itemY + 32, COLOR_WHITE);
+
+            char macStr[64];
+            snprintf(macStr, sizeof(macStr), "MAC: %s", dev.mac.c_str());
+            draw_text(scene, macStr, fontCardDesc, BOX_X + 74, itemY + 54, COLOR_TEXT_DIM);
+
+            // Battery % & Charging
+            char bStr[32];
+            snprintf(bStr, sizeof(bStr), "%d%%%s", dev.battery_pct, dev.battery_charging ? " [Chg]" : "");
+            draw_text(scene, bStr, fontCardDesc, BOX_X + BOX_W - 130, itemY + 32, dev.battery_charging ? Color{ 0, 255, 200 } : COLOR_BLUE_BRIGHT);
+
+            // Battery Bar
+            int bBarX = BOX_X + 74;
+            int bBarY = itemY + 68;
+            int bBarW = BOX_W - 140;
+            int bBarH = 10;
+            draw_rounded_rect(scene, bBarX, bBarY, bBarW, bBarH, 3, Color{ 15, 25, 40 });
+            int fill = (bBarW * dev.battery_pct) / 100;
+            Color bCol = (dev.battery_pct <= 20) ? Color{ 255, 50, 50 } : ((dev.battery_pct <= 50) ? Color{ 240, 200, 30 } : Color{ 0, 230, 120 });
+            if (fill > 0) {
+                draw_rounded_rect(scene, bBarX, bBarY, fill, bBarH, 3, bCol);
+            }
+        }
+    } else {
+        // Single Controller Connected View
+        // 1. Connection Status
+        draw_circle(scene, BOX_X + 36, BOX_Y + 104, 6, Color{ 0, 255, 120 });
+        draw_text(scene, "Status:", fontCardTitle, BOX_X + 54, BOX_Y + 110, COLOR_TEXT_DIM);
+        draw_text(scene, "Connected (Bluetooth 0x31)", fontCardTitle, BOX_X + 130, BOX_Y + 110, Color{ 0, 255, 120 });
+
+        // 2. Battery Meter
+        draw_text(scene, "Battery Level:", fontCardTitle, BOX_X + 30, BOX_Y + 150, COLOR_WHITE);
+        char battStr[64];
+        snprintf(battStr, sizeof(battStr), "%d%%%s", status.battery_pct, status.battery_charging ? " [Charging]" : "");
+        draw_text(scene, battStr, fontCardTitle, BOX_X + BOX_W - 170, BOX_Y + 150, status.battery_charging ? Color{ 0, 255, 200 } : COLOR_BLUE_BRIGHT);
+
+        int barX = BOX_X + 30;
+        int barY = BOX_Y + 165;
+        int barW = BOX_W - 60;
+        int barH = 18;
+        draw_rounded_rect(scene, barX, barY, barW, barH, 5, Color{ 15, 25, 40 });
+        draw_rounded_outline(scene, barX, barY, barW, barH, 5, COLOR_BORDER_DIM, 1);
+
+        int fillW = (barW * status.battery_pct) / 100;
+        Color battColor = Color{ 0, 230, 120 };
+        if (status.battery_pct <= 20) {
+            battColor = Color{ 255, 50, 50 };
+        } else if (status.battery_pct <= 50) {
+            battColor = Color{ 240, 200, 30 };
+        }
+        if (fillW > 0) {
+            draw_rounded_rect(scene, barX + 2, barY + 2, fillW - 4, barH - 4, 3, battColor);
+        }
+
+        std::string pwrState = status.battery_charging ? "Power: Charging via USB" : "Power: Operating on Internal Battery";
+        draw_text(scene, pwrState, fontCardDesc, BOX_X + 30, BOX_Y + 206, COLOR_TEXT_DIM);
+
+        // Divider 2
+        draw_rounded_rect(scene, BOX_X + 24, BOX_Y + 224, BOX_W - 48, 1, 0, COLOR_CARD_BORDER);
+
+        // 3. User & Slot Info
+        draw_text(scene, "Assigned Console User:", fontCardTitle, BOX_X + 30, BOX_Y + 252, COLOR_WHITE);
+        std::string userDisplay = status.user_name.empty() ? "None" : status.user_name;
+        draw_text(scene, userDisplay, fontCardTitle, BOX_X + 30, BOX_Y + 280, COLOR_BLUE_BRIGHT);
+
+        char slotDisplay[64];
+        snprintf(slotDisplay, sizeof(slotDisplay), "Virtual Slot: %d (Player %d)", status.player_slot, status.player_slot);
+        draw_text(scene, slotDisplay, fontCardDesc, BOX_X + 30, BOX_Y + 304, COLOR_TEXT_DIM);
+
+        // Divider 3
+        draw_rounded_rect(scene, BOX_X + 24, BOX_Y + 322, BOX_W - 48, 1, 0, COLOR_CARD_BORDER);
+
+        // 4. Hardware Details
+        draw_text(scene, "Hardware Details:", fontCardTitle, BOX_X + 30, BOX_Y + 350, COLOR_WHITE);
+        draw_text(scene, "Vendor ID: 0x054C (Sony Interactive Entertainment)", fontCardDesc, BOX_X + 30, BOX_Y + 378, COLOR_TEXT_DIM);
+        draw_text(scene, "Product ID: 0x0CE6 (DualSense Wireless)", fontCardDesc, BOX_X + 30, BOX_Y + 402, COLOR_TEXT_DIM);
+        draw_text(scene, "Transport: Bluetooth 78-byte extended (CRC32)", fontCardDesc, BOX_X + 30, BOX_Y + 426, COLOR_TEXT_DIM);
+        draw_text(scene, "Active Features: Motion (Gyro/Accel), Touchpad", fontCardDesc, BOX_X + 30, BOX_Y + 450, COLOR_TEXT_DIM);
+        draw_text(scene, "Force Feedback: Dual Motors + Trigger Effects", fontCardDesc, BOX_X + 30, BOX_Y + 474, COLOR_TEXT_DIM);
+        draw_text(scene, "Subsystem: Ring-0 /dev/bt allowlist dynamic patch", fontCardDesc, BOX_X + 30, BOX_Y + 498, COLOR_TEXT_DIM);
     }
-    if (fillW > 0) {
-        draw_rounded_rect(scene, barX + 2, barY + 2, fillW - 4, barH - 4, 3, battColor);
-    }
-
-    std::string pwrState = status.battery_charging ? "Power: Charging via USB" : "Power: Operating on Internal Battery";
-    draw_text(scene, pwrState, fontCardDesc, BOX_X + 30, BOX_Y + 206, COLOR_TEXT_DIM);
-
-    // Divider 2
-    draw_rounded_rect(scene, BOX_X + 24, BOX_Y + 224, BOX_W - 48, 1, 0, COLOR_CARD_BORDER);
-
-    // 3. User & Slot Info
-    draw_text(scene, "Assigned Console User:", fontCardTitle, BOX_X + 30, BOX_Y + 252, COLOR_WHITE);
-    std::string userDisplay = status.user_name.empty() ? "None" : status.user_name;
-    draw_text(scene, userDisplay, fontCardTitle, BOX_X + 30, BOX_Y + 280, COLOR_BLUE_BRIGHT);
-
-    char slotDisplay[64];
-    snprintf(slotDisplay, sizeof(slotDisplay), "Virtual Slot: %d (Player %d)", status.player_slot, status.player_slot);
-    draw_text(scene, slotDisplay, fontCardDesc, BOX_X + 30, BOX_Y + 304, COLOR_TEXT_DIM);
-
-    // Divider 3
-    draw_rounded_rect(scene, BOX_X + 24, BOX_Y + 322, BOX_W - 48, 1, 0, COLOR_CARD_BORDER);
-
-    // 4. Hardware Details
-    draw_text(scene, "Hardware Details:", fontCardTitle, BOX_X + 30, BOX_Y + 350, COLOR_WHITE);
-    draw_text(scene, "Vendor ID: 0x054C (Sony Interactive Entertainment)", fontCardDesc, BOX_X + 30, BOX_Y + 378, COLOR_TEXT_DIM);
-    draw_text(scene, "Product ID: 0x0CE6 (DualSense Wireless)", fontCardDesc, BOX_X + 30, BOX_Y + 402, COLOR_TEXT_DIM);
-    draw_text(scene, "Transport: Bluetooth 78-byte extended (CRC32)", fontCardDesc, BOX_X + 30, BOX_Y + 426, COLOR_TEXT_DIM);
-    draw_text(scene, "Active Features: Motion (Gyro/Accel), Touchpad", fontCardDesc, BOX_X + 30, BOX_Y + 450, COLOR_TEXT_DIM);
-    draw_text(scene, "Force Feedback: Dual Motors + Trigger Effects", fontCardDesc, BOX_X + 30, BOX_Y + 474, COLOR_TEXT_DIM);
-    draw_text(scene, "Subsystem: Ring-0 /dev/bt allowlist dynamic patch", fontCardDesc, BOX_X + 30, BOX_Y + 498, COLOR_TEXT_DIM);
 
     // Footer
     scene->DrawRectangle(60, 865, 1800, 2, COLOR_DIVIDER);

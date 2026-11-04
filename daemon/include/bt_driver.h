@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define BT_MAX_DEVICES 4
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,9 +37,14 @@ void bt_driver_shutdown(void);
 bool bt_driver_is_supported(void);
 
 /**
- * Check if a DualSense controller is currently connected via Bluetooth.
+ * Check if at least one DualSense controller is connected via Bluetooth.
  */
 bool bt_driver_is_connected(void);
+
+/**
+ * Number of DualSense controllers currently connected over Bluetooth.
+ */
+int bt_driver_connected_count(void);
 
 /**
  * Send rumble and LED color feedback to the Bluetooth-connected DualSense.
@@ -47,6 +54,16 @@ bool bt_driver_is_connected(void);
  * @param color RGB lightbar color [R, G, B].
  */
 void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3]);
+
+/**
+ * Send rumble and LED feedback to the DualSense bound to a specific virtual pad slot.
+ *
+ * @param vpad_slot Virtual pad slot index (0..3).
+ * @param large Large rumble motor intensity (0-255).
+ * @param small Small rumble motor intensity (0-255).
+ * @param color RGB lightbar color [R, G, B].
+ */
+void bt_driver_send_rumble_slot(int vpad_slot, uint8_t large, uint8_t small, const uint8_t color[3]);
 
 #ifdef __cplusplus
 }

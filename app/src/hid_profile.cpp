@@ -92,6 +92,27 @@ bool HidProfile::read_status(HidStatus& out) {
                     if (out.battery_pct > 100) out.battery_pct = 100;
                 } else if (k == "battery_charging") {
                     out.battery_charging = (atoi(v.c_str()) != 0);
+                } else if (k == "count") {
+                    out.device_count = atoi(v.c_str());
+                } else if (k.rfind("dev_", 0) == 0) {
+                    int devIdx = 0;
+                    char field[32] = {0};
+                    if (sscanf(k.c_str(), "dev_%d_%31s", &devIdx, field) == 2) {
+                        if (devIdx >= 0 && devIdx < 4) {
+                            if ((size_t)devIdx >= out.devices.size()) {
+                                out.devices.resize(devIdx + 1);
+                            }
+                            if (strcmp(field, "slot") == 0) {
+                                out.devices[devIdx].slot = atoi(v.c_str());
+                            } else if (strcmp(field, "mac") == 0) {
+                                out.devices[devIdx].mac = v;
+                            } else if (strcmp(field, "battery") == 0) {
+                                out.devices[devIdx].battery_pct = atoi(v.c_str());
+                            } else if (strcmp(field, "charging") == 0) {
+                                out.devices[devIdx].battery_charging = (atoi(v.c_str()) != 0);
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -65,8 +65,11 @@ int main() {
     sceUserServiceInitialize(&uParam);
     sceUserServiceGetInitialUser(&userId);
 
-    // Standard handle for navigating the app and reading controller telemetry
-    int padHandle = scePadOpen(userId, 0, 0, NULL);
+    // Standard handles for up to 4 player controller slots
+    int padHandles[4];
+    for (int i = 0; i < 4; i++) {
+        padHandles[i] = scePadOpen(userId, 0, i, NULL);
+    }
 
     // Check if First-Launch Setup Wizard or Payload Update is required
     bool isInstalled = Installer::isInstalled();
@@ -80,13 +83,18 @@ int main() {
         uint32_t wizardPrevButtons = 0;
 
         for (;;) {
-            OrbisPadData padData;
-            memset(&padData, 0, sizeof(padData));
-            if (padHandle >= 0) {
-                scePadReadState(padHandle, &padData);
+            uint32_t anyWizardButtons = 0;
+            for (int i = 0; i < 4; i++) {
+                if (padHandles[i] >= 0) {
+                    OrbisPadData d;
+                    memset(&d, 0, sizeof(d));
+                    if (scePadReadState(padHandles[i], &d) == 0 && d.connected) {
+                        anyWizardButtons |= d.buttons;
+                    }
+                }
             }
 
-            uint32_t curButtons = padData.buttons;
+            uint32_t curButtons = anyWizardButtons;
             uint32_t justPressed = curButtons & ~wizardPrevButtons;
             wizardPrevButtons = curButtons;
 
@@ -103,8 +111,10 @@ int main() {
             wizardFrames++;
         }
 
-        if (padHandle >= 0) {
-            scePadClose(padHandle);
+        for (int i = 0; i < 4; i++) {
+            if (padHandles[i] >= 0) {
+                scePadClose(padHandles[i]);
+            }
         }
         sceSystemServiceLoadExec("exit", NULL);
         exit(0);
@@ -134,13 +144,28 @@ int main() {
 
     // Main Interaction Loop
     for (;;) {
-        OrbisPadData padData;
-        memset(&padData, 0, sizeof(padData));
-        if (padHandle >= 0) {
-            scePadReadState(padHandle, &padData);
+        OrbisPadData padDataSlots[4];
+        uint32_t anyButtons = 0;
+        for (int i = 0; i < 4; i++) {
+            memset(&padDataSlots[i], 0, sizeof(padDataSlots[i]));
+            if (padHandles[i] >= 0) {
+                if (scePadReadState(padHandles[i], &padDataSlots[i]) == 0 && padDataSlots[i].connected) {
+                    anyButtons |= padDataSlots[i].buttons;
+                    tester.slotConnected[i] = true;
+                } else {
+                    tester.slotConnected[i] = false;
+                }
+            } else {
+                tester.slotConnected[i] = false;
+            }
         }
 
-        uint32_t curButtons = padData.buttons;
+        if (tester.selectedSlot < 0 || tester.selectedSlot >= 4) {
+            tester.selectedSlot = 0;
+        }
+        OrbisPadData padData = padDataSlots[tester.selectedSlot];
+
+        uint32_t curButtons = anyButtons;
         uint32_t justPressed = curButtons & ~prevButtons;
         prevButtons = curButtons;
 
@@ -196,7 +221,9 @@ int main() {
                     tester.rumbleFrames = 0;
                     tester.rumblePhase = 0;
                     OrbisPadVibeParam vibe = { 0, 0 };
-                    if (padHandle >= 0) scePadSetVibration(padHandle, &vibe);
+                    for (int i = 0; i < 4; i++) {
+                        if (padHandles[i] >= 0) scePadSetVibration(padHandles[i], &vibe);
+                    }
                     send_vibe_to_daemon(0, 0);
                 }
             }
@@ -207,7 +234,9 @@ int main() {
                     tester.rumbleFrames = 0;
                     tester.rumblePhase = 0;
                     OrbisPadVibeParam vibe = { 0, 0 };
-                    if (padHandle >= 0) scePadSetVibration(padHandle, &vibe);
+                    for (int i = 0; i < 4; i++) {
+                        if (padHandles[i] >= 0) scePadSetVibration(padHandles[i], &vibe);
+                    }
                     send_vibe_to_daemon(0, 0);
                 }
             }
@@ -277,6 +306,14 @@ int main() {
             }
         } else if (currentTabId == TAB_TESTER) {
             // --- TESTER & CALIBRATION TAB ---
+            // Left / Right / L2 / R2: Switch controller slot under test
+            if ((justPressed & ORBIS_PAD_BUTTON_LEFT) || (justPressed & ORBIS_PAD_BUTTON_L2)) {
+                tester.selectedSlot = (tester.selectedSlot + 3) % 4;
+            }
+            if ((justPressed & ORBIS_PAD_BUTTON_RIGHT) || (justPressed & ORBIS_PAD_BUTTON_R2)) {
+                tester.selectedSlot = (tester.selectedSlot + 1) % 4;
+            }
+
             // Square: Start Vibration Test
             if (justPressed & ORBIS_PAD_BUTTON_SQUARE) {
                 tester.rumbleFrames = 180; // 3 seconds
@@ -322,12 +359,15 @@ int main() {
                     vibe.lgMotor = 255;
                     vibe.smMotor = 255;
                 }
-                if (padHandle >= 0) scePadSetVibration(padHandle, &vibe);
+                int activeHandle = padHandles[tester.selectedSlot];
+                if (activeHandle >= 0) scePadSetVibration(activeHandle, &vibe);
                 send_vibe_to_daemon(vibe.lgMotor, vibe.smMotor);
             } else if (tester.rumblePhase != 0) {
                 tester.rumblePhase = 0;
                 OrbisPadVibeParam vibe = { 0, 0 };
-                if (padHandle >= 0) scePadSetVibration(padHandle, &vibe);
+                for (int i = 0; i < 4; i++) {
+                    if (padHandles[i] >= 0) scePadSetVibration(padHandles[i], &vibe);
+                }
                 send_vibe_to_daemon(0, 0);
             }
 
@@ -504,14 +544,14 @@ int main() {
         frameID++;
     }
 
-    if (padHandle >= 0) {
-        OrbisPadVibeParam vibe = { 0, 0 };
-        scePadSetVibration(padHandle, &vibe);
-        send_vibe_to_daemon(0, 0);
-        scePadClose(padHandle);
-    } else {
-        send_vibe_to_daemon(0, 0);
+    for (int i = 0; i < 4; i++) {
+        if (padHandles[i] >= 0) {
+            OrbisPadVibeParam vibe = { 0, 0 };
+            scePadSetVibration(padHandles[i], &vibe);
+            scePadClose(padHandles[i]);
+        }
     }
+    send_vibe_to_daemon(0, 0);
 
     // Gracefully exit back to PS4 shell without CE-34878-0
     sceSystemServiceLoadExec("exit", NULL);

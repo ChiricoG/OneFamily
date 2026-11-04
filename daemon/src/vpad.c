@@ -94,6 +94,7 @@ typedef struct {
     int assigned_slot;
     char assigned_username[64];
     uint8_t packet_counter;
+    uint64_t device_key;
 } VPadSlotState;
 
 static VPadSlotState g_slots[VPAD_MAX_SLOTS];
@@ -513,14 +514,14 @@ static int vpad_ensure_subsystem(void) {
     return 0;
 }
 
-int vpad_slot_open(VPadSource source, int *out_slot) {
+int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
     if (vpad_ensure_subsystem() != 0) {
         return -1;
     }
 
-    // Check if this source already has an active slot
+    // Check if this physical device already holds a slot
     for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
-        if (g_slots[i].active && g_slots[i].source == source) {
+        if (g_slots[i].active && g_slots[i].source == source && g_slots[i].device_key == device_key) {
             if (out_slot) *out_slot = i;
             return 0;
         }
@@ -540,12 +541,12 @@ int vpad_slot_open(VPadSource source, int *out_slot) {
         return -1;
     }
 
-    // Power off physical DS4 before opening the first virtual pad so its link drops cleanly
+    // Power off physical DS4 before opening the first virtual pad so its link drops cleanly (in MERGE mode only)
     bool any_prior_active = false;
     for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
         if (g_slots[i].active) { any_prior_active = true; break; }
     }
-    if (!any_prior_active) {
+    if (!any_prior_active && g_daemon_config.mode == CONFIG_MODE_MERGE) {
         vpad_poweroff_physical_ds4();
     }
 
@@ -566,14 +567,15 @@ int vpad_slot_open(VPadSource source, int *out_slot) {
     g_slots[slot].handle = vHandle;
     g_slots[slot].active = true;
     g_slots[slot].source = source;
+    g_slots[slot].device_key = device_key;
     g_slots[slot].assigned_slot = slot + 1;
     snprintf(g_slots[slot].assigned_username, sizeof(g_slots[slot].assigned_username), "User %d", slot + 1);
 
     g_vpad_active = true;
     g_vpad_handle = vHandle;
 
-    daemon_log(LOG_LEVEL_INFO, "Virtual DS4 Slot %d (%s) registered with handle=0x%X",
-               slot, source == VPAD_SOURCE_BT ? "Bluetooth" : "USB", vHandle);
+    daemon_log(LOG_LEVEL_INFO, "Virtual DS4 Slot %d (%s, dev_key=0x%llX) registered with handle=0x%X",
+               slot, source == VPAD_SOURCE_BT ? "Bluetooth" : "USB", (unsigned long long)device_key, vHandle);
 
     if (p_scePadSetConnection) {
         int r = p_scePadSetConnection(vHandle, 1);
@@ -586,6 +588,19 @@ int vpad_slot_open(VPadSource source, int *out_slot) {
 
     if (out_slot) *out_slot = slot;
     return 0;
+}
+
+int vpad_slot_open(VPadSource source, int *out_slot) {
+    return vpad_slot_open_dev(source, 0, out_slot);
+}
+
+void vpad_slot_close_dev(VPadSource source, uint64_t device_key) {
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active && g_slots[i].source == source && g_slots[i].device_key == device_key) {
+            vpad_slot_close(i);
+            return;
+        }
+    }
 }
 
 void vpad_slot_close(int slot) {
@@ -822,8 +837,10 @@ void vpad_poll_rumble(void) {
                 g_slots[i].last_rumble_send_us = now;
 
                 if (g_slots[i].source == VPAD_SOURCE_BT) {
-                    uint8_t color[3] = { cr, cg, cb };
-                    bt_driver_send_rumble(lg, sm, color);
+                    if (g_daemon_config.enable_rumble) {
+                        uint8_t color[3] = { cr, cg, cb };
+                        bt_driver_send_rumble_slot(i, lg, sm, color);
+                    }
                 } else if (g_slots[i].source == VPAD_SOURCE_USB) {
                     if (g_rumble_cb) {
                         g_rumble_cb(lg, sm);

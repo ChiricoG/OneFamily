@@ -15,7 +15,7 @@ typedef enum {
 } ConfigMode;
 #endif
 
-#define VPAD_MAX_SLOTS 2
+#define VPAD_MAX_SLOTS 4
 
 typedef enum {
     VPAD_SOURCE_NONE = 0,
@@ -29,7 +29,9 @@ extern "C" {
 
 // Multi-Slot Device Lifecycle
 int  vpad_slot_open(VPadSource source, int *out_slot);
+int  vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot);
 void vpad_slot_close(int slot);
+void vpad_slot_close_dev(VPadSource source, uint64_t device_key);
 bool vpad_slot_is_active(int slot);
 int  vpad_send_data_slot(int slot, const OrbisPadData *data);
 void vpad_pulse_ps_button_slot(int slot);
