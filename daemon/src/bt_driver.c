@@ -54,6 +54,8 @@ typedef struct {
     bool     connected;       // reports currently arriving
     uint64_t last_input_time; // timestamp of last report
     uint64_t away_since;      // timestamp when pad went silent during grace period
+    uint64_t last_output_time;// timestamp of last sent output report (rumble / keep-alive)
+    uint8_t  last_color[3];   // cached current lightbar color for keep-alive reports
     uint32_t reports_seen;
     uint32_t decode_drops;
     uint8_t  last_drop_len;
@@ -80,6 +82,9 @@ static void bt_device_init_entry(BtDevice *dev) {
     dev->vpad_slot = -1;
     dev->battery_pct = 100;
     dev->orientation[3] = 1.0f;
+    dev->last_color[0] = 0;
+    dev->last_color[1] = 112;
+    dev->last_color[2] = 209; // Default PlayStation Blue
     for (int a = 0; a < 3; ++a) {
         dev->calibration.gyro_scale[a] = (2000.0f * 0.01745329252f) / 32768.0f;
         dev->calibration.accel_scale[a] = 1.0f / 8192.0f;
@@ -993,6 +998,15 @@ void bt_driver_poll_step(void) {
         }
     }
 
+    // Periodic Bluetooth output report keep-alive heartbeat (every 2.5 seconds)
+    // Prevents DualSense internal hardware auto-sleep watchdog from turning off controller during idle cutscenes
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        BtDevice *dev = &s_devices[i];
+        if (dev->connected && dev->address && (now_us - dev->last_output_time >= 2500000ULL)) {
+            bt_send_rumble_dev(dev, 0, 0, dev->last_color);
+        }
+    }
+
     struct {
         long seconds;
         long nanoseconds;
@@ -1257,6 +1271,13 @@ int bt_driver_connected_count(void) {
 static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, const uint8_t color[3]) {
     if (!dev || !dev->connected || s_bt_fd < 0 || !dev->address) return;
 
+    dev->last_output_time = daemon_sys_time_us();
+    if (color && (color[0] || color[1] || color[2])) {
+        dev->last_color[0] = color[0];
+        dev->last_color[1] = color[1];
+        dev->last_color[2] = color[2];
+    }
+
     uint8_t out[78];
     memset(out, 0, sizeof(out));
 
@@ -1355,6 +1376,10 @@ static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, cons
             out[47] = color[0];
             out[48] = color[1];
             out[49] = color[2];
+        } else if (dev->last_color[0] || dev->last_color[1] || dev->last_color[2]) {
+            out[47] = dev->last_color[0];
+            out[48] = dev->last_color[1];
+            out[49] = dev->last_color[2];
         } else {
             out[47] = 0;
             out[48] = 112;

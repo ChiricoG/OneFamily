@@ -758,8 +758,6 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
     // ========================================================
     int barX = CARD_X;
     int barY = 222;
-    int barH = 46;
-    int barW = CARD_W;
 
     draw_image(scene, btnL2, barX + 6, barY + 9);
 
