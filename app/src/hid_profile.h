@@ -6,11 +6,13 @@
 
 struct DualSenseDeviceInfo {
     int slot;
+    int player_slot;
+    std::string user_name;
     std::string mac;
     int battery_pct;
     bool battery_charging;
 
-    DualSenseDeviceInfo() : slot(1), mac(""), battery_pct(100), battery_charging(false) {}
+    DualSenseDeviceInfo() : slot(1), player_slot(1), user_name("Player 1"), mac(""), battery_pct(100), battery_charging(false) {}
 };
 
 struct HidStatus {

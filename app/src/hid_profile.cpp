@@ -104,6 +104,12 @@ bool HidProfile::read_status(HidStatus& out) {
                             }
                             if (strcmp(field, "slot") == 0) {
                                 out.devices[devIdx].slot = atoi(v.c_str());
+                                out.devices[devIdx].player_slot = out.devices[devIdx].slot;
+                            } else if (strcmp(field, "player_slot") == 0) {
+                                out.devices[devIdx].player_slot = atoi(v.c_str());
+                                out.devices[devIdx].slot = out.devices[devIdx].player_slot;
+                            } else if (strcmp(field, "user") == 0 || strcmp(field, "user_name") == 0) {
+                                out.devices[devIdx].user_name = v;
                             } else if (strcmp(field, "mac") == 0) {
                                 out.devices[devIdx].mac = v;
                             } else if (strcmp(field, "battery") == 0) {

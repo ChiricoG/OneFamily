@@ -976,7 +976,39 @@ void usb_driver_poll_step(void) {
     int read_len = 64;
     // 2ms timeout matches low-latency 250 Hz pacing: returns immediately if packet is ready,
     // or unblocks within 2ms so the main loop never starves other subsystems (BT, rumble, vpad).
+    uint64_t xfer_start_us = daemon_sys_time_us();
     int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 2);
+    uint64_t xfer_dur_us = daemon_sys_time_us() - xfer_start_us;
+
+    // High-Polling USB FIFO Drain (Targeted exclusively for Xbox 360 / XInput pro adapters like GuliKit KK3 Max 2.4GHz):
+    // If a 500Hz/1000Hz adapter streams reports faster than our 250 Hz loop consumes them,
+    // the host USB FIFO buffer accumulates reports, introducing hundreds of milliseconds of input lag.
+    // If the initial transfer completed almost instantaneously (< 250 us), queued reports are waiting in the hardware ring buffer.
+    // Safely drain pending packets to zero-latency head while merging button masks.
+    if (ret == 0 && transferred >= 14 && g_usb_state.type == CONTROLLER_XBOX360 && xfer_dur_us < 250ULL) {
+        uint8_t next_rx[128];
+        int next_transferred = 0;
+        int drain_count = 0;
+        while (drain_count < 8) {
+            int drain_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, next_rx, read_len, &next_transferred, 1);
+            if (drain_ret == 0 && next_transferred >= 14) {
+                if (!g_usb_state.is_wireless) {
+                    // Wired report (standard 20 bytes): buttons at rx[2] and rx[3]
+                    next_rx[2] |= rx[2];
+                    next_rx[3] |= rx[3];
+                } else if (next_transferred >= 24 && transferred >= 24) {
+                    // Wireless report (24+ bytes with 4-byte RF prefix): buttons at rx[6] and rx[7]
+                    next_rx[6] |= rx[6];
+                    next_rx[7] |= rx[7];
+                }
+                memcpy(rx, next_rx, next_transferred);
+                transferred = next_transferred;
+                drain_count++;
+            } else {
+                break; // Hardware FIFO queue is now fully drained!
+            }
+        }
+    }
 
     if (ret == 0 && transferred > 0) {
         s_consecutive_disconnects = 0;
