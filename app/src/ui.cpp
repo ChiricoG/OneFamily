@@ -761,9 +761,9 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
 
     draw_image(scene, btnL2, barX + 6, barY + 9);
 
-    int pillsStartX = barX + 54;
-    int pillW = 210;
-    int pillGap = 16;
+    int pillsStartX = barX + 46;
+    int pillW = 220;
+    int pillGap = 12;
     for (int s = 0; s < 4; s++) {
         int px = pillsStartX + s * (pillW + pillGap);
         int py = barY + 4;
@@ -778,15 +778,16 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
 
         // Status LED dot
         Color dotColor = isConn ? Color{ 0, 255, 150 } : Color{ 80, 95, 110 };
-        draw_circle(scene, px + 20, py + 19, 5, dotColor);
+        draw_circle(scene, px + 16, py + 19, 5, dotColor);
 
         char slotLabel[48];
         snprintf(slotLabel, sizeof(slotLabel), "Player %d %s", s + 1, isConn ? "(Active)" : "(Off)");
-        draw_text(scene, slotLabel, fontCardTitle, px + 36, py + 26, isSel ? COLOR_WHITE : (isConn ? Color{ 200, 220, 240 } : COLOR_TEXT_DIM));
+        draw_text(scene, slotLabel, fontSubtitle, px + 30, py + 26, isSel ? COLOR_WHITE : (isConn ? Color{ 200, 220, 240 } : COLOR_TEXT_DIM));
     }
 
-    draw_image(scene, btnR2, pillsStartX + 4 * (pillW + pillGap) - pillGap + 12, barY + 9);
-    draw_text(scene, "Switch: [L2]/[R2] or [D-Pad]", fontCardDesc, pillsStartX + 4 * (pillW + pillGap) + 52, barY + 27, COLOR_TEXT_DIM);
+    int r2X = pillsStartX + 4 * pillW + 3 * pillGap + 10;
+    draw_image(scene, btnR2, r2X, barY + 9);
+    draw_text(scene, "Switch: [L2]/[R2] or [D-Pad]", fontCardDesc, r2X + 38, barY + 27, COLOR_TEXT_DIM);
 
     // Check if selected controller slot is connected
     if (!padData.connected) {
