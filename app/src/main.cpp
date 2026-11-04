@@ -300,6 +300,8 @@ int main() {
             // Save on CROSS (X)
             if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
                 if (configMgr.save()) {
+                    int rfd = sceKernelOpen("/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                    if (rfd >= 0) sceKernelClose(rfd);
                     toastText = "Settings saved to /data/onefamily/onefamily.ini";
                     toastFrames = 180; // ~3 seconds toast feedback
                 }
@@ -458,6 +460,8 @@ int main() {
             // Save on CROSS (X)
             if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
                 if (configMgr.save()) {
+                    int rfd = sceKernelOpen("/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                    if (rfd >= 0) sceKernelClose(rfd);
                     toastText = "DualSense settings saved & active!";
                     toastFrames = 180;
                 }

@@ -7,6 +7,7 @@
 #include "ini_parser.h"
 #include "log.h"
 #include "daemon_syscalls.h"
+#include "bt_driver.h"
 #include <fcntl.h>
 #include <string.h>
 
@@ -214,7 +215,22 @@ void daemon_config_load(DaemonConfig *cfg) {
 }
 
 bool daemon_config_check_reload(DaemonConfig *cfg) {
-    // Simply reload config periodically
+    if (!cfg) return false;
+    DaemonConfig old = *cfg;
     daemon_config_load(cfg);
+
+    bool ds_changed = (
+        old.dualsense_lightbar_mode != cfg->dualsense_lightbar_mode ||
+        old.dualsense_lightbar_color != cfg->dualsense_lightbar_color ||
+        old.dualsense_brightness != cfg->dualsense_brightness ||
+        old.dualsense_trigger_mode != cfg->dualsense_trigger_mode ||
+        old.dualsense_player_leds != cfg->dualsense_player_leds
+    );
+
+    if (ds_changed) {
+        daemon_log(LOG_LEVEL_INFO, "DualSense configuration changed: applying settings on the fly!");
+        bt_driver_refresh_settings();
+    }
+
     return true;
 }

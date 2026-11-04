@@ -128,6 +128,8 @@ int main(int argc, char *argv[]) {
                     generic_hid_reload(g_usb_state.vid, g_usb_state.pid);
                     daemon_notify("OneFamily: HID Profile Reloaded");
                 }
+                daemon_config_load(&g_daemon_config);
+                bt_driver_refresh_settings();
             }
         }
 

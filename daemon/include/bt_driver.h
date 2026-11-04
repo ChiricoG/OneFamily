@@ -65,6 +65,12 @@ void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3])
  */
 void bt_driver_send_rumble_slot(int vpad_slot, uint8_t large, uint8_t small, const uint8_t color[3]);
 
+/**
+ * Re-send current hardware configuration (lightbar, brightness, player LEDs, trigger effects)
+ * to all connected DualSense controllers on the fly without waiting for game rumble events.
+ */
+void bt_driver_refresh_settings(void);
+
 #ifdef __cplusplus
 }
 #endif

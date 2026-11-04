@@ -72,6 +72,8 @@ typedef struct {
 
 static BtDevice s_devices[BT_MAX_DEVICES];
 
+static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, const uint8_t color[3]);
+
 static void bt_device_init_entry(BtDevice *dev) {
     if (!dev) return;
     memset(dev, 0, sizeof(*dev));
@@ -784,6 +786,8 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             daemon_notify("OneFamily: DualSense (Player %d) Reconnected", slot_num);
             daemon_log(LOG_LEVEL_INFO, "controller_reconnected: DualSense BT 0x%llX (Slot %d, Player %d)",
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
+            uint8_t init_color[3] = { 0, 112, 209 };
+            bt_send_rumble_dev(dev, 0, 0, init_color);
         } else {
             // New device connection
             if (vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot) != 0 || dev->vpad_slot < 0) {
@@ -798,6 +802,8 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             daemon_notify("OneFamily: DualSense Wireless (Player %d)", slot_num);
             daemon_log(LOG_LEVEL_INFO, "controller_connected: DualSense BT 0x%llX (Slot %d, Player %d)",
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
+            uint8_t init_color[3] = { 0, 112, 209 };
+            bt_send_rumble_dev(dev, 0, 0, init_color);
         }
         bt_write_status_file();
     }
@@ -1389,6 +1395,15 @@ void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3])
         if (s_devices[i].connected) {
             bt_send_rumble_dev(&s_devices[i], large, small, color);
             return;
+        }
+    }
+}
+
+void bt_driver_refresh_settings(void) {
+    uint8_t default_color[3] = { 0, 112, 209 };
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        if (s_devices[i].connected) {
+            bt_send_rumble_dev(&s_devices[i], 0, 0, default_color);
         }
     }
 }
