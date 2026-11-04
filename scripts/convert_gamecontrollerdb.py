@@ -463,16 +463,19 @@ def convert_to_ini(entry):
     lines.append("ly = y")
     lines.append("rx = z")
     lines.append("ry = rz")
-    # If triggers are analog axes in mappings
-    if 'lefttrigger' in mappings and mappings['lefttrigger'].startswith('a'):
-        lines.append("l2 = rx")
-    if 'righttrigger' in mappings and mappings['righttrigger'].startswith('a'):
-        lines.append("r2 = ry")
 
     lines.append("")
     lines.append("[Invert]")
-    lines.append("invert_ly = 0")
-    lines.append("invert_ry = 0")
+    inv_lx = 1 if ('leftx' in mappings and '~' in mappings['leftx']) else 0
+    inv_ly = 1 if ('lefty' in mappings and '~' in mappings['lefty']) else 0
+    inv_rx = 1 if ('rightx' in mappings and '~' in mappings['rightx']) else 0
+    inv_ry = 1 if ('righty' in mappings and '~' in mappings['righty']) else 0
+    if inv_lx:
+        lines.append(f"invert_lx = {inv_lx}")
+    lines.append(f"invert_ly = {inv_ly}")
+    if inv_rx:
+        lines.append(f"invert_rx = {inv_rx}")
+    lines.append(f"invert_ry = {inv_ry}")
     lines.append("")
     lines.append("[Rumble]")
     name_lower = name.lower()
