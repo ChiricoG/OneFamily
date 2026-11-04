@@ -35,6 +35,10 @@ const std::vector<std::string> ConfigManager::SWITCH_OPTIONS = {
     "Positional", "By Letter"
 };
 
+const std::vector<std::string> ConfigManager::USB_MODE_OPTIONS = {
+    "Auto (Recommended)", "Force XInput (Xbox)", "Force Switch", "Force Generic HID"
+};
+
 const std::vector<std::string> ConfigManager::DS_LIGHTBAR_OPTIONS = {
     "Game Sync", "Static Color", "Battery Status", "Off"
 };
@@ -158,6 +162,9 @@ bool ConfigManager::load() {
                 } else if (strcasecmp(key.c_str(), "switch_positional_layout") == 0) {
                     int v = atoi(val.c_str());
                     config.switch_index = (v != 0) ? 0 : 1; // 0=Positional (1), 1=By Letter (0)
+                } else if (strcasecmp(key.c_str(), "usb_mode_override") == 0 || strcasecmp(key.c_str(), "usb_override") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)USB_MODE_OPTIONS.size()) config.usb_mode_override = v;
                 } else if (strcasecmp(key.c_str(), "dualsense_lightbar_mode") == 0 || strcasecmp(key.c_str(), "lightbar_mode") == 0) {
                     int v = atoi(val.c_str());
                     if (v >= 0 && v < (int)DS_LIGHTBAR_OPTIONS.size()) config.ds_lightbar_mode = v;
@@ -223,6 +230,9 @@ bool ConfigManager::save() {
         "swap_triggers_bumpers = %d\n"
         "switch_positional_layout = %d\n"
         "\n"
+        "[Hardware]\n"
+        "usb_mode_override = %d\n"
+        "\n"
         "[DualSense]\n"
         "dualsense_lightbar_mode = %d\n"
         "dualsense_lightbar_color = %d\n"
@@ -235,6 +245,7 @@ bool ConfigManager::save() {
         rumble_val,
         swap_val,
         switch_val,
+        config.usb_mode_override,
         config.ds_lightbar_mode,
         config.ds_lightbar_color,
         config.ds_brightness,

@@ -8,6 +8,7 @@
 #include "switch_controller.h"
 #include "stadia.h"
 #include "generic_hid.h"
+#include "config.h"
 #include "log.h"
 #include <string.h>
 
@@ -218,7 +219,7 @@ static int detect_switch_pro_endpoints(libusb_device* dev, DetectedController* o
                 out->interface_num = alt->bInterfaceNumber;
                 out->alt_setting   = alt->bAlternateSetting;
                 out->ep_in         = ep_in;
-                out->ep_out        = ep_out ? ep_out : 0x01;
+                out->ep_out        = ep_out;
                 found = 1;
             }
         }
@@ -284,9 +285,21 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         return 0;
     }
 
-    // 1. Sony DualShock 3 & DualSense
+    int override = g_daemon_config.usb_mode_override;
 
-    if (desc->idVendor == SONY_VID) {
+    // Force Generic HID override
+    if (override == USB_OVERRIDE_FORCE_GENERIC) {
+        if (generic_hid_detect(dev, out)) {
+            out->generic = 1;
+            out->vid = desc->idVendor;
+            out->pid = desc->idProduct;
+            daemon_log(LOG_LEVEL_INFO, "USB Override: Claimed as Generic HID (VID:0x%04X PID:0x%04X)", desc->idVendor, desc->idProduct);
+            return 1;
+        }
+    }
+
+    // 1. Sony DualShock 3 & DualSense
+    if (override == USB_OVERRIDE_AUTO && desc->idVendor == SONY_VID) {
         if (desc->idProduct == SONY_DS3_PID) {
             out->type = CONTROLLER_DS3;
             out->vid = desc->idVendor;
@@ -310,29 +323,29 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
     }
 
     // 2. Microsoft Xbox 360 & Xbox One / Series / PDP Victrix
-    if (desc->idVendor == XBOX_VID) {
-        if (desc->idProduct == XBOX360_PID) {
-            out->type = CONTROLLER_XBOX360;
-            out->vid = desc->idVendor;
-            out->pid = desc->idProduct;
-            out->interface_num = 0;
-            out->ep_in = 0x81;
-            out->ep_out = 0x01;
-            return 1;
-        } else if (is_xone_pid(desc->idProduct)) {
-            out->type = CONTROLLER_XBOXONE;
-            out->vid = desc->idVendor;
-            out->pid = desc->idProduct;
-            if (!controller_detect_by_descriptor(dev, out)) {
+    if (override != USB_OVERRIDE_FORCE_SWITCH) {
+        if (desc->idVendor == XBOX_VID) {
+            if (desc->idProduct == XBOX360_PID) {
+                out->type = CONTROLLER_XBOX360;
+                out->vid = desc->idVendor;
+                out->pid = desc->idProduct;
                 out->interface_num = 0;
-                out->alt_setting = 1; // Explicitly activate alternate setting 1 for GIP interrupt endpoints!
-                out->ep_in = 0x82;
-                out->ep_out = 0x02;
+                out->ep_in = 0x81;
+                out->ep_out = 0x01;
+                return 1;
+            } else if (is_xone_pid(desc->idProduct)) {
+                out->type = CONTROLLER_XBOXONE;
+                out->vid = desc->idVendor;
+                out->pid = desc->idProduct;
+                if (!controller_detect_by_descriptor(dev, out)) {
+                    out->interface_num = 0;
+                    out->alt_setting = 1; // Explicitly activate alternate setting 1 for GIP interrupt endpoints!
+                    out->ep_in = 0x82;
+                    out->ep_out = 0x02;
+                }
+                return 1;
             }
-            return 1;
-        }
-    } else if (desc->idVendor == PDP_VID) {
-        if (desc->idProduct == VICTRIX_PRO_BFG_XBOX_PID) {
+        } else if (desc->idVendor == PDP_VID && desc->idProduct == VICTRIX_PRO_BFG_XBOX_PID) {
             out->type = CONTROLLER_XBOXONE;
             out->vid = desc->idVendor;
             out->pid = desc->idProduct;
@@ -346,21 +359,36 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         }
     }
 
-    // 3. Nintendo Switch Pro & Official Controllers
-    if (is_switch_pro_controller(desc->idVendor, desc->idProduct)) {
+    // 3. PRIORITY CHECK: Generic Descriptor-based detection (Third-Party Xbox 360 / Xbox One GIP)
+    // CRITICAL FIX: Executed BEFORE Switch Pro detection so that multi-mode controllers
+    // (such as Trust GXT 542 Muta, Machenike, EasySMX, etc.) that expose an XInput interface
+    // are claimed immediately as Xbox controllers with native analog triggers, rumble, and no 0x80 crashes!
+    if (override != USB_OVERRIDE_FORCE_SWITCH) {
+        if (controller_detect_by_descriptor(dev, out)) {
+            out->generic = 1;
+            out->vid = desc->idVendor;
+            out->pid = desc->idProduct;
+            daemon_log(LOG_LEVEL_INFO, "Device VID:0x%04X PID:0x%04X claimed via XInput descriptor (%s)",
+                       desc->idVendor, desc->idProduct, (out->type == CONTROLLER_XBOXONE ? "Xbox One" : "Xbox 360"));
+            return 1;
+        }
+    }
+
+    // 4. Nintendo Switch Pro & Official / Clone Controllers (only if no XInput interface was exposed)
+    if (override != USB_OVERRIDE_FORCE_XINPUT && is_switch_pro_controller(desc->idVendor, desc->idProduct)) {
         out->type = CONTROLLER_SWITCH_PRO;
         out->vid = desc->idVendor;
         out->pid = desc->idProduct;
         if (!detect_switch_pro_endpoints(dev, out)) {
             out->interface_num = 0;
             out->ep_in = 0x81;
-            out->ep_out = 0x01;
+            out->ep_out = 0;
         }
         return 1;
     }
 
-    // 4. Nintendo Switch Third-Party Input-Only (PDP, etc.)
-    if (is_switch_input_only_controller(desc->idVendor, desc->idProduct)) {
+    // 5. Nintendo Switch Third-Party Input-Only (PDP Rock Candy, etc.)
+    if (override != USB_OVERRIDE_FORCE_XINPUT && is_switch_input_only_controller(desc->idVendor, desc->idProduct)) {
         out->type = CONTROLLER_SWITCH;
         out->vid = desc->idVendor;
         out->pid = desc->idProduct;
@@ -370,8 +398,8 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         return 1;
     }
 
-    // 5. Google Stadia Controller
-    if (desc->idVendor == GOOGLE_VID && desc->idProduct == STADIA_CONTROLLER_PID) {
+    // 6. Google Stadia Controller
+    if (override == USB_OVERRIDE_AUTO && desc->idVendor == GOOGLE_VID && desc->idProduct == STADIA_CONTROLLER_PID) {
         out->type = CONTROLLER_STADIA;
         out->vid = desc->idVendor;
         out->pid = desc->idProduct;
@@ -380,14 +408,6 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->ep_in = 0x81;
             out->ep_out = 0x01;
         }
-        return 1;
-    }
-
-    // 6. Generic Descriptor-based detection (Third-Party Xbox 360 / Xbox One)
-    if (controller_detect_by_descriptor(dev, out)) {
-        out->generic = 1;
-        out->vid = desc->idVendor;
-        out->pid = desc->idProduct;
         return 1;
     }
 

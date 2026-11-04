@@ -78,6 +78,10 @@ typedef struct {
     /* Custom INI rumble override (`rumble = ...`, 0xFF = disabled) */
     uint8_t     custom_rumble_len;
     RumbleToken custom_rumble[MAX_RUMBLE_TEMPLATE];
+
+    /* Active device identifiers */
+    uint16_t    vid;
+    uint16_t    pid;
 } GenericHidContext;
 
 typedef struct {
@@ -468,8 +472,9 @@ static const struct { uint16_t vid, pid; const char *map; } k_builtin[] = {
     { 0x2563, 0x0523, SHANWAN_ORDER }, /* ShanWan PS3/PC Gamepad */
     { 0x2563, 0x0575, SHANWAN_ORDER }, /* ShanWan Wireless Gamepad */
     { 0x046D, 0xC216, LOGITECH_DINPUT_ORDER }, /* Logitech F310 / Dual Action (DirectInput mode) */
-    { 0x046D, 0xC219, LOGITECH_DINPUT_ORDER }, /* Logitech F710 Wireless (DirectInput mode) */
-    { 0x046D, 0xC218, LOGITECH_DINPUT_ORDER }, /* Logitech RumblePad 2 (DirectInput mode) */
+    { 0x046D, 0xC219, LOGITECH_DINPUT_ORDER }, /* Logitech F710 Wireless / Cordless Rumblepad 2 (DirectInput mode) */
+    { 0x046D, 0xC218, LOGITECH_DINPUT_ORDER }, /* Logitech RumblePad 2 / F510 (DirectInput mode) */
+    { 0x046D, 0xC211, LOGITECH_DINPUT_ORDER }, /* Logitech WingMan RumblePad (DirectInput mode) */
     { 0xFFFF, 0x046E, ANDROID_ORDER },      /* GameSir G3s */
     { 0x05AC, 0x022D, ANDROID_ORDER },      /* GameSir G3s, alternate mode */
     { 0xFFFF, 0x046F, ANDROID_ORDER },      /* GameSir G4s */
@@ -682,6 +687,8 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
     memset(&s_state, 0, sizeof(s_state));
     s_state.lx = s_state.ly = s_state.rx = s_state.ry = 128;
     s_configured = 0;
+    s_ctx.vid = vid;
+    s_ctx.pid = pid;
 
     static uint8_t report_desc[1024];
     int desc_len = 0;
@@ -695,8 +702,10 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
         }
         // Universal HID Wake-up: Send SET_IDLE (bmRequestType: 0x21, bRequest: 0x0A, wValue: 0, wIndex: iface)
         // Many microcontroller pads/dongles stay in low-power idle until a SET_IDLE arrives.
-        // Skip SET_IDLE for ShanWan and Betop (0x2563, 0x20BC): their firmware crashes/stalls on SET_IDLE!
-        if (vid != 0x2563 && vid != 0x20BC) {
+        // Skip SET_IDLE for ShanWan, Betop and Logitech (0x2563, 0x20BC, 0x046D):
+        // Logitech RumblePad 2 / Cordless / Dual Action suffer from the LG_NOGET hardware quirk
+        // where control requests stall the USB pipe and silence the interrupt endpoint.
+        if (vid != 0x2563 && vid != 0x20BC && vid != 0x046D) {
             ctrl_transfer(h, 0x21, 0x0A, 0x0000, (uint16_t)iface, NULL, 0, 100);
         }
     }
@@ -738,6 +747,8 @@ int generic_hid_get_nbuttons(void) {
 }
 
 void generic_hid_reload(uint16_t vid, uint16_t pid) {
+    s_ctx.vid = vid;
+    s_ctx.pid = pid;
     s_ctx.custom_rumble_len = 0;
     default_mapping(&s_ctx);
     int has_builtin = builtin_map(&s_ctx, vid, pid);
@@ -763,6 +774,47 @@ int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, cons
         DS4_BUTTON_DPAD_LEFT,
         DS4_BUTTON_DPAD_UP | DS4_BUTTON_DPAD_LEFT,
     };
+
+    // Dedicated deterministic parsing for Logitech DirectInput gamepads
+    // (VID 0x046D: RumblePad 2 USB 0xC218, Cordless 0xC219, Dual Action / F310 0xC216, WingMan 0xC211)
+    if (s_ctx.vid == 0x046D && (s_ctx.pid == 0xC218 || s_ctx.pid == 0xC219 || s_ctx.pid == 0xC216 || s_ctx.pid == 0xC211) && len >= 6) {
+        s_state.lx = rx[0];
+        s_state.ly = rx[1];
+        s_state.rx = rx[2];
+        s_state.ry = rx[3];
+
+        uint8_t hat = rx[4] & 0x0F;
+        uint32_t b = 0;
+        if (hat < 8) b |= dirs[hat];
+
+        // Buttons 1-4 (Square, Cross, Circle, Triangle) from high nibble of byte 4
+        if (rx[4] & 0x10) b |= s_ctx.button_map[0]; // Button 1 -> Square
+        if (rx[4] & 0x20) b |= s_ctx.button_map[1]; // Button 2 -> Cross
+        if (rx[4] & 0x40) b |= s_ctx.button_map[2]; // Button 3 -> Circle
+        if (rx[4] & 0x80) b |= s_ctx.button_map[3]; // Button 4 -> Triangle
+
+        // Buttons 5-12 (L1, R1, L2, R2, Select, Start, L3, R3) from byte 5
+        for (int i = 0; i < 8; i++) {
+            if (rx[5] & (1 << i)) {
+                b |= s_ctx.button_map[4 + i];
+            }
+        }
+
+        s_state.buttons = b;
+        s_state.l2 = (b & DS4_BUTTON_L2) ? 255 : 0;
+        s_state.r2 = (b & DS4_BUTTON_R2) ? 255 : 0;
+
+        uint8_t deadzone = cfg ? cfg->stick_deadzone : 15;
+        out->leftStick.x  = translator_apply_deadzone(s_state.lx, deadzone);
+        out->leftStick.y  = translator_apply_deadzone(s_state.ly, deadzone);
+        out->rightStick.x = translator_apply_deadzone(s_state.rx, deadzone);
+        out->rightStick.y = translator_apply_deadzone(s_state.ry, deadzone);
+        out->analogButtons.l2 = s_state.l2;
+        out->analogButtons.r2 = s_state.r2;
+        out->buttons = s_state.buttons;
+        out->connected = 1;
+        return 1;
+    }
 
     const uint8_t *d = rx;
     uint8_t rid = 0;
@@ -833,8 +885,13 @@ int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, cons
         uint8_t hat = rx[off + 4] & 0x0F;
         mask |= DS4_BUTTON_DPAD_UP | DS4_BUTTON_DPAD_DOWN | DS4_BUTTON_DPAD_LEFT | DS4_BUTTON_DPAD_RIGHT;
         if (hat < 8) b |= dirs[hat];
-        if (len >= off + 7) {
-            uint16_t btns = (uint16_t)rx[off + 5] | ((uint16_t)rx[off + 6] << 8);
+        if (len >= off + 6) {
+            uint16_t btns = (uint16_t)rx[off + 5] | ((uint16_t)(len >= off + 7 ? rx[off + 6] : 0) << 8);
+            uint8_t nibble_btns = (rx[off + 4] >> 4) & 0x0F;
+            if (nibble_btns != 0 && (btns & 0x0F) == 0) {
+                // Handle pads where buttons 1-4 are packed into the high nibble of byte 4
+                btns = ((uint16_t)btns << 4) | nibble_btns;
+            }
             int max_fallback_btns = (s_ctx.nbuttons > 0 && s_ctx.nbuttons <= 14) ? s_ctx.nbuttons : 12;
             for (int i = 0; i < max_fallback_btns; i++) {
                 // In unconfigured raw fallback, ignore phantom PS / Touchpad bindings from telemetry bits

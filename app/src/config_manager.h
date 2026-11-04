@@ -14,6 +14,7 @@ struct AppConfig {
     int swap_index;         // 0 = Disabled, 1 = Enabled
     int rumble_index;       // 0 = Enabled, 1 = Disabled
     int switch_index;       // 0 = Positional, 1 = By Letter
+    int usb_mode_override;  // 0 = Auto (Recommended), 1 = Force XInput, 2 = Force Switch, 3 = Force Generic HID
 
     // [DualSense]
     int ds_lightbar_mode;   // 0=Game Sync, 1=Static Color, 2=Battery, 3=Off
@@ -33,6 +34,7 @@ struct AppConfig {
         swap_index = 0;         // Disabled
         rumble_index = 0;       // Enabled
         switch_index = 0;       // Positional
+        usb_mode_override = 0;  // Auto (Recommended)
         ds_lightbar_mode = 0;
         ds_lightbar_color = 0;
         ds_brightness = 0;
@@ -51,6 +53,7 @@ public:
     static const std::vector<std::string> SWAP_OPTIONS;
     static const std::vector<std::string> RUMBLE_OPTIONS;
     static const std::vector<std::string> SWITCH_OPTIONS;
+    static const std::vector<std::string> USB_MODE_OPTIONS;
 
     // DualSense Options
     static const std::vector<std::string> DS_LIGHTBAR_OPTIONS;

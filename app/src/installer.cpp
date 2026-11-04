@@ -96,7 +96,8 @@ static bool update_payloads_ini() {
         found = read_text_file(PAYLOADS_INI_USER_PATH, content);
     }
 
-    const std::string entryLine = "/user/data/payloads/onefamily.bin = 1";
+    const std::string entryLine = "/data/payloads/onefamily.bin = 1";
+    const std::string legacyEntry = "/user/data/payloads/onefamily.bin";
 
     if (!found || content.empty()) {
         // File does not exist yet; create it with default [AutoRun] section
@@ -107,6 +108,13 @@ static bool update_payloads_ini() {
     }
 
     bool modified = false;
+
+    // Migrate legacy /user/data/payloads/onefamily.bin to canonical /data/payloads/onefamily.bin
+    size_t legacyPos = content.find(legacyEntry);
+    if (legacyPos != std::string::npos) {
+        content.replace(legacyPos, legacyEntry.length(), "/data/payloads/onefamily.bin");
+        modified = true;
+    }
 
     // Remove any obsolete legacy xbox_controller.bin autorun lines
     size_t xpos = 0;
@@ -233,6 +241,11 @@ bool Installer::isInstalled() {
 
     if (content.find("onefamily.bin") == std::string::npos) {
         return false;
+    }
+
+    // Migrate legacy /user/data/payloads entry to /data/payloads in-place if needed
+    if (content.find("/user/data/payloads/onefamily.bin") != std::string::npos) {
+        update_payloads_ini();
     }
 
     return true;

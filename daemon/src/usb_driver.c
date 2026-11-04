@@ -141,6 +141,8 @@ static int s_consecutive_disconnects = 0;
 static int s_consecutive_transfer_errors = 0;
 static int s_consecutive_timeouts = 0;
 static int s_x360_ep_out_stalls = 0;
+static int s_xone_ep_out_stalls = 0;
+static int s_x360_wireless_present = -1;
 
 static void write_status_file(bool connected, ControllerType type, uint16_t vid, uint16_t pid, const char* name, int nbuttons) {
     daemon_sys_mkdir("/data", 0777);
@@ -217,6 +219,8 @@ static void close_controller(void) {
     s_consecutive_transfer_errors = 0;
     s_consecutive_timeouts = 0;
     s_x360_ep_out_stalls = 0;
+    s_xone_ep_out_stalls = 0;
+    s_x360_wireless_present = -1;
     s_share_combo_active = false;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
     s_last_ds4.leftStick.x = 128;
@@ -274,9 +278,22 @@ static void init_gip_controller(void) {
     uint8_t pdp_init2[] = { 0x06, 0x20, s_gip_init_seq++, 0x02, 0x01, 0x00 };
     send_init_packet(pdp_init2, sizeof(pdp_init2));
     daemon_sys_usleep(10000);
+
+    // 6. PowerA force feedback subsystem activation ("rumble kick" + stop per Linux xpad.c)
+    uint8_t powera_rumble_start[] = {
+        0x09, 0x00, s_gip_init_seq++, 0x09, 0x00, 0x0F, 0x00, 0x00, 0x1D, 0x1D, 0xFF, 0x00, 0x00
+    };
+    send_init_packet(powera_rumble_start, sizeof(powera_rumble_start));
+    daemon_sys_usleep(10000);
+
+    uint8_t powera_rumble_stop[] = {
+        0x09, 0x00, s_gip_init_seq++, 0x09, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    send_init_packet(powera_rumble_stop, sizeof(powera_rumble_stop));
+    daemon_sys_usleep(10000);
 }
 
-static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_num, uint8_t ep_out) {
+static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_num, uint8_t ep_out, int is_wireless) {
     daemon_log(LOG_LEVEL_INFO, "Sending Xbox 360 clone wake-up handshake (Shanwan/xpad, IF=%d)...", interface_num);
     uint8_t dummy[20];
     memset(dummy, 0, sizeof(dummy));
@@ -288,9 +305,18 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
 
     if (ep_out && p_sceUsbdInterruptTransfer && h) {
         int transferred = 0;
-        uint8_t led_pkt[3] = { 0x01, 0x03, 0x02 }; // LED 1 ON (Player 1)
-        int ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 5);
-        daemon_log(LOG_LEVEL_INFO, "Xbox 360 LED 1 command sent (ret=0x%08X)", ir);
+        int ir = 0;
+        if (is_wireless) {
+            // Linux xpad: XTYPE_XBOX360W sends a 12-byte LED command via RF header:
+            // byte[0]=0x00, byte[1]=0x00, byte[2]=0x08, byte[3]=0x40 + (cmd % 16), byte[4..11]=0x00
+            // Command 0x02: LED 1 / top-left blink, then steady on (Player 1)
+            uint8_t led_pkt[12] = { 0x00, 0x00, 0x08, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 5);
+        } else {
+            uint8_t led_pkt[3] = { 0x01, 0x03, 0x02 }; // LED 1 ON (Player 1)
+            ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 5);
+        }
+        daemon_log(LOG_LEVEL_INFO, "Xbox 360 LED 1 command sent (ret=0x%08X, wireless=%d)", ir, is_wireless);
         if (ir == 0x802400FF || ir == 0x80240009) {
             // Wireless dongles (e.g. GuliKit KK3 Max 2.4GHz adapter) do not have LEDs and return 0x802400FF (Pipe Stall).
             // Permanently disable EP_OUT commands to avoid stalling the dongle's USB engine or flooding retries.
@@ -350,10 +376,21 @@ static void init_switch_pro_controller(void) {
         if (dr != 0 || transferred == 0) break;
     }
 
+    // If device has no OUT endpoint, it is an input-only clone: do NOT attempt OUT transfers
+    if (g_usb_state.endpoint_out == 0) {
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro / Clone has no OUT endpoint — skipping 0x80 wake-up handshake (passive mode)");
+        return;
+    }
+
     // Official Switch Pro USB Handshake (0x80 commands) - non-blocking short timeout (clones don't support 0x80)
+    // If the first command fails, abort immediately so we don't stall the pipe or cause the controller to disconnect.
     memset(pkt, 0, sizeof(pkt));
     pkt[0] = 0x80; pkt[1] = 0x02; // Handshake
-    switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 30);
+    int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 30);
+    if (r != 0) {
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro 0x80 handshake ret=0x%08X (clone/unsupported) — preserving passive mode", r);
+        return;
+    }
     daemon_sys_usleep(5000);
 
     memset(pkt, 0, sizeof(pkt));
@@ -605,8 +642,8 @@ static int scan_and_open(void) {
                                       controller_type_to_str(det.type),
                                       (det.type == CONTROLLER_GENERIC_HID) ? generic_hid_get_nbuttons() : 16);
 
-                    daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X, wireless=%d)",
-                               controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in, det.is_wireless);
+                    daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X, EP_OUT:0x%02X, wireless=%d)",
+                               controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in, det.ep_out, det.is_wireless);
 
                     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
                     s_last_ds4.leftStick.x = 128;
@@ -625,7 +662,7 @@ static int scan_and_open(void) {
                     }
 
                     if (det.type == CONTROLLER_XBOX360) {
-                        init_xbox360_controller(h, det.interface_num, det.ep_out);
+                        init_xbox360_controller(h, det.interface_num, det.ep_out, det.is_wireless);
                     } else if (det.type == CONTROLLER_XBOXONE) {
                         init_gip_controller();
                     } else if (det.type == CONTROLLER_DS3) {
@@ -743,19 +780,35 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
             }
         }
     } else if (g_usb_state.type == CONTROLLER_XBOXONE) {
+        if (s_xone_ep_out_stalls >= 5) {
+            return;
+        }
         static uint8_t s_xone_seq = 0;
+        uint8_t lg_val = (uint8_t)(((uint32_t)large_motor * 100) / 255);
+        uint8_t sm_val = (uint8_t)(((uint32_t)small_motor * 100) / 255);
         uint8_t pkt[13] = {
             0x09, 0x00, s_xone_seq++, 0x09,
             0x00, 0x0F,
-            (uint8_t)(large_motor > 0 ? (large_motor / 2) : 0),
-            (uint8_t)(small_motor > 0 ? (small_motor / 2) : 0),
-            large_motor,
-            small_motor,
-            0xFF, 0x00, 0xFF
+            0x00, // Left trigger actuator (not present on 3rd-party/PowerA)
+            0x00, // Right trigger actuator (not present on 3rd-party/PowerA)
+            lg_val, // Left grip actuator (0..100)
+            sm_val, // Right grip actuator (0..100)
+            (large_motor > 0 || small_motor > 0) ? 0xFF : 0x00, // Duration (0xFF=continuous, 0=stop)
+            0x00, // Delay
+            0x00  // Repeat count (0=continuous until next packet, per Linux xpad)
         };
         int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
-        if (ret != 0 && p_sceUsbdClearHalt && (ret == 0x80240009 || ret == 0x802400FF)) {
-            p_sceUsbdClearHalt(g_dev_handle, ep);
+        if (ret != 0) {
+            if (ret == 0x802400FF || ret == 0x80240009) {
+                s_xone_ep_out_stalls += 2;
+                if (p_sceUsbdClearHalt) {
+                    p_sceUsbdClearHalt(g_dev_handle, ep);
+                }
+            } else {
+                s_xone_ep_out_stalls++;
+            }
+        } else {
+            s_xone_ep_out_stalls = 0;
         }
     } else if (g_usb_state.type == CONTROLLER_DS3) {
         uint8_t pkt[8] = { 0x00, 0xFF, 0x00, (small_motor > 0) ? 1 : 0, large_motor, 0x00, 0x00, 0x00 };
@@ -969,9 +1022,30 @@ void usb_driver_poll_step(void) {
             const Xbox360Report* x360 = NULL;
             Xbox360Report temp_report;
 
-            if (g_usb_state.is_wireless && transferred >= 24 && rx[4] == XBOX360_REPORT_INPUT) {
+            if (g_usb_state.is_wireless) {
+                // Linux xpad360w: byte 0 bit 3 (rx[0] & 0x08) indicates a presence change event
+                if (rx[0] & 0x08) {
+                    int pad_present = (rx[1] & 0x80) ? 1 : 0;
+                    if (pad_present != s_x360_wireless_present) {
+                        s_x360_wireless_present = pad_present;
+                        daemon_log(LOG_LEVEL_INFO, "Xbox 360 Wireless pad %s (slot %d, flags=0x%02X)",
+                                   pad_present ? "Connected" : "Disconnected / Idle", rx[0] & 0x03, rx[1]);
+                        if (!pad_present) {
+                            // Reset virtual pad to neutral state when wireless pad disconnects or sleeps
+                            memset(&ds4, 0, sizeof(ds4));
+                            ds4.leftStick.x = 128;
+                            ds4.leftStick.y = 128;
+                            ds4.rightStick.x = 128;
+                            ds4.rightStick.y = 128;
+                            handle_pad_input_and_send(&ds4);
+                        }
+                    }
+                }
+
                 // Wireless receiver report (4-byte RF/slot header prefix, payload at &rx[4])
-                if (rx[1] == 0x01 || rx[1] == 0x00) {
+                // Linux xpad360w: ONLY rx[1] == 0x01 indicates a valid controller input report.
+                // Status, keepalive, and announce packets (rx[1] == 0x00, 0x0F, 0xF8) must NOT be parsed as input.
+                if (transferred >= 24 && rx[1] == 0x01 && rx[4] == XBOX360_REPORT_INPUT) {
                     x360 = (const Xbox360Report*)(&rx[4]);
                 }
             } else if (!g_usb_state.is_wireless && rx[0] == XBOX360_REPORT_INPUT) {
@@ -983,7 +1057,7 @@ void usb_driver_poll_step(void) {
                 } else {
                     x360 = (const Xbox360Report*)rx;
                 }
-            } else if (transferred >= 24 && rx[4] == XBOX360_REPORT_INPUT && (rx[1] == 0x01 || rx[1] == 0x00)) {
+            } else if (transferred >= 24 && rx[1] == 0x01 && rx[4] == XBOX360_REPORT_INPUT) {
                 // Wireless receiver report fallback if descriptor flag was wired
                 x360 = (const Xbox360Report*)(&rx[4]);
             }
@@ -1085,6 +1159,14 @@ void usb_driver_poll_step(void) {
 
                 translator_convert_switch(&sw_fallback, &ds4, &s_trans_cfg);
                 if (sw_fallback.buttons1 & SWITCH_BTN_HOME) {
+                    ds4.buttons |= get_guide_button_mask();
+                }
+                handle_pad_input_and_send(&ds4);
+            } else if (transferred >= (int)sizeof(SwitchInputOnlyReport) && rx[0] != 0x81) {
+                // Passive mode fallback for clone controllers streaming direct reports without 0x30/0x3F prefix
+                translator_convert_switch((const SwitchInputOnlyReport*)rx, &ds4, &s_trans_cfg);
+                const SwitchInputOnlyReport* sw = (const SwitchInputOnlyReport*)rx;
+                if (sw->buttons1 & SWITCH_BTN_HOME) {
                     ds4.buttons |= get_guide_button_mask();
                 }
                 handle_pad_input_and_send(&ds4);

@@ -712,7 +712,7 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
         draw_text(scene, "1. Restart your console (power off and reboot PS4).", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
 
         stepY += 36;
-        draw_text(scene, "2. GoldHEN will auto-launch the newly updated OneFamily payload on boot.", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
+        draw_text(scene, "2. GoldHEN will auto-launch OneFamily on boot (ensure Settings > PayLoader > Enable AutoRun is checked).", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
 
         stepY += 36;
         draw_text(scene, "3. All new controller features, fixes, and mappings are now active!", fontCardDesc, cardX + 50, stepY, COLOR_BLUE_BRIGHT);
@@ -726,13 +726,13 @@ void UI::render_wizard(Scene2D* scene, const InstallResult& res, int frameID) {
         draw_text(scene, "1. Restart your console (power off and reboot PS4).", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
 
         stepY += 36;
-        draw_text(scene, "2. Run the jailbreak via GoldHEN.", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
+        draw_text(scene, "2. Run GoldHEN (ensure Settings > PayLoader > Enable AutoRun is checked).", fontCardDesc, cardX + 50, stepY, COLOR_WHITE);
 
         stepY += 36;
-        draw_text(scene, "3. OneFamily will be active automatically: connect your pad, it will be recognized and work immediately!", fontCardDesc, cardX + 50, stepY, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "3. OneFamily will boot automatically in the background.", fontCardDesc, cardX + 50, stepY, COLOR_BLUE_BRIGHT);
 
         stepY += 36;
-        draw_text(scene, "4. Open OneFamily Companion anytime to configure or calibrate your pad.", fontCardDesc, cardX + 50, stepY, COLOR_TEXT_DIM);
+        draw_text(scene, "4. Connect your controller via USB or wireless adapter and play!", fontCardDesc, cardX + 50, stepY, COLOR_TEXT_DIM);
     }
 
     // Footer

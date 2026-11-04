@@ -194,8 +194,8 @@ static void init_hid_control(void) {
 }
 
 static void vpad_poweroff_physical_ds4(void) {
-    if (g_daemon_config.mode == CONFIG_MODE_SECONDARY) {
-        daemon_log(LOG_LEVEL_INFO, "Skipping physical DS4 power-off (CONFIG_MODE_SECONDARY active for Player 2 co-op)");
+    if (g_daemon_config.mode != CONFIG_MODE_MERGE) {
+        daemon_log(LOG_LEVEL_INFO, "Skipping physical DS4 power-off (only active in CONFIG_MODE_MERGE)");
         return;
     }
 
@@ -248,14 +248,9 @@ static void vpad_poweroff_physical_ds4(void) {
                 p_sceMbusResolveByHandle(pad_handle, dev_id);
             }
 
-            daemon_log(LOG_LEVEL_INFO, "Powering off physical DS4 for user 0x%X (handle=0x%X, dev_id=0x%X)...",
-                       uid, pad_handle, (int32_t)dev_id[0]);
-
-            if (p_scePadDisconnectPort) {
-                int r = p_scePadDisconnectPort(pad_handle);
-                daemon_log(LOG_LEVEL_INFO, "scePadDisconnectPort(0x%X) = 0x%08X", pad_handle, r);
-            }
-            if (dev_id[0] > 0) {
+            if (dev_id[0] > 0 && (uint32_t)dev_id[0] != 0xFFFFFFFF) {
+                daemon_log(LOG_LEVEL_INFO, "Powering off physical DS4 for user 0x%X (handle=0x%X, dev_id=0x%X)...",
+                           uid, pad_handle, (int32_t)dev_id[0]);
                 if (p_sceMbusDisconnectDevice) {
                     int r = p_sceMbusDisconnectDevice((int32_t)dev_id[0]);
                     daemon_log(LOG_LEVEL_INFO, "sceMbusDisconnectDevice(0x%X) = 0x%08X", (int32_t)dev_id[0], r);
@@ -268,24 +263,15 @@ static void vpad_poweroff_physical_ds4(void) {
                     int r = p_scePadDisconnectDevice((int32_t)dev_id[0]);
                     daemon_log(LOG_LEVEL_INFO, "scePadDisconnectDevice(dev_id=0x%X) = 0x%08X", (int32_t)dev_id[0], r);
                 }
-            }
-            if (p_sceHidControlDisconnectPort) {
-                int r = p_sceHidControlDisconnectPort(pad_handle);
-                daemon_log(LOG_LEVEL_INFO, "sceHidControlDisconnectPort(0x%X) = 0x%08X", pad_handle, r);
-            }
-            if (p_sceHidControlDisconnectHandle) {
-                int r = p_sceHidControlDisconnectHandle(pad_handle);
-                daemon_log(LOG_LEVEL_INFO, "sceHidControlDisconnectHandle(0x%X) = 0x%08X", pad_handle, r);
-            }
-            if (p_scePadDisconnectDevice) {
-                int r = p_scePadDisconnectDevice(pad_handle);
-                daemon_log(LOG_LEVEL_INFO, "scePadDisconnectDevice(handle=0x%X) = 0x%08X", pad_handle, r);
+                any_disconnected = true;
+            } else {
+                daemon_log(LOG_LEVEL_INFO, "Physical DS4 dev_id not resolved (dev_id=0x%llX) — skipping disconnect",
+                           (unsigned long long)dev_id[0]);
             }
 
             if (opened_temp && p_scePadClose) {
                 p_scePadClose(pad_handle);
             }
-            any_disconnected = true;
         }
     }
 
@@ -448,7 +434,9 @@ void vpad_check_user_rebind(ConfigMode mode) {
                 num_logged_in++;
             }
         }
-        if (num_logged_in != s_last_login_count) {
+        if (s_last_login_count == -1) {
+            s_last_login_count = num_logged_in;
+        } else if (num_logged_in != s_last_login_count) {
             daemon_log(LOG_LEVEL_INFO, "Logged in user count changed (%d -> %d), updating virtual pad binding...",
                        s_last_login_count, num_logged_in);
             vpad_bind_user(mode, NULL, NULL, 0);

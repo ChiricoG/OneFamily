@@ -35,6 +35,14 @@ typedef enum {
     CONFIG_GUIDE_NONE           // Do nothing
 } ConfigGuideAction;
 
+// USB Controller Detection Override
+typedef enum {
+    USB_OVERRIDE_AUTO = 0,         // Auto-detect (default)
+    USB_OVERRIDE_FORCE_XINPUT = 1, // Prioritize / Force XInput (Xbox 360 / Xbox One)
+    USB_OVERRIDE_FORCE_SWITCH = 2, // Prioritize / Force Switch (Pro / Clone / Input-Only)
+    USB_OVERRIDE_FORCE_GENERIC = 3 // Prioritize / Force Generic HID (AnyPad)
+} UsbModeOverride;
+
 // Complete plugin configuration
 typedef struct {
     // [General]
@@ -52,6 +60,9 @@ typedef struct {
     // [Remap]
     int                 swap_triggers_bumpers;  // 0 = normal (default), 1 = swapped
     int                 switch_positional;      // 1 = positional (default), 0 = by letter
+
+    // [Hardware]
+    int                 usb_mode_override;      // 0=Auto (default), 1=Force XInput, 2=Force Switch, 3=Force Generic HID
 
     // [DualSense]
     int                 dualsense_lightbar_mode;  // 0=Game Sync, 1=Static Color, 2=Battery, 3=Off
