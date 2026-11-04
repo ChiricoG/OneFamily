@@ -250,6 +250,12 @@ static int send_init_packet(const uint8_t* pkt, int len) {
     return p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out, (uint8_t*)pkt, len, &transferred, 100);
 }
 
+static int send_gip_ack(const uint8_t* pkt, int len) {
+    if (!g_dev_handle || !p_sceUsbdInterruptTransfer || g_usb_state.endpoint_out == 0) return -1;
+    int transferred = 0;
+    return p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out, (uint8_t*)pkt, len, &transferred, 5);
+}
+
 static void init_gip_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Sending GIP initialization handshake...");
     static uint8_t s_gip_init_seq = 1;
@@ -1061,26 +1067,43 @@ void usb_driver_poll_step(void) {
     int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 2);
     uint64_t xfer_dur_us = daemon_sys_time_us() - xfer_start_us;
 
-    // High-Polling USB FIFO Drain (Targeted exclusively for Xbox 360 / XInput pro adapters like GuliKit KK3 Max 2.4GHz):
-    // If a 500Hz/1000Hz adapter streams reports faster than our 250 Hz loop consumes them,
-    // the host USB FIFO buffer accumulates reports, introducing hundreds of milliseconds of input lag.
+    // High-Polling USB FIFO Drain (Targeted for Xbox 360 / XInput adapters and Xbox One / Series wired controllers):
+    // If a 500Hz/1000Hz controller streams reports faster than our 250 Hz loop consumes them (e.g. GuliKit KK3 Max, PowerA Enhanced),
+    // the host USB FIFO buffer accumulates reports, introducing hundreds of milliseconds of input lag and swallowing quick button taps.
     // If the initial transfer completed almost instantaneously (< 250 us), queued reports are waiting in the hardware ring buffer.
     // Safely drain pending packets to zero-latency head while merging button masks.
-    if (ret == 0 && transferred >= 14 && g_usb_state.type == CONTROLLER_XBOX360 && xfer_dur_us < 250ULL) {
+    if (ret == 0 && xfer_dur_us < 250ULL &&
+        ((g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) ||
+         (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4))) {
         uint8_t next_rx[128];
         int next_transferred = 0;
         int drain_count = 0;
-        while (drain_count < 8) {
+        while (drain_count < 12) {
             int drain_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, next_rx, read_len, &next_transferred, 1);
-            if (drain_ret == 0 && next_transferred >= 14) {
-                if (!g_usb_state.is_wireless) {
-                    // Wired report (standard 20 bytes): buttons at rx[2] and rx[3]
-                    next_rx[2] |= rx[2];
-                    next_rx[3] |= rx[3];
-                } else if (next_transferred >= 24 && transferred >= 24) {
-                    // Wireless report (24+ bytes with 4-byte RF prefix): buttons at rx[6] and rx[7]
-                    next_rx[6] |= rx[6];
-                    next_rx[7] |= rx[7];
+            if (drain_ret == 0 && next_transferred > 0) {
+                if (g_usb_state.type == CONTROLLER_XBOX360 && next_transferred >= 14) {
+                    if (!g_usb_state.is_wireless) {
+                        // Wired report (standard 20 bytes): buttons at rx[2] and rx[3]
+                        next_rx[2] |= rx[2];
+                        next_rx[3] |= rx[3];
+                    } else if (next_transferred >= 24 && transferred >= 24) {
+                        // Wireless report (24+ bytes with 4-byte RF prefix): buttons at rx[6] and rx[7]
+                        next_rx[6] |= rx[6];
+                        next_rx[7] |= rx[7];
+                    }
+                } else if (g_usb_state.type == CONTROLLER_XBOXONE) {
+                    if (rx[0] == XBOXONE_REPORT_INPUT && next_rx[0] == XBOXONE_REPORT_INPUT &&
+                        transferred >= 6 && next_transferred >= 6) {
+                        // Xbox One input report (0x20):
+                        // rx[4]: buttons_low (A, B, X, Y, Menu, View, Sync)
+                        // rx[5]: buttons_high (D-pad Up/Down/Left/Right, LB, RB, L3, R3)
+                        next_rx[4] |= rx[4];
+                        next_rx[5] |= rx[5];
+                    } else if (next_rx[0] == XBOXONE_REPORT_GUIDE) {
+                        // Guide report (0x07) interleaved in stream: capture Guide button state immediately
+                        uint8_t gval = (next_transferred >= 5) ? next_rx[4] : next_rx[3];
+                        s_xboxone_guide = (gval & 0x01) ? 1 : 0;
+                    }
                 }
                 memcpy(rx, next_rx, next_transferred);
                 transferred = next_transferred;
@@ -1198,7 +1221,7 @@ void usb_driver_poll_step(void) {
                     uint8_t ack_pkt[13] = {
                         0x01, 0x20, rx[2], 0x09, 0x00, 0x07, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
                     };
-                    send_init_packet(ack_pkt, sizeof(ack_pkt));
+                    send_gip_ack(ack_pkt, sizeof(ack_pkt));
                 }
 
                 uint8_t gval = (transferred >= 5) ? rx[4] : rx[3];
@@ -1225,7 +1248,7 @@ void usb_driver_poll_step(void) {
                     uint8_t ack_pkt[13] = {
                         0x01, 0x20, rx[2], 0x09, 0x00, rx[0], 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
                     };
-                    send_init_packet(ack_pkt, sizeof(ack_pkt));
+                    send_gip_ack(ack_pkt, sizeof(ack_pkt));
                     daemon_log(LOG_LEVEL_INFO, "GIP ACK sent for cmd 0x%02X (seq 0x%02X, len %d)", rx[0], rx[2], transferred);
                 }
             }
