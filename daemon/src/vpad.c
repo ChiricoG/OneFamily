@@ -195,13 +195,34 @@ static void init_hid_control(void) {
 }
 
 static void vpad_poweroff_physical_ds4(void) {
-    if (g_daemon_config.mode != CONFIG_MODE_MERGE) {
-        daemon_log(LOG_LEVEL_INFO, "Skipping physical DS4 power-off (only active in CONFIG_MODE_MERGE)");
+    // Power off is active in MERGE mode unconditionally, and in AUTO mode only when
+    // exactly 1 user is logged in (i.e. the USB controller will take Player 1 slot).
+    // In AUTO mode with 2+ users the USB controller goes to Player 2: leave DS4 on Player 1 alone.
+    if (g_daemon_config.mode == CONFIG_MODE_SECONDARY) {
+        daemon_log(LOG_LEVEL_INFO, "Skipping physical DS4 power-off (CONFIG_MODE_SECONDARY)");
         return;
     }
 
     init_user_service();
     init_hid_control();
+
+    if (g_daemon_config.mode == CONFIG_MODE_AUTO) {
+        // Count currently logged-in users to decide
+        SceUserServiceLoginUserIdList chk;
+        memset(&chk, 0, sizeof(chk));
+        for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) chk.userId[i] = SCE_USER_SERVICE_USER_ID_INVALID;
+        if (p_sceUserServiceGetLoginUserIdList) p_sceUserServiceGetLoginUserIdList(&chk);
+        int chk_logged = 0;
+        for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
+            if (chk.userId[i] != SCE_USER_SERVICE_USER_ID_INVALID && chk.userId[i] != 0 && (uint32_t)chk.userId[i] != 0xFFFFFFFF)
+                chk_logged++;
+        }
+        if (chk_logged >= 2) {
+            daemon_log(LOG_LEVEL_INFO, "Skipping physical DS4 power-off (AUTO mode, %d users logged in — USB controller goes to Player 2)", chk_logged);
+            return;
+        }
+        daemon_log(LOG_LEVEL_INFO, "Physical DS4 power-off: AUTO mode with %d user logged in, treating as Player 1 (MERGE-equivalent)", chk_logged);
+    }
 
     SceUserServiceLoginUserIdList list;
     memset(&list, 0, sizeof(list));
@@ -541,12 +562,14 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
         return -1;
     }
 
-    // Power off physical DS4 before opening the first virtual pad so its link drops cleanly (in MERGE mode only)
+    // Power off physical DS4 before opening the first virtual pad so its link drops cleanly.
+    // In MERGE mode: always. In AUTO mode: only when 1 user is logged in (USB goes to Player 1).
+    // In SECONDARY mode: never (DS4 stays on Player 1, USB goes to Player 2).
     bool any_prior_active = false;
     for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
         if (g_slots[i].active) { any_prior_active = true; break; }
     }
-    if (!any_prior_active && g_daemon_config.mode == CONFIG_MODE_MERGE) {
+    if (!any_prior_active && g_daemon_config.mode != CONFIG_MODE_SECONDARY) {
         vpad_poweroff_physical_ds4();
     }
 
