@@ -76,6 +76,7 @@ public:
     void cycle_button(int action_idx, int dir); // dir: +1 or -1
 
     int get_max_buttons() const { return max_buttons; }
+    const std::string& get_current_path() const { return current_path; }
 
 private:
     int assignments[ACT_COUNT]; // Stores button number (0 = none, 1 = button1, etc.)

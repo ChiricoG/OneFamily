@@ -175,10 +175,19 @@ bool HidProfile::load(uint16_t vid, uint16_t pid, int nbuttons) {
     char path[128];
     snprintf(path, sizeof(path), "/data/onefamily/controllers/%04X_%04X.ini", vid, pid);
     if (!file_exists(path)) {
+        snprintf(path, sizeof(path), "/user/data/onefamily/controllers/%04X_%04X.ini", vid, pid);
+    }
+    if (!file_exists(path)) {
         snprintf(path, sizeof(path), "/data/onefamily/controllers/%04x_%04x.ini", vid, pid);
     }
     if (!file_exists(path)) {
+        snprintf(path, sizeof(path), "/user/data/onefamily/controllers/%04x_%04x.ini", vid, pid);
+    }
+    if (!file_exists(path)) {
         snprintf(path, sizeof(path), "/data/onefamily/controllers/default.ini");
+    }
+    if (!file_exists(path)) {
+        snprintf(path, sizeof(path), "/user/data/onefamily/controllers/default.ini");
     }
 
     current_path = path;
@@ -231,12 +240,10 @@ bool HidProfile::save(uint16_t vid, uint16_t pid, const std::string& name) {
     mkdir("/data", 0777);
     mkdir("/data/onefamily", 0777);
     mkdir("/data/onefamily/controllers", 0777);
-
-    char path[128];
-    snprintf(path, sizeof(path), "/data/onefamily/controllers/%04X_%04X.ini", vid, pid);
-
-    int fd = sceKernelOpen(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) return false;
+    mkdir("/user", 0777);
+    mkdir("/user/data", 0777);
+    mkdir("/user/data/onefamily", 0777);
+    mkdir("/user/data/onefamily/controllers", 0777);
 
     char out[4096];
     int len = snprintf(out, sizeof(out),
@@ -286,16 +293,40 @@ bool HidProfile::save(uint16_t vid, uint16_t pid, const std::string& name) {
         );
     }
 
-    if (len > 0) {
-        sceKernelWrite(fd, out, (size_t)len);
+    bool w1 = false, w2 = false;
+    char path[128];
+    snprintf(path, sizeof(path), "/data/onefamily/controllers/%04X_%04X.ini", vid, pid);
+    int fd1 = sceKernelOpen(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd1 >= 0) {
+        if (len > 0) {
+            ssize_t wr = sceKernelWrite(fd1, out, (size_t)len);
+            if (wr == len) w1 = true;
+        }
+        sceKernelClose(fd1);
     }
-    sceKernelClose(fd);
 
-    // Touch reload sentinel file for daemon
-    int rfd = sceKernelOpen("/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (rfd >= 0) {
-        sceKernelWrite(rfd, "1\n", 2);
-        sceKernelClose(rfd);
+    snprintf(path, sizeof(path), "/user/data/onefamily/controllers/%04X_%04X.ini", vid, pid);
+    int fd2 = sceKernelOpen(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd2 >= 0) {
+        if (len > 0) {
+            ssize_t wr = sceKernelWrite(fd2, out, (size_t)len);
+            if (wr == len) w2 = true;
+        }
+        sceKernelClose(fd2);
+    }
+
+    if (!w1 && !w2) return false;
+
+    // Touch reload sentinel file for daemon in both primary and userland fallback paths
+    int rfd1 = sceKernelOpen("/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (rfd1 >= 0) {
+        sceKernelWrite(rfd1, "1\n", 2);
+        sceKernelClose(rfd1);
+    }
+    int rfd2 = sceKernelOpen("/user/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (rfd2 >= 0) {
+        sceKernelWrite(rfd2, "1\n", 2);
+        sceKernelClose(rfd2);
     }
 
     return true;

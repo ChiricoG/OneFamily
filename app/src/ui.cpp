@@ -1248,7 +1248,10 @@ void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile&
     } else {
         draw_image(scene, iconRemap, 60, 890);
         draw_text(scene, "HID Button Remapping", fontCardTitle, 120, 912, COLOR_WHITE);
-        draw_text(scene, "Live profile active in /data/onefamily/controllers/", fontFooter, 120, 938, COLOR_BLUE_BRIGHT);
+        std::string profileMsg = profile.get_current_path().empty() ?
+            "Live profile active in /data/onefamily/controllers/" :
+            ("Live profile: " + profile.get_current_path());
+        draw_text(scene, profileMsg.c_str(), fontFooter, 120, 938, COLOR_BLUE_BRIGHT);
 
         // Footer command icons for Edit Mode
         draw_image(scene, btnR3, 980, 897);

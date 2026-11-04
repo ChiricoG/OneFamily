@@ -86,10 +86,16 @@ static std::string trim(const std::string& str) {
 bool ConfigManager::load() {
     const char* path_to_load = INI_FILE_PATH;
     if (!file_exists(INI_FILE_PATH)) {
-        if (file_exists(LEGACY_INI_FILE_PATH)) {
+        if (file_exists(INI_FILE_PATH_USER)) {
+            path_to_load = INI_FILE_PATH_USER;
+        } else if (file_exists(LEGACY_INI_FILE_PATH)) {
             path_to_load = LEGACY_INI_FILE_PATH;
+        } else if (file_exists(LEGACY_INI_FILE_PATH_USER)) {
+            path_to_load = LEGACY_INI_FILE_PATH_USER;
         } else if (file_exists(OLD_LEGACY_INI_FILE_PATH)) {
             path_to_load = OLD_LEGACY_INI_FILE_PATH;
+        } else if (file_exists(OLD_LEGACY_INI_PATH_USER)) {
+            path_to_load = OLD_LEGACY_INI_PATH_USER;
         } else {
             // First run: file does not exist yet! Create it with defaults.
             config.set_defaults();
@@ -199,14 +205,6 @@ bool ConfigManager::save() {
     mkdir("/user/data", 0777);
     mkdir("/user/data/onefamily", 0777);
 
-    int fd = sceKernelOpen(INI_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        fd = sceKernelOpen("/user/data/onefamily/onefamily.ini", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    }
-    if (fd < 0) {
-        return false;
-    }
-
     char out[2048];
     int deadzone_val = DEADZONE_VALUES[config.deadzone_index];
     int trigger_val = TRIGGER_VALUES[config.trigger_index];
@@ -254,9 +252,24 @@ bool ConfigManager::save() {
         config.ds_mute_action
     );
 
-    if (len > 0) {
-        sceKernelWrite(fd, out, (size_t)len);
+    bool w1 = false, w2 = false;
+    int fd1 = sceKernelOpen(INI_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd1 >= 0) {
+        if (len > 0) {
+            ssize_t wr = sceKernelWrite(fd1, out, (size_t)len);
+            if (wr == len) w1 = true;
+        }
+        sceKernelClose(fd1);
     }
-    sceKernelClose(fd);
-    return true;
+
+    int fd2 = sceKernelOpen(INI_FILE_PATH_USER, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd2 >= 0) {
+        if (len > 0) {
+            ssize_t wr = sceKernelWrite(fd2, out, (size_t)len);
+            if (wr == len) w2 = true;
+        }
+        sceKernelClose(fd2);
+    }
+
+    return (w1 || w2);
 }

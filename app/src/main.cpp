@@ -16,6 +16,19 @@
 #include "hid_profile.h"
 #include "pkg_updater.h"
 
+static void notify_daemon_reload() {
+    int rfd1 = sceKernelOpen("/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (rfd1 >= 0) {
+        sceKernelWrite(rfd1, "1\n", 2);
+        sceKernelClose(rfd1);
+    }
+    int rfd2 = sceKernelOpen("/user/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (rfd2 >= 0) {
+        sceKernelWrite(rfd2, "1\n", 2);
+        sceKernelClose(rfd2);
+    }
+}
+
 static void send_vibe_to_daemon(uint8_t lgMotor, uint8_t smMotor) {
     if (lgMotor == 0 && smMotor == 0) {
         sceKernelUnlink("/data/onefamily/onefamily.vibe");
@@ -24,6 +37,9 @@ static void send_vibe_to_daemon(uint8_t lgMotor, uint8_t smMotor) {
     } else {
         mkdir("/data", 0777);
         mkdir("/data/onefamily", 0777);
+        mkdir("/user", 0777);
+        mkdir("/user/data", 0777);
+        mkdir("/user/data/onefamily", 0777);
         int fd = sceKernelOpen("/data/onefamily/onefamily.vibe", O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (fd < 0) {
             fd = sceKernelOpen("/user/data/onefamily/onefamily.vibe", O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -300,9 +316,8 @@ int main() {
             // Save on CROSS (X)
             if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
                 if (configMgr.save()) {
-                    int rfd = sceKernelOpen("/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-                    if (rfd >= 0) sceKernelClose(rfd);
-                    toastText = "Settings saved to /data/onefamily/onefamily.ini";
+                    notify_daemon_reload();
+                    toastText = "Settings saved & active!";
                     toastFrames = 180; // ~3 seconds toast feedback
                 }
             }
@@ -460,8 +475,7 @@ int main() {
             // Save on CROSS (X)
             if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
                 if (configMgr.save()) {
-                    int rfd = sceKernelOpen("/data/onefamily/onefamily.reload", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-                    if (rfd >= 0) sceKernelClose(rfd);
+                    notify_daemon_reload();
                     toastText = "DualSense settings saved & active!";
                     toastFrames = 180;
                 }
