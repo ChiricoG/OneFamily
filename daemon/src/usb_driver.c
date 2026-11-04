@@ -662,7 +662,10 @@ static int scan_and_open(void) {
                 // Replicates Windows USB host enumeration behavior. Many multi-mode controllers
                 // (e.g. Trust GXT Muta, 8BitDo, Machenike) default to Switch Pro mode on non-Windows hosts,
                 // but switch personality to native Xbox 360 (045E:028E) when probed with MS OS Descriptors!
-                if (det.type == CONTROLLER_SWITCH_PRO || det.type == CONTROLLER_SWITCH || det.type == CONTROLLER_GENERIC_HID) {
+                // Skip MS OS probe for legacy PC DirectInput controllers (Logitech 0x046D, ShanWan 0x2563, Betop 0x20BC)
+                // whose firmware hangs or pipe-stalls (LG_NOGET hardware quirk) upon receiving unsupported control descriptors.
+                bool is_legacy_hid = (desc.idVendor == 0x046D || desc.idVendor == 0x2563 || desc.idVendor == 0x20BC);
+                if ((det.type == CONTROLLER_SWITCH_PRO || det.type == CONTROLLER_SWITCH || det.type == CONTROLLER_GENERIC_HID) && !is_legacy_hid) {
                     if (probe_microsoft_os_descriptor(h)) {
                         daemon_sys_usleep(20000);
                         if (p_sceUsbdCheckConnected && p_sceUsbdCheckConnected(h) != 0) {
@@ -1464,7 +1467,7 @@ void usb_driver_poll_step(void) {
                     s_logged_gen_err++;
                 }
                 int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
-                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors >= 10 && s_consecutive_transfer_errors % 25 == 0)) {
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors == 1 || s_consecutive_transfer_errors % 10 == 0)) {
                     daemon_log(LOG_LEVEL_WARN, "Generic HID EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
