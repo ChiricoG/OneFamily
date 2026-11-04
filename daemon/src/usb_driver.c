@@ -1081,32 +1081,75 @@ void usb_driver_poll_step(void) {
         while (drain_count < 12) {
             int drain_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, next_rx, read_len, &next_transferred, 1);
             if (drain_ret == 0 && next_transferred > 0) {
-                if (g_usb_state.type == CONTROLLER_XBOX360 && next_transferred >= 14) {
-                    if (!g_usb_state.is_wireless) {
-                        // Wired report (standard 20 bytes): buttons at rx[2] and rx[3]
+                if (g_usb_state.type == CONTROLLER_XBOX360) {
+                    if (!g_usb_state.is_wireless && next_transferred >= 14) {
+                        // Wired report: merge buttons
                         next_rx[2] |= rx[2];
                         next_rx[3] |= rx[3];
-                    } else if (next_transferred >= 24 && transferred >= 24) {
-                        // Wireless report (24+ bytes with 4-byte RF prefix): buttons at rx[6] and rx[7]
-                        next_rx[6] |= rx[6];
-                        next_rx[7] |= rx[7];
+                        memcpy(rx, next_rx, next_transferred);
+                        transferred = next_transferred;
+                    } else if (g_usb_state.is_wireless) {
+                        // Wireless receiver report
+                        if (next_transferred >= 24 && next_rx[1] == 0x01 && next_rx[4] == XBOX360_REPORT_INPUT) {
+                            if (transferred >= 24 && rx[1] == 0x01 && rx[4] == XBOX360_REPORT_INPUT) {
+                                next_rx[6] |= rx[6];
+                                next_rx[7] |= rx[7];
+                            }
+                            memcpy(rx, next_rx, next_transferred);
+                            transferred = next_transferred;
+                        } else {
+                            // Non-input RF report (keepalive 0x00, status 0x0F, announce, etc.)
+                            if (next_rx[0] & 0x08) {
+                                s_x360_wireless_present = (next_rx[1] & 0x80) ? 1 : 0;
+                            }
+                            // Only overwrite rx if rx is not already holding a valid input report
+                            if (!(transferred >= 24 && rx[1] == 0x01 && rx[4] == XBOX360_REPORT_INPUT)) {
+                                memcpy(rx, next_rx, next_transferred);
+                                transferred = next_transferred;
+                            }
+                        }
                     }
                 } else if (g_usb_state.type == CONTROLLER_XBOXONE) {
-                    if (rx[0] == XBOXONE_REPORT_INPUT && next_rx[0] == XBOXONE_REPORT_INPUT &&
-                        transferred >= 6 && next_transferred >= 6) {
-                        // Xbox One input report (0x20):
-                        // rx[4]: buttons_low (A, B, X, Y, Menu, View, Sync)
-                        // rx[5]: buttons_high (D-pad Up/Down/Left/Right, LB, RB, L3, R3)
-                        next_rx[4] |= rx[4];
-                        next_rx[5] |= rx[5];
+                    if (next_rx[0] == XBOXONE_REPORT_INPUT && next_transferred >= 6) {
+                        if (rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6) {
+                            // Xbox One input report (0x20):
+                            // rx[4]: buttons_low (A, B, X, Y, Menu, View, Sync)
+                            // rx[5]: buttons_high (D-pad Up/Down/Left/Right, LB, RB, L3, R3)
+                            next_rx[4] |= rx[4];
+                            next_rx[5] |= rx[5];
+                        }
+                        memcpy(rx, next_rx, next_transferred);
+                        transferred = next_transferred;
                     } else if (next_rx[0] == XBOXONE_REPORT_GUIDE) {
-                        // Guide report (0x07) interleaved in stream: capture Guide button state immediately
+                        // Guide report (0x07): send ACK if requested
+                        if ((next_rx[1] & 0x10) || (next_rx[1] & 0x01)) {
+                            uint8_t ack_pkt[13] = {
+                                0x01, 0x20, next_rx[2], 0x09, 0x00, 0x07, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
+                            };
+                            send_gip_ack(ack_pkt, sizeof(ack_pkt));
+                        }
                         uint8_t gval = (next_transferred >= 5) ? next_rx[4] : next_rx[3];
                         s_xboxone_guide = (gval & 0x01) ? 1 : 0;
+                        // Only overwrite rx if rx is not already holding a valid input report
+                        if (!(rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6)) {
+                            memcpy(rx, next_rx, next_transferred);
+                            transferred = next_transferred;
+                        }
+                    } else {
+                        // General GIP packet (ACK, announce, status): send ACK if requested
+                        if (next_transferred >= 3 && ((next_rx[1] & 0x10) || (next_rx[1] & 0x01))) {
+                            uint8_t ack_pkt[13] = {
+                                0x01, 0x20, next_rx[2], 0x09, 0x00, next_rx[0], 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
+                            };
+                            send_gip_ack(ack_pkt, sizeof(ack_pkt));
+                        }
+                        // Only overwrite rx if rx is not already holding a valid input report
+                        if (!(rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6)) {
+                            memcpy(rx, next_rx, next_transferred);
+                            transferred = next_transferred;
+                        }
                     }
                 }
-                memcpy(rx, next_rx, next_transferred);
-                transferred = next_transferred;
                 drain_count++;
             } else {
                 break; // Hardware FIFO queue is now fully drained!
