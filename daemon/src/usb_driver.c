@@ -365,15 +365,23 @@ static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expec
 static void init_switch_pro_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Starting Switch Pro / Clone wake-up sequence...");
 
-    uint8_t pkt[64];
-    uint8_t rx[64];
-    int transferred = 0;
+    // 1. Passive Mode / Clone check:
+    // Third-party Switch Pro clones (like Trust GXT Muta, Nyko, PowerA) start streaming standard
+    // HID input reports immediately upon connection without needing any 0x80 handshake.
+    // If the controller is already actively streaming input, DO NOT send 0x80 (it would crash the clone)!
+    uint8_t probe_rx[64];
+    int probe_len = 0;
+    int probe_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, probe_rx, sizeof(probe_rx), &probe_len, 40);
+    if (probe_ret == 0 && probe_len > 0) {
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro / Clone is already actively streaming input (%d bytes) — skipping 0x80 wake-up handshake (passive mode)", probe_len);
+        return;
+    }
 
     // Drain any leftover input in the USB FIFO first
     for (int i = 0; i < 3; i++) {
-        transferred = 0;
-        int dr = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, sizeof(rx), &transferred, 10);
-        if (dr != 0 || transferred == 0) break;
+        probe_len = 0;
+        int dr = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, probe_rx, sizeof(probe_rx), &probe_len, 10);
+        if (dr != 0 || probe_len == 0) break;
     }
 
     // If device has no OUT endpoint, it is an input-only clone: do NOT attempt OUT transfers
@@ -382,32 +390,33 @@ static void init_switch_pro_controller(void) {
         return;
     }
 
-    // Official Switch Pro USB Handshake (0x80 commands) - non-blocking short timeout (clones don't support 0x80)
-    // If the first command fails, abort immediately so we don't stall the pipe or cause the controller to disconnect.
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x80; pkt[1] = 0x02; // Handshake
-    int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 30);
+    // 2. Official Switch Pro USB Handshake (0x80 commands):
+    // The 0x80 command packet is strictly 2 BYTES (u8 buf[2] = { 0x80, cmd }),
+    // matching Linux kernel hid-nintendo (joycon_send_usb).
+    // Transmitting 64 bytes with 62 trailing zeros causes buffer overflow on clones and stalls.
+    uint8_t cmd_pkt[2];
+
+    cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x02; // Handshake
+    int r = switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 30);
     if (r != 0) {
         daemon_log(LOG_LEVEL_INFO, "Switch Pro 0x80 handshake ret=0x%08X (clone/unsupported) — preserving passive mode", r);
         return;
     }
     daemon_sys_usleep(5000);
 
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x80; pkt[1] = 0x03; // HighSpeed baudrate
-    switch_pro_send_and_wait(pkt, sizeof(pkt), 0x03, 30);
+    cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x03; // HighSpeed baudrate
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x03, 30);
     daemon_sys_usleep(5000);
 
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x80; pkt[1] = 0x02; // Handshake repeat
-    switch_pro_send_and_wait(pkt, sizeof(pkt), 0x02, 30);
+    cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x02; // Handshake repeat
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 30);
     daemon_sys_usleep(5000);
 
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x80; pkt[1] = 0x04; // Force USB
-    switch_pro_send_and_wait(pkt, sizeof(pkt), 0x04, 30);
+    cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x04; // Force USB
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x04, 30);
     daemon_sys_usleep(5000);
 
+    uint8_t pkt[64];
     // Standard Switch Subcommands (AnyPad / Linux hid-nintendo model): Works on ALL official and clone controllers!
     // Step 1: Subcommand 0x03 (Set Input Report Mode to 0x30 Full Mode)
     for (int attempt = 1; attempt <= 3; attempt++) {
@@ -498,6 +507,53 @@ typedef struct {
 
 static UsbDeviceSnapshot s_last_bus_devices[USB_MAX_SNAPSHOT_DEVICES];
 static int s_last_bus_device_count = -1; // -1 = first scan pending
+
+static bool probe_microsoft_os_descriptor(libusb_device_handle* h) {
+    if (!p_sceUsbdControlTransfer || !h) return false;
+
+    // Microsoft OS 1.0 String Descriptor probe
+    // Standard Device Request:
+    // bmRequestType: 0x80 (DEVICE_TO_HOST | STANDARD | DEVICE)
+    // bRequest:      0x06 (GET_DESCRIPTOR)
+    // wValue:        0x03EE (Descriptor Type 0x03 = String, Index 0xEE)
+    // wIndex:        0x0000 (neutral language / OS string)
+    // wLength:       18 (0x12)
+    uint8_t ms_desc[18];
+    memset(ms_desc, 0, sizeof(ms_desc));
+
+    int ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, 0x03EE, 0x0000, ms_desc, sizeof(ms_desc), 100);
+    if (ret < 0) {
+        // Fallback: try with wIndex = 0x0409 (English US) as some firmware requires language ID
+        ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, 0x03EE, 0x0409, ms_desc, sizeof(ms_desc), 100);
+    }
+
+    if (ret >= 14 && ms_desc[0] >= 14 && ms_desc[1] == 0x03) {
+        // Verify "MSFT100" in UTF-16LE: 'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0
+        static const uint8_t msft100_sig[14] = {
+            'M', 0x00, 'S', 0x00, 'F', 0x00, 'T', 0x00,
+            '1', 0x00, '0', 0x00, '0', 0x00
+        };
+        if (memcmp(&ms_desc[2], msft100_sig, 14) == 0) {
+            uint8_t vendor_code = (ret >= 17) ? ms_desc[16] : 0;
+            daemon_log(LOG_LEVEL_INFO, "Device acknowledged Microsoft OS Descriptor (MSFT100, vendor_code=0x%02X)", vendor_code);
+
+            // In Microsoft's protocol, if MSFT100 is returned, the host issues the vendor-specific query:
+            // bmRequestType = 0xC0 (DEVICE_TO_HOST | VENDOR | DEVICE)
+            // bRequest = vendor_code
+            // wValue = 0x0000
+            // wIndex = 0x0004 (Extended Compat ID feature descriptor)
+            // Multi-mode controllers (Trust GXT Muta, etc.) use this secondary request to trigger personality switch to XInput.
+            if (vendor_code != 0) {
+                uint8_t compat_id[40];
+                memset(compat_id, 0, sizeof(compat_id));
+                int vc_ret = p_sceUsbdControlTransfer(h, 0xC0, vendor_code, 0x0000, 0x0004, compat_id, sizeof(compat_id), 100);
+                daemon_log(LOG_LEVEL_INFO, "Microsoft Extended Compat ID query (code=0x%02X) returned %d", vendor_code, vc_ret);
+            }
+            return true;
+        }
+    }
+    return false;
+}
 
 static int scan_and_open(void) {
     if (g_dev_handle != NULL) return 0;
@@ -596,6 +652,21 @@ static int scan_and_open(void) {
             libusb_device_handle* h = NULL;
             if (p_sceUsbdOpen(dev, &h) == 0 && h != NULL) {
 
+                // Probe Microsoft OS String Descriptor (Index 0xEE "MSFT100"):
+                // Replicates Windows USB host enumeration behavior. Many multi-mode controllers
+                // (e.g. Trust GXT Muta, 8BitDo, Machenike) default to Switch Pro mode on non-Windows hosts,
+                // but switch personality to native Xbox 360 (045E:028E) when probed with MS OS Descriptors!
+                if (det.type == CONTROLLER_SWITCH_PRO || det.type == CONTROLLER_SWITCH || det.type == CONTROLLER_GENERIC_HID) {
+                    if (probe_microsoft_os_descriptor(h)) {
+                        daemon_sys_usleep(20000);
+                        if (p_sceUsbdCheckConnected && p_sceUsbdCheckConnected(h) != 0) {
+                            daemon_log(LOG_LEVEL_INFO, "Device detached following MS OS Descriptor probe (re-enumerating personality)");
+                            p_sceUsbdClose(h);
+                            continue;
+                        }
+                    }
+                }
+
                 // If device exposed a secondary composite boot keyboard interface (e.g. 8BitDo dongles),
                 // detach and claim it so Orbis OS ukbd driver will not recognize it as a keyboard.
                 if (det.kbd_interface_num != 0xFF) {
@@ -653,14 +724,6 @@ static int scan_and_open(void) {
                     s_last_ds4.connected = 1;
                     s_last_ds4.count = 1;
 
-                    // Initialize Virtual DualShock 4 (Type 1) now that controller is ready to answer.
-                    if (s_usb_vpad_slot < 0) {
-                        vpad_slot_open(VPAD_SOURCE_USB, &s_usb_vpad_slot);
-                    }
-                    if (s_usb_vpad_slot >= 0) {
-                        vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
-                    }
-
                     if (det.type == CONTROLLER_XBOX360) {
                         init_xbox360_controller(h, det.interface_num, det.ep_out, det.is_wireless);
                     } else if (det.type == CONTROLLER_XBOXONE) {
@@ -678,6 +741,24 @@ static int scan_and_open(void) {
                         }
                     } else if (det.type == CONTROLLER_SWITCH_PRO) {
                         init_switch_pro_controller();
+                    }
+
+                    // Check if controller is still connected and alive after wake-up/handshake
+                    if (p_sceUsbdCheckConnected && p_sceUsbdCheckConnected(h) != 0) {
+                        daemon_log(LOG_LEVEL_WARN, "Controller detached during initialization handshake — aborting vpad allocation");
+                        p_sceUsbdClose(h);
+                        g_dev_handle = NULL;
+                        g_usb_state.connected = false;
+                        found = 0;
+                        break;
+                    }
+
+                    // Initialize Virtual DualShock 4 (Type 1) ONLY once controller is confirmed ready!
+                    if (s_usb_vpad_slot < 0) {
+                        vpad_slot_open(VPAD_SOURCE_USB, &s_usb_vpad_slot);
+                    }
+                    if (s_usb_vpad_slot >= 0) {
+                        vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
                     }
 
                     int slot = vpad_get_assigned_slot_num(s_usb_vpad_slot);
