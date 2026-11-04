@@ -52,6 +52,35 @@ static void send_vibe_to_daemon(uint8_t lgMotor, uint8_t smMotor) {
     }
 }
 
+static void refresh_pad_handles(int padHandles[4], int initialUserId) {
+    OrbisUserServiceLoginUserIdList userList;
+    memset(&userList, 0, sizeof(userList));
+    bool hasUserList = (sceUserServiceGetLoginUserIdList(&userList) == 0);
+
+    for (int i = 0; i < 4; i++) {
+        // If handle is already valid and active, verify if it is alive
+        if (padHandles[i] >= 0) {
+            OrbisPadData testData;
+            memset(&testData, 0, sizeof(testData));
+            if (scePadReadState(padHandles[i], &testData) == 0 && testData.connected) {
+                continue;
+            }
+            scePadClose(padHandles[i]);
+            padHandles[i] = -1;
+        }
+
+        // Try opening controller for user i
+        if (hasUserList && userList.userId[i] != ORBIS_USER_SERVICE_USER_ID_INVALID) {
+            padHandles[i] = scePadOpen(userList.userId[i], 0, 0, NULL);
+        }
+
+        // Fallback: try opening with initialUserId on port index i
+        if (padHandles[i] < 0 && initialUserId >= 0) {
+            padHandles[i] = scePadOpen(initialUserId, 0, i, NULL);
+        }
+    }
+}
+
 int main() {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -83,9 +112,8 @@ int main() {
 
     // Standard handles for up to 4 player controller slots
     int padHandles[4];
-    for (int i = 0; i < 4; i++) {
-        padHandles[i] = scePadOpen(userId, 0, i, NULL);
-    }
+    for (int i = 0; i < 4; i++) padHandles[i] = -1;
+    refresh_pad_handles(padHandles, userId);
 
     // Check if First-Launch Setup Wizard or Payload Update is required
     bool isInstalled = Installer::isInstalled();
@@ -160,6 +188,11 @@ int main() {
 
     // Main Interaction Loop
     for (;;) {
+        // Periodically refresh controller handles to support dynamic reconnects and multi-user login
+        if (frameID % 30 == 0) {
+            refresh_pad_handles(padHandles, userId);
+        }
+
         OrbisPadData padDataSlots[4];
         uint32_t anyButtons = 0;
         for (int i = 0; i < 4; i++) {
@@ -176,13 +209,69 @@ int main() {
             }
         }
 
+        // Smart Active Slot Auto-Detection:
+        // Automatically switch tester.selectedSlot to whichever controller slot is actively sending inputs
+        for (int i = 0; i < 4; i++) {
+            if (tester.slotConnected[i]) {
+                const OrbisPadData& d = padDataSlots[i];
+                bool hasStick = (abs((int)d.leftStick.x - 128) > 20 ||
+                                 abs((int)d.leftStick.y - 128) > 20 ||
+                                 abs((int)d.rightStick.x - 128) > 20 ||
+                                 abs((int)d.rightStick.y - 128) > 20);
+                bool hasTrig = (d.analogButtons.l2 > 30 || d.analogButtons.r2 > 30);
+                bool hasBtn = (d.buttons != 0);
+                if (hasStick || hasTrig || hasBtn) {
+                    tester.selectedSlot = i;
+                    break;
+                }
+            }
+        }
+        if (tester.selectedSlot < 0 || tester.selectedSlot >= 4 || !tester.slotConnected[tester.selectedSlot]) {
+            for (int i = 0; i < 4; i++) {
+                if (tester.slotConnected[i]) {
+                    tester.selectedSlot = i;
+                    break;
+                }
+            }
+        }
         if (tester.selectedSlot < 0 || tester.selectedSlot >= 4) {
             tester.selectedSlot = 0;
         }
         OrbisPadData padData = padDataSlots[tester.selectedSlot];
 
+        // Left Analog Stick Navigation Emulation (Stick-to-DPad with Auto-Repeat)
+        static int s_stickRepeatFrames = 0;
+        static uint32_t s_stickNavButtons = 0;
+
+        uint32_t stickNav = 0;
+        const int STICK_NAV_THRESHOLD = 64; // < 64 or > 192 from center 128
+        if (padData.leftStick.y < 128 - STICK_NAV_THRESHOLD) stickNav |= ORBIS_PAD_BUTTON_UP;
+        else if (padData.leftStick.y > 128 + STICK_NAV_THRESHOLD) stickNav |= ORBIS_PAD_BUTTON_DOWN;
+
+        if (padData.leftStick.x < 128 - STICK_NAV_THRESHOLD) stickNav |= ORBIS_PAD_BUTTON_LEFT;
+        else if (padData.leftStick.x > 128 + STICK_NAV_THRESHOLD) stickNav |= ORBIS_PAD_BUTTON_RIGHT;
+
+        uint32_t stickJustPressed = 0;
+        if (stickNav != 0) {
+            if (stickNav != s_stickNavButtons) {
+                stickJustPressed = stickNav;
+                s_stickNavButtons = stickNav;
+                s_stickRepeatFrames = 20; // ~330ms delay
+            } else {
+                if (s_stickRepeatFrames > 0) {
+                    s_stickRepeatFrames--;
+                } else {
+                    stickJustPressed = stickNav;
+                    s_stickRepeatFrames = 8; // ~130ms repeat rate
+                }
+            }
+        } else {
+            s_stickNavButtons = 0;
+            s_stickRepeatFrames = 0;
+        }
+
         uint32_t curButtons = anyButtons;
-        uint32_t justPressed = curButtons & ~prevButtons;
+        uint32_t justPressed = (curButtons & ~prevButtons) | stickJustPressed;
         prevButtons = curButtons;
 
         // Poll HID controller status every 20 frames (~3 Hz)
@@ -275,41 +364,51 @@ int main() {
 
             // Value changes (LEFT)
             if (justPressed & ORBIS_PAD_BUTTON_LEFT) {
+                bool changed = false;
                 if (selectedCard == 0) {
-                    if (cfg.deadzone_index > 0) cfg.deadzone_index--;
+                    if (cfg.deadzone_index > 0) { cfg.deadzone_index--; changed = true; }
                 } else if (selectedCard == 1) {
-                    if (cfg.trigger_index > 0) cfg.trigger_index--;
+                    if (cfg.trigger_index > 0) { cfg.trigger_index--; changed = true; }
                 } else if (selectedCard == 2) {
-                    cfg.swap_index ^= 1;
+                    cfg.swap_index ^= 1; changed = true;
                 } else if (selectedCard == 3) {
-                    cfg.rumble_index ^= 1;
+                    cfg.rumble_index ^= 1; changed = true;
                 } else if (selectedCard == 4) {
-                    cfg.switch_index ^= 1;
+                    cfg.switch_index ^= 1; changed = true;
                 } else if (selectedCard == 5) {
-                    if (cfg.usb_mode_override > 0) cfg.usb_mode_override--;
+                    if (cfg.usb_mode_override > 0) { cfg.usb_mode_override--; changed = true; }
+                }
+                if (changed) {
+                    configMgr.save();
+                    notify_daemon_reload();
                 }
             }
 
             // Value changes (RIGHT)
             if (justPressed & ORBIS_PAD_BUTTON_RIGHT) {
+                bool changed = false;
                 if (selectedCard == 0) {
                     if (cfg.deadzone_index < (int)ConfigManager::DEADZONE_OPTIONS.size() - 1) {
-                        cfg.deadzone_index++;
+                        cfg.deadzone_index++; changed = true;
                     }
                 } else if (selectedCard == 1) {
                     if (cfg.trigger_index < (int)ConfigManager::TRIGGER_OPTIONS.size() - 1) {
-                        cfg.trigger_index++;
+                        cfg.trigger_index++; changed = true;
                     }
                 } else if (selectedCard == 2) {
-                    cfg.swap_index ^= 1;
+                    cfg.swap_index ^= 1; changed = true;
                 } else if (selectedCard == 3) {
-                    cfg.rumble_index ^= 1;
+                    cfg.rumble_index ^= 1; changed = true;
                 } else if (selectedCard == 4) {
-                    cfg.switch_index ^= 1;
+                    cfg.switch_index ^= 1; changed = true;
                 } else if (selectedCard == 5) {
                     if (cfg.usb_mode_override < (int)ConfigManager::USB_MODE_OPTIONS.size() - 1) {
-                        cfg.usb_mode_override++;
+                        cfg.usb_mode_override++; changed = true;
                     }
+                }
+                if (changed) {
+                    configMgr.save();
+                    notify_daemon_reload();
                 }
             }
 
@@ -430,45 +529,55 @@ int main() {
 
             // Value changes (LEFT)
             if (justPressed & ORBIS_PAD_BUTTON_LEFT) {
+                bool dsChanged = false;
                 if (dsSelectedCard == 0) {
-                    if (cfg.ds_lightbar_mode > 0) cfg.ds_lightbar_mode--;
+                    if (cfg.ds_lightbar_mode > 0) { cfg.ds_lightbar_mode--; dsChanged = true; }
                 } else if (dsSelectedCard == 1) {
-                    if (cfg.ds_lightbar_color > 0) cfg.ds_lightbar_color--;
+                    if (cfg.ds_lightbar_color > 0) { cfg.ds_lightbar_color--; dsChanged = true; }
                 } else if (dsSelectedCard == 2) {
-                    if (cfg.ds_brightness > 0) cfg.ds_brightness--;
+                    if (cfg.ds_brightness > 0) { cfg.ds_brightness--; dsChanged = true; }
                 } else if (dsSelectedCard == 3) {
-                    if (cfg.ds_trigger_mode > 0) cfg.ds_trigger_mode--;
+                    if (cfg.ds_trigger_mode > 0) { cfg.ds_trigger_mode--; dsChanged = true; }
                 } else if (dsSelectedCard == 4) {
-                    if (cfg.ds_player_leds > 0) cfg.ds_player_leds--;
+                    if (cfg.ds_player_leds > 0) { cfg.ds_player_leds--; dsChanged = true; }
                 } else if (dsSelectedCard == 5) {
-                    cfg.ds_mute_action ^= 1;
+                    cfg.ds_mute_action ^= 1; dsChanged = true;
+                }
+                if (dsChanged) {
+                    configMgr.save();
+                    notify_daemon_reload();
                 }
             }
 
             // Value changes (RIGHT)
             if (justPressed & ORBIS_PAD_BUTTON_RIGHT) {
+                bool dsChanged = false;
                 if (dsSelectedCard == 0) {
                     if (cfg.ds_lightbar_mode < (int)ConfigManager::DS_LIGHTBAR_OPTIONS.size() - 1) {
-                        cfg.ds_lightbar_mode++;
+                        cfg.ds_lightbar_mode++; dsChanged = true;
                     }
                 } else if (dsSelectedCard == 1) {
                     if (cfg.ds_lightbar_color < (int)ConfigManager::DS_COLOR_OPTIONS.size() - 1) {
-                        cfg.ds_lightbar_color++;
+                        cfg.ds_lightbar_color++; dsChanged = true;
                     }
                 } else if (dsSelectedCard == 2) {
                     if (cfg.ds_brightness < (int)ConfigManager::DS_BRIGHTNESS_OPTIONS.size() - 1) {
-                        cfg.ds_brightness++;
+                        cfg.ds_brightness++; dsChanged = true;
                     }
                 } else if (dsSelectedCard == 3) {
                     if (cfg.ds_trigger_mode < (int)ConfigManager::DS_TRIGGER_OPTIONS.size() - 1) {
-                        cfg.ds_trigger_mode++;
+                        cfg.ds_trigger_mode++; dsChanged = true;
                     }
                 } else if (dsSelectedCard == 4) {
                     if (cfg.ds_player_leds < (int)ConfigManager::DS_PLAYER_LEDS_OPTIONS.size() - 1) {
-                        cfg.ds_player_leds++;
+                        cfg.ds_player_leds++; dsChanged = true;
                     }
                 } else if (dsSelectedCard == 5) {
-                    cfg.ds_mute_action ^= 1;
+                    cfg.ds_mute_action ^= 1; dsChanged = true;
+                }
+                if (dsChanged) {
+                    configMgr.save();
+                    notify_daemon_reload();
                 }
             }
 
