@@ -783,19 +783,16 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         if (s_xone_ep_out_stalls >= 5) {
             return;
         }
-        static uint8_t s_xone_seq = 0;
-        uint8_t lg_val = (uint8_t)(((uint32_t)large_motor * 100) / 255);
-        uint8_t sm_val = (uint8_t)(((uint32_t)small_motor * 100) / 255);
-        uint8_t pkt[13] = {
-            0x09, 0x00, s_xone_seq++, 0x09,
-            0x00, 0x0F,
-            0x00, // Left trigger actuator (not present on 3rd-party/PowerA)
-            0x00, // Right trigger actuator (not present on 3rd-party/PowerA)
-            lg_val, // Left grip actuator (0..100)
-            sm_val, // Right grip actuator (0..100)
-            (large_motor > 0 || small_motor > 0) ? 0xFF : 0x00, // Duration (0xFF=continuous, 0=stop)
-            0x00, // Delay
-            0x00  // Repeat count (0=continuous until next packet, per Linux xpad)
+        // Standard Linux xpad.c Xbox One / GIP rumble packet (12 bytes)
+        // Motor mask 0x03 targets left and right grip motors only, avoiding trigger motor stalls on 3rd-party/PowerA pads
+        uint8_t pkt[12] = {
+            0x09, 0x08, 0x00, 0x08,
+            0x00, 0x03, // Mode 0x00, Motor select: 0x01 (Left) | 0x02 (Right) = 0x03
+            0x00, 0x00, // Left/Right trigger motors: 0x00 (not present on 3rd-party)
+            large_motor, // Left heavy grip motor (0..255)
+            small_motor, // Right light grip motor (0..255)
+            (large_motor > 0 || small_motor > 0) ? 0x80 : 0x00, // Duration / pulse length (0x80 continuous, 0x00 stop)
+            0x00  // Period of pulse
         };
         int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
         if (ret != 0) {
