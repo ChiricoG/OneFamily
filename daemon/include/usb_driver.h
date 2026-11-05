@@ -15,6 +15,7 @@ typedef struct {
     int endpoint_out;
     bool is_wireless;
     uint8_t bInterval;
+    uint16_t wMaxPacketSize;
 } UsbControllerState;
 
 extern UsbControllerState g_usb_state;

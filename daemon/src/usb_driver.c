@@ -560,6 +560,20 @@ static const char* controller_type_to_str(ControllerType type) {
     }
 }
 
+static const char* controller_friendly_name(ControllerType type, uint16_t vid, uint16_t pid) {
+    if (type == CONTROLLER_GENERIC_HID) {
+        if (vid == 0x046D && pid == 0xC218) return "Logitech RumblePad 2";
+        if (vid == 0x046D && pid == 0xC216) return "Logitech Dual Action";
+        if (vid == 0x046D && (pid == 0xC219 || pid == 0xC21D)) return "Logitech F310/F710 DirectInput";
+        if (vid == 0x2563) return "ShanWan Gamepad";
+        if (vid == 0x20BC) return "Betop Gamepad";
+        if (vid == 0x145F && pid == 0x02CD) return "Trust GXT 540 Yula";
+        if (vid == 0x145F && pid == 0x02E3) return "Trust GXT 542 Muta";
+        return "Generic HID Gamepad";
+    }
+    return controller_type_to_str(type);
+}
+
 static const char* controller_type_to_id(ControllerType type) {
     switch (type) {
         case CONTROLLER_XBOX360:   return "xbox360";
@@ -832,6 +846,7 @@ static int scan_and_open(void) {
                     g_usb_state.endpoint_out = det.ep_out;
                     g_usb_state.is_wireless = det.is_wireless;
                     g_usb_state.bInterval = det.bInterval;
+                    g_usb_state.wMaxPacketSize = det.wMaxPacketSize;
                     found = 1;
 
                     if (det.type == CONTROLLER_GENERIC_HID) {
@@ -853,12 +868,13 @@ static int scan_and_open(void) {
                         }
                     }
 
+                    const char* friendly_name = controller_friendly_name(det.type, desc.idVendor, desc.idProduct);
                     write_status_file(true, det.type, desc.idVendor, desc.idProduct,
-                                      controller_type_to_str(det.type),
+                                      friendly_name,
                                       (det.type == CONTROLLER_GENERIC_HID) ? generic_hid_get_nbuttons() : 16);
 
                     daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X, EP_OUT:0x%02X, interval=%dms, wireless=%d)",
-                               controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in, det.ep_out, det.bInterval, det.is_wireless);
+                               friendly_name, desc.idVendor, desc.idProduct, det.ep_in, det.ep_out, det.bInterval, det.is_wireless);
 
                     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
                     s_last_ds4.leftStick.x = 128;
@@ -917,9 +933,9 @@ static int scan_and_open(void) {
 
                     int slot = vpad_get_assigned_slot_num(s_usb_vpad_slot);
                     if (slot == 2) {
-                        daemon_notify("OneFamily: %s (Player 2)", controller_type_to_str(det.type));
+                        daemon_notify("OneFamily: %s (Player 2)", friendly_name);
                     } else {
-                        daemon_notify("OneFamily: %s Connected", controller_type_to_str(det.type));
+                        daemon_notify("OneFamily: %s Connected", friendly_name);
                     }
                 } else {
                     p_sceUsbdClose(h);
@@ -1225,8 +1241,14 @@ void usb_driver_poll_step(void) {
     uint8_t rx[128];
     int transferred = 0;
     int read_len = sizeof(rx);
-    if (g_usb_state.type == CONTROLLER_DUALSENSE || g_usb_state.type == CONTROLLER_GENERIC_HID) {
-        read_len = 64; // DualSense and Generic HID endpoints have wMaxPacketSize <= 64 bytes
+    if (g_usb_state.type == CONTROLLER_DUALSENSE) {
+        read_len = 64; // DualSense endpoint has wMaxPacketSize = 64 bytes
+    } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
+        if (g_usb_state.wMaxPacketSize > 0 && g_usb_state.wMaxPacketSize <= 64) {
+            read_len = g_usb_state.wMaxPacketSize;
+        } else {
+            read_len = 64; // Safe fallback
+        }
     }
     // Timeout: 8ms for high-polling (bInterval < 4ms), 16ms for standard 125Hz/250Hz controllers (as in v1.2.1)
     int poll_timeout_ms = (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4) ? 8 : 16;
@@ -1675,10 +1697,14 @@ void usb_driver_poll_step(void) {
                 }
                 int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
                 if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors == 1 || s_consecutive_transfer_errors % 10 == 0)) {
-                    daemon_log(LOG_LEVEL_WARN, "Generic HID EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
-                               ret, s_consecutive_transfer_errors);
-                    p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
-                    daemon_sys_usleep(10000);
+                    // Skip ClearHalt for Logitech controllers (VID 0x046D) due to LG_NOGET hardware quirk:
+                    // EP0 control requests while active crash the internal microcontroller.
+                    if (g_usb_state.vid != 0x046D) {
+                        daemon_log(LOG_LEVEL_WARN, "Generic HID EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
+                                   ret, s_consecutive_transfer_errors);
+                        p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                        daemon_sys_usleep(10000);
+                    }
                 }
             }
 

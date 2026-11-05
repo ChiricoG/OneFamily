@@ -647,6 +647,8 @@ int generic_hid_detect(libusb_device* dev, DetectedController* out) {
     uint8_t gp_alt = 0;
     uint8_t gp_ep_in = 0;
     uint8_t gp_ep_out = 0;
+    uint16_t gp_mps = 0;
+    uint8_t gp_interval = 0;
 
     for (int i = 0; i < cfg->bNumInterfaces; i++) {
         const struct libusb_interface* intf = &cfg->interface[i];
@@ -669,11 +671,17 @@ int generic_hid_detect(libusb_device* dev, DetectedController* out) {
             if (alt->bInterfaceClass == USB_CLASS_HID && !gamepad_found) {
                 uint8_t ep_in = 0;
                 uint8_t ep_out = 0;
+                uint16_t ep_in_mps = 0;
+                uint8_t ep_in_interval = 0;
                 for (int k = 0; k < alt->bNumEndpoints; k++) {
                     const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
                     if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
                         if (ep->bEndpointAddress & EP_DIR_IN) {
-                            if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                            if (ep_in == 0) {
+                                ep_in = ep->bEndpointAddress;
+                                ep_in_mps = ep->wMaxPacketSize;
+                                ep_in_interval = ep->bInterval;
+                            }
                         } else {
                             if (ep_out == 0) ep_out = ep->bEndpointAddress;
                         }
@@ -684,6 +692,8 @@ int generic_hid_detect(libusb_device* dev, DetectedController* out) {
                     gp_alt = alt->bAlternateSetting;
                     gp_ep_in = ep_in;
                     gp_ep_out = ep_out;
+                    gp_mps = ep_in_mps;
+                    gp_interval = ep_in_interval;
                     gamepad_found = 1;
                 }
             }
@@ -699,6 +709,8 @@ int generic_hid_detect(libusb_device* dev, DetectedController* out) {
         out->ep_in = gp_ep_in;
         out->ep_out = gp_ep_out;
         out->kbd_interface_num = kbd_iface;
+        out->wMaxPacketSize = gp_mps;
+        out->bInterval = gp_interval;
         return 1;
     }
 
@@ -1128,17 +1140,35 @@ void generic_hid_send_rumble(libusb_device_handle* h, uint16_t vid, uint16_t pid
         return;
     }
 
-    // 2b. Logitech DirectInput (VID 0x046D — F310, F710, RumblePad 2, Dual Action) [Linux hid-lgff.c]
+    // 2b. Logitech DirectInput (VID 0x046D — F310, F710, RumblePad 2, Dual Action) [Linux hid-lgff.c / hid-lg2ff.c]
     if (vid == 0x046D) {
         uint8_t pkt[7];
-        if (large_motor == 0 && small_motor == 0) {
-            uint8_t stop[7] = { 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            memcpy(pkt, stop, sizeof(pkt));
+        if (pid == 0xC218) {
+            // Logitech RumblePad 2 USB follows hid-lg2ff.c:
+            // Report ID 0x51 (7 bytes). Stop is 0x51 with all zeros.
+            pkt[0] = 0x51;
+            pkt[1] = 0x00;
+            pkt[2] = large_motor;
+            pkt[3] = 0x00;
+            pkt[4] = small_motor;
+            pkt[5] = 0x00;
+            pkt[6] = 0x00;
         } else {
-            uint8_t play[7] = { 0x51, 0x00, large_motor, 0x00, small_motor, 0x00, 0x00 };
-            memcpy(pkt, play, sizeof(pkt));
+            // Other Logitech DirectInput controllers (hid-lgff.c / WingMan)
+            if (large_motor == 0 && small_motor == 0) {
+                uint8_t stop[7] = { 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                memcpy(pkt, stop, sizeof(pkt));
+            } else {
+                uint8_t play[7] = { 0x51, 0x00, large_motor, 0x00, small_motor, 0x00, 0x00 };
+                memcpy(pkt, play, sizeof(pkt));
+            }
         }
-        send_hid_output_packet(h, ep_out, iface, 0x00, pkt, sizeof(pkt), intr_transfer, ctrl_transfer);
+        // LG_NOGET hardware quirk: sending EP0 control transfers crashes the controller.
+        // Send only via interrupt transfer if ep_out is present.
+        if (ep_out != 0 && intr_transfer) {
+            int transferred = 0;
+            intr_transfer(h, ep_out, pkt, sizeof(pkt), &transferred, 2);
+        }
         return;
     }
 

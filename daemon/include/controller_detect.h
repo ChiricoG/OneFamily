@@ -33,6 +33,7 @@ typedef struct {
     int      is_wireless;       // 1 = wireless receiver (e.g. protocol 0x81)
     uint8_t  kbd_interface_num; // Secondary keyboard interface to detach (0xFF if none)
     uint8_t  bInterval;         // Endpoint IN polling interval in ms (1 = 1000Hz, 2 = 500Hz, 4 = 250Hz, 8 = 125Hz)
+    uint16_t wMaxPacketSize;    // Endpoint IN max packet size in bytes
 } DetectedController;
 
 /*
