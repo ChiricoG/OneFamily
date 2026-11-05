@@ -811,7 +811,7 @@ static int scan_and_open(void) {
                     }
                 }
 
-                if (p_sceUsbdDetachKernelDriver && (det.type == CONTROLLER_GENERIC_HID || det.type == CONTROLLER_DS4)) {
+                if (p_sceUsbdDetachKernelDriver && (det.type == CONTROLLER_GENERIC_HID || det.type == CONTROLLER_DS4 || det.type == CONTROLLER_DS3)) {
                     p_sceUsbdDetachKernelDriver(h, det.interface_num);
                 }
 
@@ -873,14 +873,24 @@ static int scan_and_open(void) {
                     } else if (det.type == CONTROLLER_XBOXONE) {
                         init_gip_controller();
                     } else if (det.type == CONTROLLER_DS3) {
-                        uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
+                        if (h && p_sceUsbdClearHalt && g_usb_state.endpoint_in) {
+                            p_sceUsbdClearHalt(h, g_usb_state.endpoint_in);
+                            daemon_sys_usleep(5000);
+                        }
                         if (p_sceUsbdControlTransfer) {
+                            // 1. Linux hid-sony / Sixaxis operational mode activation: GET_REPORT Feature 0xF2
+                            uint8_t op_buf[17];
+                            memset(op_buf, 0, sizeof(op_buf));
+                            int r_f2 = p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F2, det.interface_num, op_buf, sizeof(op_buf), 100);
+                            daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational mode query 0xF2 sent (ret=%d)", r_f2);
+
+                            // 2. SET_REPORT Feature 0xF4 magic packet (wake-up command)
+                            uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
                             int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 1000);
                             daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational handshake sent (ret=%d)", cret);
 
-                            // Shanwan / Gasia DS3 clone wake-up: query Feature Report 0xF2 and 0xF5 via GET_REPORT
+                            // 3. Shanwan / Gasia DS3 clone wake-up: query Feature Report 0xF5 via GET_REPORT
                             uint8_t dummy[64];
-                            p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F2, det.interface_num, dummy, 17, 100);
                             p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F5, det.interface_num, dummy, 8, 100);
                         }
                     } else if (det.type == CONTROLLER_SWITCH_PRO) {
@@ -1638,6 +1648,20 @@ void usb_driver_poll_step(void) {
                 int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
                 if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors == 1 || s_consecutive_transfer_errors % 25 == 0)) {
                     daemon_log(LOG_LEVEL_WARN, "DualShock 4 EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
+                               ret, s_consecutive_transfer_errors);
+                    p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(10000);
+                }
+            } else if (g_usb_state.type == CONTROLLER_DS3) {
+                static int s_logged_ds3_err = 0;
+                if (s_logged_ds3_err < 10) {
+                    daemon_log(LOG_LEVEL_WARN, "DualShock 3 interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
+                               ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+                    s_logged_ds3_err++;
+                }
+                int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors == 1 || s_consecutive_transfer_errors % 25 == 0)) {
+                    daemon_log(LOG_LEVEL_WARN, "DualShock 3 EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
                     daemon_sys_usleep(10000);

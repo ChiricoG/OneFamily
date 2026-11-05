@@ -389,6 +389,8 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->interface_num = 0;
             out->ep_in = 0x81;
             out->ep_out = 0x02;
+            out->bInterval = 1;
+            out->kbd_interface_num = 0xFF;
             return 1;
         } else if (desc->idProduct == SONY_DUALSENSE_PID || desc->idProduct == SONY_DUALSENSE_EDGE_PID) {
             out->type = CONTROLLER_DUALSENSE;
