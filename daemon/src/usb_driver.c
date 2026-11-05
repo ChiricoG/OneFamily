@@ -186,6 +186,7 @@ static void close_controller(void) {
     uint16_t closing_vid = g_usb_state.vid;
     uint16_t closing_pid = g_usb_state.pid;
     int had_any_reports = s_logged_first_report;
+    int had_errors = s_consecutive_transfer_errors;
 
     if (s_usb_vpad_slot >= 0) {
         vpad_slot_close(s_usb_vpad_slot);
@@ -228,14 +229,14 @@ static void close_controller(void) {
     s_last_ds4.rightStick.x = 128;
     s_last_ds4.rightStick.y = 128;
 
-    // Notification loop mitigation: if controller closed without ever receiving a single input report,
+    // Notification loop mitigation: if controller closed due to persistent transfer errors without streaming,
     // apply a 15-second cooldown before attempting to claim this device again.
-    if (!had_any_reports && closing_vid != 0) {
+    if (!had_any_reports && closing_vid != 0 && had_errors >= 25) {
         s_failed_cooldown_vid = closing_vid;
         s_failed_cooldown_pid = closing_pid;
         s_failed_cooldown_until_us = daemon_sys_time_us() + 15000000ULL;
-        daemon_log(LOG_LEVEL_WARN, "Controller VID:0x%04X PID:0x%04X entered 15s cooldown (no reports streamed)",
-                   closing_vid, closing_pid);
+        daemon_log(LOG_LEVEL_WARN, "Controller VID:0x%04X PID:0x%04X entered 15s cooldown (persistent transfer errors=%d)",
+                   closing_vid, closing_pid, had_errors);
     }
 
     daemon_log(LOG_LEVEL_INFO, "Controller disconnected from USB");
@@ -307,6 +308,11 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
         // Linux xpad: bmRequestType=0xC1 (Vendor Interface IN), bRequest=0x01, wValue=0x0100, wIndex=interface_num, len=20
         int ret = p_sceUsbdControlTransfer(h, 0xC1, 0x01, 0x0100, interface_num, dummy, sizeof(dummy), 100);
         daemon_log(LOG_LEVEL_INFO, "Xbox 360 clone control handshake sent (ret=0x%08X)", ret);
+    }
+
+    if (g_usb_state.vid == 0x2DC8) {
+        daemon_log(LOG_LEVEL_INFO, "Xbox 360: 8BitDo wireless adapter detected (VID:0x2DC8) — bypassing LED command");
+        return;
     }
 
     if (ep_out && p_sceUsbdInterruptTransfer && h) {
@@ -715,7 +721,22 @@ static int scan_and_open(void) {
                     found = 1;
 
                     if (det.type == CONTROLLER_GENERIC_HID) {
-                        generic_hid_setup(h, desc.idVendor, desc.idProduct, det.interface_num, p_sceUsbdControlTransfer);
+                        if (!generic_hid_setup(h, desc.idVendor, desc.idProduct, det.interface_num, p_sceUsbdControlTransfer)) {
+                            daemon_log(LOG_LEVEL_INFO, "Generic HID (0x%04X:0x%04X) rejected: not an active gamepad — releasing interface",
+                                       desc.idVendor, desc.idProduct);
+                            if (s_claimed_kbd_interface >= 0 && p_sceUsbdReleaseInterface) {
+                                p_sceUsbdReleaseInterface(h, s_claimed_kbd_interface);
+                                s_claimed_kbd_interface = -1;
+                            }
+                            if (p_sceUsbdReleaseInterface) {
+                                p_sceUsbdReleaseInterface(h, det.interface_num);
+                            }
+                            p_sceUsbdClose(h);
+                            g_dev_handle = NULL;
+                            g_usb_state.connected = false;
+                            found = 0;
+                            break;
+                        }
                     }
 
                     write_status_file(true, det.type, desc.idVendor, desc.idProduct,
@@ -1064,10 +1085,10 @@ void usb_driver_poll_step(void) {
     int transferred = 0;
     // 64-byte max packet size covers all supported controllers (Xbox, Switch, DualSense, Stadia, Generic HID)
     int read_len = 64;
-    // 2ms timeout matches low-latency 250 Hz pacing: returns immediately if packet is ready,
-    // or unblocks within 2ms so the main loop never starves other subsystems (BT, rumble, vpad).
+    // 8ms timeout safely covers 125 Hz (8ms) and 250 Hz (4ms) endpoint polling intervals (bInterval),
+    // while returning immediately (< 100us) whenever a packet is available.
     uint64_t xfer_start_us = daemon_sys_time_us();
-    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 2);
+    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 8);
     uint64_t xfer_dur_us = daemon_sys_time_us() - xfer_start_us;
 
     // High-Polling USB FIFO Drain (Targeted for Xbox 360 / XInput adapters and Xbox One / Series wired controllers):

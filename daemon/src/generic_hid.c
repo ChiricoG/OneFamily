@@ -724,6 +724,15 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
                            vid, pid, s_ctx.out_rid, s_ctx.out_has_ids, s_ctx.out_bits, s_ctx.out_data_bit_off, s_ctx.out_field_size);
             }
             s_configured = 1;
+
+            int has_axes = 0;
+            for (int a = 0; a < AX_N; a++) {
+                if (s_ctx.axis[a].present) { has_axes = 1; break; }
+            }
+            if (s_ctx.nbuttons == 0 && !has_axes) {
+                daemon_log(LOG_LEVEL_WARN, "Generic HID (0x%04X:0x%04X): device has 0 buttons and 0 axes (idle receiver/non-gamepad) — rejecting claim", vid, pid);
+                return 0;
+            }
         }
     } else {
         daemon_log(LOG_LEVEL_WARN, "Generic HID (0x%04X:0x%04X): could not read report descriptor (ret=%d), using fallback mapping",

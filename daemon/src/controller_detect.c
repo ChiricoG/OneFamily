@@ -412,6 +412,14 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
     }
 
     // 7. Generic HID Controller Fallback (AnyPad model: 8BitDo, generic DInput pads, fightsticks)
+    if (desc->idVendor == 0x2DC8 && desc->idProduct == 0x301C) {
+        // 8BitDo Ultimate 2C 2.4G wireless adapter in idle receiver state (controller turned OFF).
+        // The adapter automatically switches to 0x310A (Xbox 360 mode) as soon as the controller is turned ON.
+        // Ignore idle receiver to prevent false gamepad claiming and user picker popups!
+        daemon_log(LOG_LEVEL_INFO, "Device 0x2DC8:0x301C is 8BitDo idle wireless receiver (controller OFF) — ignoring");
+        return 0;
+    }
+
     if (generic_hid_detect(dev, out)) {
         out->generic = 1;
         out->vid = desc->idVendor;
