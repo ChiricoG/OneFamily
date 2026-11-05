@@ -8,6 +8,8 @@ All notable changes to the OneFamily project are documented in this file.
 - **ShanWan & Betop Controllers Support**: Fixed connection dropouts and freezes on ShanWan (BSP-G6, ShanWan PS3/PC, Redragon G808) and Betop controllers. Fixed an issue where moving the left analog stick horizontally triggered accidental button presses and locked up the sticks.
 - **PlayStation 3 (DualShock 3 / Sixaxis) USB Support**: Restored full wired USB support for original PS3 controllers, resolving the issue where the controller connected but buttons were unresponsive.
 - **Wireless 2.4GHz Dongle & Xbox 360 Responsiveness**: Eliminated input lag and stuttering when playing with high-performance 2.4GHz wireless dongles (such as GuliKit KK3 Max 2.4GHz adapter and 8BitDo). Restored proper status LED illumination (Player 1) on Xbox 360 controllers.
+- **Stuck Rumble Prevention**: Fixed an issue where the controller could occasionally keep vibrating indefinitely when vibration stopped. Stop commands are now safely repeated to guarantee motors shut off immediately.
+- **Switch Pro Stick Direction (Y-Axis)**: Fixed inverted vertical analog stick movement on Nintendo Switch Pro and compatible controllers, ensuring pushing up and down moves in the correct direction.
 
 ### Companion App Fixes
 - **Player Screen Fix in Input Tester**: Resolved an issue where two active players were displayed simultaneously for a single connected controller. Only active controllers and users are now displayed.
