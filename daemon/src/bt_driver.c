@@ -1190,19 +1190,12 @@ int bt_driver_init(void) {
     s_bt_registered = true;
     s_bt_reg_count = 1;
 
-    // Register remaining slots for DualSense (up to BT_MAX_DEVICES)
-    for (int i = 1; i < BT_MAX_DEVICES; ++i) {
-        if (bt_register_pair(SONY_VID, SONY_DUALSENSE_PID, "dualsense (slot)") == 0) {
-            ++s_bt_reg_count;
-        }
-    }
-
-    // Also register DualSense Edge (0x0DF2)
+    // Register DualSense Edge (0x0DF2) with Bluetooth driver
+    // /dev/bt kernel table stores allowed (VID, PID) device filters with limited capacity.
+    // Registering 1 entry per PID leaves slots available for both standard DualSense and DualSense Edge!
     s_bt_edge_reg_count = 0;
-    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
-        if (bt_register_pair(SONY_VID, SONY_DUALSENSE_EDGE_PID, "dualsense_edge") == 0) {
-            ++s_bt_edge_reg_count;
-        }
+    if (bt_register_pair(SONY_VID, SONY_DUALSENSE_EDGE_PID, "dualsense_edge") == 0) {
+        s_bt_edge_reg_count = 1;
     }
 
     s_bt_running = true;

@@ -381,16 +381,21 @@ static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expec
 static void init_switch_pro_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Starting Switch Pro / Clone wake-up sequence...");
 
+    uint8_t probe_rx[64];
+    int probe_len = 0;
+
     // 1. Passive Mode / Clone check:
     // Third-party Switch Pro clones (like Trust GXT Muta, Nyko, PowerA) start streaming standard
     // HID input reports immediately upon connection without needing any 0x80 handshake.
-    // If the controller is already actively streaming input, DO NOT send 0x80 (it would crash the clone)!
-    uint8_t probe_rx[64];
-    int probe_len = 0;
-    int probe_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, probe_rx, sizeof(probe_rx), &probe_len, 40);
-    if (probe_ret == 0 && probe_len > 0) {
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro / Clone is already actively streaming input (%d bytes) — skipping 0x80 wake-up handshake (passive mode)", probe_len);
-        return;
+    // If a third-party clone is already actively streaming input, DO NOT send 0x80 (it would crash the clone)!
+    // Official Nintendo Switch Pro controllers (VID 0x057E) MUST always execute the 0x80 handshake
+    // to lock the controller into USB mode (0x80 0x04) and prevent it from dropping USB / falling back to Bluetooth!
+    if (g_usb_state.vid != SWITCH_PRO_VID) {
+        int probe_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, probe_rx, sizeof(probe_rx), &probe_len, 40);
+        if (probe_ret == 0 && probe_len > 0) {
+            daemon_log(LOG_LEVEL_INFO, "Switch Pro Clone is already actively streaming input (%d bytes) — skipping 0x80 wake-up handshake (passive mode)", probe_len);
+            return;
+        }
     }
 
     // Drain any leftover input in the USB FIFO first
