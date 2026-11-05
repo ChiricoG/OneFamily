@@ -59,4 +59,7 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
 int32_t usbd_get_active_config_descriptor(libusb_device* dev, struct libusb_config_descriptor** config);
 void usbd_free_config_descriptor(struct libusb_config_descriptor* config);
 
+// Check if a Sony VID device has a genuine Sony manufacturer string descriptor
+int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descriptor* desc);
+
 #endif // CONTROLLER_DETECT_H

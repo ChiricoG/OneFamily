@@ -283,7 +283,7 @@ int main() {
                           hidStatus.type.find("hid") != std::string::npos ||
                           hidStatus.type.find("HID") != std::string::npos);
         bool hasHid = (hidStatus.connected && isHidType);
-        bool hasDualSense = (hidStatus.connected && (hidStatus.type == "dualsense_bt" || hidStatus.vid == 0x054C));
+        bool hasDualSense = (hidStatus.connected && (hidStatus.type == "dualsense_bt" || hidStatus.type == "dualsense" || (hidStatus.vid == 0x054C && (hidStatus.pid == 0x0CE6 || hidStatus.pid == 0x0DF2))));
 
         if (hasHid && !hidLoaded) {
             hidProfile.load(hidStatus.vid, hidStatus.pid, hidStatus.nbuttons);

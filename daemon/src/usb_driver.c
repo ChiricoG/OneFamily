@@ -491,6 +491,7 @@ static const char* controller_type_to_str(ControllerType type) {
         case CONTROLLER_DUALSENSE:return "DualSense";
         case CONTROLLER_STADIA:   return "Google Stadia";
         case CONTROLLER_GENERIC_HID:return "Generic HID Gamepad";
+        case CONTROLLER_DS4:      return "DualShock 4";
         default:                  return "Unknown";
     }
 }
@@ -505,8 +506,56 @@ static const char* controller_type_to_id(ControllerType type) {
         case CONTROLLER_DUALSENSE: return "dualsense";
         case CONTROLLER_STADIA:    return "stadia";
         case CONTROLLER_GENERIC_HID:return "generic_hid";
+        case CONTROLLER_DS4:       return "ds4";
         default:                   return "none";
     }
+}
+
+static int usb_get_string_ascii(libusb_device_handle* h, uint8_t idx, char* buf, size_t max_len) {
+    if (!h || idx == 0 || !buf || max_len == 0 || !p_sceUsbdControlTransfer) return -1;
+    uint8_t desc[256];
+    memset(desc, 0, sizeof(desc));
+    int ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | idx, 0x0409, desc, sizeof(desc), 100);
+    if (ret < 0) {
+        ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | idx, 0x0000, desc, sizeof(desc), 100);
+    }
+    if (ret >= 2 && desc[1] == 0x03) {
+        int len = desc[0];
+        if (len > ret) len = ret;
+        size_t out_idx = 0;
+        for (int i = 2; i < len && out_idx < max_len - 1; i += 2) {
+            buf[out_idx++] = (char)desc[i];
+        }
+        buf[out_idx] = '\0';
+        return (int)out_idx;
+    }
+    return -1;
+}
+
+int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descriptor* desc) {
+    if (!dev || !desc || desc->idVendor != SONY_VID) return 0;
+
+    libusb_device_handle* h = NULL;
+    if (p_sceUsbdOpen && p_sceUsbdOpen(dev, &h) == 0 && h != NULL) {
+        char mfg[128] = {0};
+        int r = (desc->iManufacturer != 0) ? usb_get_string_ascii(h, desc->iManufacturer, mfg, sizeof(mfg)) : -1;
+        if (p_sceUsbdClose) p_sceUsbdClose(h);
+
+        if (r > 0) {
+            daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X iManufacturer='%s'", desc->idVendor, desc->idProduct, mfg);
+            for (int i = 0; mfg[i]; i++) {
+                if ((mfg[i] == 'S' || mfg[i] == 's') &&
+                    (mfg[i+1] == 'O' || mfg[i+1] == 'o') &&
+                    (mfg[i+2] == 'N' || mfg[i+2] == 'n') &&
+                    (mfg[i+3] == 'Y' || mfg[i+3] == 'y')) {
+                    return 1;
+                }
+            }
+            return 0; // Read successfully, but does not contain "Sony" (e.g. GameSir)
+        }
+    }
+    // If opening or descriptor read failed, default to treating Sony VID as genuine Sony to be safe
+    return 1;
 }
 
 #define USB_MAX_SNAPSHOT_DEVICES 16
@@ -698,7 +747,7 @@ static int scan_and_open(void) {
                     }
                 }
 
-                if (p_sceUsbdDetachKernelDriver && det.type == CONTROLLER_GENERIC_HID) {
+                if (p_sceUsbdDetachKernelDriver && (det.type == CONTROLLER_GENERIC_HID || det.type == CONTROLLER_DS4)) {
                     p_sceUsbdDetachKernelDriver(h, det.interface_num);
                 }
 
@@ -956,6 +1005,23 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         }
         if (!sent && p_sceUsbdControlTransfer) {
             p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, pkt, sizeof(pkt), 2);
+        }
+    } else if (g_usb_state.type == CONTROLLER_DS4) {
+        DS4OutputReport pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.report_id = 0x05;
+        pkt.valid_flag0 = 0x07; // Rumble + LED valid
+        pkt.motor_right = small_motor;
+        pkt.motor_left = large_motor;
+        pkt.lightbar_blue = 255; // Default blue LED
+        int sent = 0;
+        if (ep != 0) {
+            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, (uint8_t*)&pkt, sizeof(pkt), &transferred, 2) == 0) {
+                sent = 1;
+            }
+        }
+        if (!sent && p_sceUsbdControlTransfer) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, (unsigned char*)&pkt, sizeof(pkt), 2);
         }
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         generic_hid_send_rumble(g_dev_handle, g_usb_state.vid, g_usb_state.pid,
@@ -1406,6 +1472,33 @@ void usb_driver_poll_step(void) {
 
                 handle_pad_input_and_send(&ds4);
             }
+        } else if (g_usb_state.type == CONTROLLER_DS4 && transferred >= 10) {
+            static int s_logged_ds4_report = 0;
+            if (s_logged_ds4_report < 10) {
+                daemon_log(LOG_LEVEL_INFO, "DS4 report [%d bytes]: rx[0]=0x%02X rx[1]=0x%02X rx[2]=0x%02X rx[3]=0x%02X",
+                           transferred, rx[0], (transferred > 1 ? rx[1] : 0), (transferred > 2 ? rx[2] : 0), (transferred > 3 ? rx[3] : 0));
+                s_logged_ds4_report++;
+            }
+
+            DS4Report ds4_pkt;
+            const DS4Report* ds4_report = NULL;
+            if (rx[0] == 0x01 && transferred >= (int)sizeof(DS4Report)) {
+                ds4_report = (const DS4Report*)rx;
+            } else if (rx[0] == 0x01) {
+                memset(&ds4_pkt, 0, sizeof(ds4_pkt));
+                memcpy(&ds4_pkt, rx, transferred < (int)sizeof(ds4_pkt) ? transferred : sizeof(ds4_pkt));
+                ds4_report = &ds4_pkt;
+            } else if (transferred >= 9) {
+                memset(&ds4_pkt, 0, sizeof(ds4_pkt));
+                ds4_pkt.report_id = 0x01;
+                memcpy(&ds4_pkt.left_stick_x, rx, transferred < (int)(sizeof(ds4_pkt) - 1) ? transferred : (sizeof(ds4_pkt) - 1));
+                ds4_report = &ds4_pkt;
+            }
+
+            if (ds4_report) {
+                translator_convert_ds4(ds4_report, &ds4, &s_trans_cfg);
+                handle_pad_input_and_send(&ds4);
+            }
         } else if (g_usb_state.type == CONTROLLER_GENERIC_HID && transferred > 0) {
             static int s_logged_generic_report = 0;
             if (s_logged_generic_report < 10) {
@@ -1480,6 +1573,19 @@ void usb_driver_poll_step(void) {
             } else if (g_usb_state.type == CONTROLLER_STADIA) {
                 daemon_log(LOG_LEVEL_WARN, "Stadia interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
                            ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+            } else if (g_usb_state.type == CONTROLLER_DS4) {
+                static int s_logged_ds4_err = 0;
+                if (s_logged_ds4_err < 10) {
+                    daemon_log(LOG_LEVEL_WARN, "DualShock 4 interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
+                               ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+                    s_logged_ds4_err++;
+                }
+                int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors >= 10 && s_consecutive_transfer_errors % 25 == 0)) {
+                    daemon_log(LOG_LEVEL_WARN, "DualShock 4 EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
+                               ret, s_consecutive_transfer_errors);
+                    p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                }
             } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
                 static int s_logged_gen_err = 0;
                 if (s_logged_gen_err < 10) {

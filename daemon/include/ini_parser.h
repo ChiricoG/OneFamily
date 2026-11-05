@@ -40,7 +40,8 @@ typedef enum {
     USB_OVERRIDE_AUTO = 0,         // Auto-detect (default)
     USB_OVERRIDE_FORCE_XINPUT = 1, // Prioritize / Force XInput (Xbox 360 / Xbox One)
     USB_OVERRIDE_FORCE_SWITCH = 2, // Prioritize / Force Switch (Pro / Clone / Input-Only)
-    USB_OVERRIDE_FORCE_GENERIC = 3 // Prioritize / Force Generic HID (AnyPad)
+    USB_OVERRIDE_FORCE_GENERIC = 3, // Prioritize / Force Generic HID (AnyPad)
+    USB_OVERRIDE_FORCE_DS4 = 4     // Prioritize / Force DualShock 4 (PS4 mode)
 } UsbModeOverride;
 
 // Complete plugin configuration

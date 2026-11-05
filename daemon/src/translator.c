@@ -1131,3 +1131,150 @@ void translator_convert_stadia(const StadiaInputReport* stadia, OrbisPadData* ds
     ds4->count = 1;
     ds4->timestamp = sceKernelGetProcessTime();
 }
+
+void translator_convert_ds4(const DS4Report* rpt, OrbisPadData* ds4, const TranslatorConfig* config) {
+    TranslatorConfig default_config;
+    if (!config) {
+        translator_init(&default_config);
+        config = &default_config;
+    }
+
+    memset(ds4, 0, sizeof(OrbisPadData));
+
+    // Analog sticks (0 = Top/Left, 255 = Bottom/Right)
+    uint8_t lx = rpt->left_stick_x;
+    uint8_t ly = rpt->left_stick_y;
+    uint8_t rx = rpt->right_stick_x;
+    uint8_t ry = rpt->right_stick_y;
+
+    if (config->stick_deadzone > 0) {
+        lx = translator_apply_deadzone(lx, config->stick_deadzone);
+        ly = translator_apply_deadzone(ly, config->stick_deadzone);
+        rx = translator_apply_deadzone(rx, config->stick_deadzone);
+        ry = translator_apply_deadzone(ry, config->stick_deadzone);
+    }
+
+    ds4->leftStick.x = lx;
+    ds4->leftStick.y = ly;
+    ds4->rightStick.x = rx;
+    ds4->rightStick.y = ry;
+
+    // Analog triggers
+    if (g_config.swap_triggers_bumpers) {
+        ds4->analogButtons.l2 = (rpt->buttons[1] & 0x01) ? 255 : 0;
+        ds4->analogButtons.r2 = (rpt->buttons[1] & 0x02) ? 255 : 0;
+    } else {
+        ds4->analogButtons.l2 = rpt->left_trigger;
+        ds4->analogButtons.r2 = rpt->right_trigger;
+    }
+
+    uint32_t ds4_buttons = 0;
+
+    // Face buttons in buttons[0]:
+    // Square(0x10), Cross(0x20), Circle(0x40), Triangle(0x80)
+    if (config->swap_ab) {
+        if (rpt->buttons[0] & 0x20) ds4_buttons |= DS4_BUTTON_CIRCLE;
+        if (rpt->buttons[0] & 0x40) ds4_buttons |= DS4_BUTTON_CROSS;
+    } else {
+        if (rpt->buttons[0] & 0x20) ds4_buttons |= DS4_BUTTON_CROSS;
+        if (rpt->buttons[0] & 0x40) ds4_buttons |= DS4_BUTTON_CIRCLE;
+    }
+
+    if (config->swap_xy) {
+        if (rpt->buttons[0] & 0x10) ds4_buttons |= DS4_BUTTON_TRIANGLE;
+        if (rpt->buttons[0] & 0x80) ds4_buttons |= DS4_BUTTON_SQUARE;
+    } else {
+        if (rpt->buttons[0] & 0x10) ds4_buttons |= DS4_BUTTON_SQUARE;
+        if (rpt->buttons[0] & 0x80) ds4_buttons |= DS4_BUTTON_TRIANGLE;
+    }
+
+    // Shoulders & Triggers in buttons[1]:
+    // L1 = 0x01, R1 = 0x02, L2_click = 0x04, R2_click = 0x08
+    if (g_config.swap_triggers_bumpers) {
+        if (rpt->buttons[1] & 0x01) ds4_buttons |= DS4_BUTTON_L2;
+        if (rpt->buttons[1] & 0x02) ds4_buttons |= DS4_BUTTON_R2;
+        if (rpt->left_trigger >= config->trigger_threshold) ds4_buttons |= DS4_BUTTON_L1;
+        if (rpt->right_trigger >= config->trigger_threshold) ds4_buttons |= DS4_BUTTON_R1;
+    } else {
+        if (rpt->buttons[1] & 0x01) ds4_buttons |= DS4_BUTTON_L1;
+        if (rpt->buttons[1] & 0x02) ds4_buttons |= DS4_BUTTON_R1;
+        if (rpt->left_trigger >= config->trigger_threshold) ds4_buttons |= DS4_BUTTON_L2;
+        if (rpt->right_trigger >= config->trigger_threshold) ds4_buttons |= DS4_BUTTON_R2;
+    }
+
+    // Menu & Stick clicks in buttons[1]:
+    // Share = 0x10, Options = 0x20, L3 = 0x40, R3 = 0x80
+    if (rpt->buttons[1] & 0x10) ds4_buttons |= DS4_BUTTON_SHARE;
+    if (rpt->buttons[1] & 0x20) ds4_buttons |= DS4_BUTTON_OPTIONS;
+    if (rpt->buttons[1] & 0x40) ds4_buttons |= DS4_BUTTON_L3;
+    if (rpt->buttons[1] & 0x80) ds4_buttons |= DS4_BUTTON_R3;
+
+    // D-Pad Hat Switch (lower 4 bits of buttons[0])
+    uint8_t hat = rpt->buttons[0] & 0x0F;
+    switch (hat) {
+        case 0: ds4_buttons |= DS4_BUTTON_DPAD_UP; break;
+        case 1: ds4_buttons |= DS4_BUTTON_DPAD_UP | DS4_BUTTON_DPAD_RIGHT; break;
+        case 2: ds4_buttons |= DS4_BUTTON_DPAD_RIGHT; break;
+        case 3: ds4_buttons |= DS4_BUTTON_DPAD_DOWN | DS4_BUTTON_DPAD_RIGHT; break;
+        case 4: ds4_buttons |= DS4_BUTTON_DPAD_DOWN; break;
+        case 5: ds4_buttons |= DS4_BUTTON_DPAD_DOWN | DS4_BUTTON_DPAD_LEFT; break;
+        case 6: ds4_buttons |= DS4_BUTTON_DPAD_LEFT; break;
+        case 7: ds4_buttons |= DS4_BUTTON_DPAD_UP | DS4_BUTTON_DPAD_LEFT; break;
+        default: break;
+    }
+
+    // PS Button and Touchpad click in buttons[2]:
+    // PS = 0x01, Touchpad click = 0x02
+    if (rpt->buttons[2] & 0x01) {
+        if (g_config.guide_action == CONFIG_GUIDE_TOUCHPAD) {
+            ds4_buttons |= DS4_BUTTON_TOUCHPAD;
+        } else if (g_config.guide_action == CONFIG_GUIDE_SHARE) {
+            ds4_buttons |= DS4_BUTTON_SHARE;
+        } else {
+            ds4_buttons |= DS4_BUTTON_PS;
+        }
+    }
+    if (rpt->buttons[2] & 0x02) {
+        ds4_buttons |= DS4_BUTTON_TOUCHPAD;
+    }
+
+    ds4->buttons = ds4_buttons;
+
+    // Capacitive Touchpad (up to 2 points)
+    uint8_t finger_count = 0;
+    if ((rpt->touch_reports[0].points[0].contact & 0x80) == 0) {
+        ds4->touch.touch[0].finger = 0;
+        ds4->touch.touch[0].x = (uint16_t)rpt->touch_reports[0].points[0].x_lo |
+                               (((uint16_t)(rpt->touch_reports[0].points[0].x_hi_y_lo & 0x0F)) << 8);
+        ds4->touch.touch[0].y = (uint16_t)(rpt->touch_reports[0].points[0].x_hi_y_lo >> 4) |
+                               (((uint16_t)rpt->touch_reports[0].points[0].y_hi) << 4);
+        finger_count++;
+    }
+    if ((rpt->touch_reports[0].points[1].contact & 0x80) == 0) {
+        ds4->touch.touch[1].finger = 1;
+        ds4->touch.touch[1].x = (uint16_t)rpt->touch_reports[0].points[1].x_lo |
+                               (((uint16_t)(rpt->touch_reports[0].points[1].x_hi_y_lo & 0x0F)) << 8);
+        ds4->touch.touch[1].y = (uint16_t)(rpt->touch_reports[0].points[1].x_hi_y_lo >> 4) |
+                               (((uint16_t)rpt->touch_reports[0].points[1].y_hi) << 4);
+        finger_count++;
+    }
+    ds4->touch.fingers = finger_count;
+
+    // Motion data
+    ds4->quat.x = 0.0f;
+    ds4->quat.y = 0.0f;
+    ds4->quat.z = 0.0f;
+    ds4->quat.w = 1.0f;
+
+    ds4->vel.x = (float)rpt->gyro[0];
+    ds4->vel.y = (float)rpt->gyro[1];
+    ds4->vel.z = (float)rpt->gyro[2];
+
+    ds4->acell.x = (float)rpt->accel[0] / 8192.0f;
+    ds4->acell.y = (float)rpt->accel[1] / 8192.0f;
+    ds4->acell.z = (float)rpt->accel[2] / 8192.0f;
+
+    ds4->connected = 1;
+    ds4->count = 1;
+    ds4->timestamp = sceKernelGetProcessTime();
+}

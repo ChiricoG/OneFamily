@@ -273,17 +273,58 @@ static int detect_stadia_endpoints(libusb_device* dev, DetectedController* out) 
     return found;
 }
 
+static int detect_ds4_endpoints(libusb_device* dev, DetectedController* out) {
+    if (!dev || !out) return 0;
+
+    struct libusb_config_descriptor* cfg = NULL;
+    if (usbd_get_active_config_descriptor(dev, &cfg) != 0 || !cfg) {
+        return 0;
+    }
+
+    int found = 0;
+    for (int i = 0; i < cfg->bNumInterfaces && !found; i++) {
+        const struct libusb_interface* intf = &cfg->interface[i];
+        for (int a = 0; a < intf->num_altsetting && !found; a++) {
+            const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
+
+            if (alt->bInterfaceClass != USB_CLASS_HID) continue;
+            // Skip boot keyboard and boot mouse
+            if (alt->bInterfaceSubClass == 1 && (alt->bInterfaceProtocol == 1 || alt->bInterfaceProtocol == 2)) {
+                continue;
+            }
+
+            uint8_t ep_in = 0;
+            uint8_t ep_out = 0;
+            for (int k = 0; k < alt->bNumEndpoints; k++) {
+                const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
+                if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
+                    if (ep->bEndpointAddress & EP_DIR_IN) {
+                        if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                    } else {
+                        if (ep_out == 0) ep_out = ep->bEndpointAddress;
+                    }
+                }
+            }
+
+            if (ep_in != 0) {
+                out->type          = CONTROLLER_DS4;
+                out->interface_num = alt->bInterfaceNumber;
+                out->alt_setting   = alt->bAlternateSetting;
+                out->ep_in         = ep_in;
+                out->ep_out        = ep_out ? ep_out : 0x03;
+                found = 1;
+            }
+        }
+    }
+
+    usbd_free_config_descriptor(cfg);
+    return found;
+}
+
 int controller_identify(libusb_device* dev, const struct libusb_device_descriptor* desc, DetectedController* out) {
     if (!dev || !desc || !out) return 0;
     memset(out, 0, sizeof(*out));
     out->kbd_interface_num = 0xFF;
-
-    // 0. Native PlayStation 4 controllers: skip completely so the PS4 OS handles them natively!
-    if (is_native_ps4_controller(desc->idVendor, desc->idProduct)) {
-        daemon_log(LOG_LEVEL_INFO, "Skipping native PS4 controller (VID=0x%04x, PID=0x%04x) for Orbis OS driver",
-                   desc->idVendor, desc->idProduct);
-        return 0;
-    }
 
     int override = g_daemon_config.usb_mode_override;
 
@@ -294,6 +335,45 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->vid = desc->idVendor;
             out->pid = desc->idProduct;
             daemon_log(LOG_LEVEL_INFO, "USB Override: Claimed as Generic HID (VID:0x%04X PID:0x%04X)", desc->idVendor, desc->idProduct);
+            return 1;
+        }
+    }
+
+    // Force DualShock 4 override
+    if (override == USB_OVERRIDE_FORCE_DS4) {
+        if (detect_ds4_endpoints(dev, out)) {
+            out->vid = desc->idVendor;
+            out->pid = desc->idProduct;
+            daemon_log(LOG_LEVEL_INFO, "USB Override: Claimed as DualShock 4 (VID:0x%04X PID:0x%04X)", desc->idVendor, desc->idProduct);
+            return 1;
+        }
+    }
+
+    // 0. PlayStation 4 controllers:
+    // If it's a native PS4 controller (Sony VID 0x054C with DS4 PID 0x05C4, 0x09CC, 0x0BA0):
+    if (is_native_ps4_controller(desc->idVendor, desc->idProduct)) {
+        if (usbd_is_sony_device(dev, desc)) {
+            daemon_log(LOG_LEVEL_INFO, "Skipping native Sony DualShock 4 (VID=0x%04x, PID=0x%04x) for Orbis OS driver",
+                       desc->idVendor, desc->idProduct);
+            return 0;
+        } else {
+            daemon_log(LOG_LEVEL_INFO, "Third-party controller in DS4 mode (VID=0x%04X PID=0x%04X) — claiming as CONTROLLER_DS4 to prevent 8-minute timeout",
+                       desc->idVendor, desc->idProduct);
+            if (detect_ds4_endpoints(dev, out)) {
+                out->vid = desc->idVendor;
+                out->pid = desc->idProduct;
+                return 1;
+            }
+        }
+    }
+
+    // Check known third-party controllers with non-Sony VID in PS4 mode (GameSir, Hori, Nacon, Razer, etc.)
+    if (is_ds4_compatible_controller(desc->idVendor, desc->idProduct)) {
+        if (detect_ds4_endpoints(dev, out)) {
+            out->vid = desc->idVendor;
+            out->pid = desc->idProduct;
+            daemon_log(LOG_LEVEL_INFO, "Third-party PS4 mode controller claimed (VID:0x%04X PID:0x%04X) as CONTROLLER_DS4",
+                       desc->idVendor, desc->idProduct);
             return 1;
         }
     }

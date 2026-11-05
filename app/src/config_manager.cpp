@@ -36,7 +36,7 @@ const std::vector<std::string> ConfigManager::SWITCH_OPTIONS = {
 };
 
 const std::vector<std::string> ConfigManager::USB_MODE_OPTIONS = {
-    "Auto (Recommended)", "Force XInput (Xbox)", "Force Switch", "Force Generic HID"
+    "Auto (Recommended)", "Force XInput (Xbox)", "Force Switch", "Force Generic HID", "Force DS4 Mode"
 };
 
 const std::vector<std::string> ConfigManager::DS_LIGHTBAR_OPTIONS = {

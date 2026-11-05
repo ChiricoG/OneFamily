@@ -26,7 +26,8 @@ typedef enum {
     CONTROLLER_DUALSENSE,
     CONTROLLER_SWITCH_PRO,
     CONTROLLER_STADIA,
-    CONTROLLER_GENERIC_HID
+    CONTROLLER_GENERIC_HID,
+    CONTROLLER_DS4
 } ControllerType;
 
 /*
@@ -116,5 +117,10 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
  * Translate Google Stadia Controller report to OrbisPadData
  */
 void translator_convert_stadia(const StadiaInputReport* stadia, OrbisPadData* ds4, const TranslatorConfig* config);
+
+/*
+ * Translate DualShock 4 report to OrbisPadData
+ */
+void translator_convert_ds4(const DS4Report* ds4_in, OrbisPadData* ds4_out, const TranslatorConfig* config);
 
 #endif // TRANSLATOR_H

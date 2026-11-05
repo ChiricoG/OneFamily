@@ -17,7 +17,7 @@ struct AppConfig {
     int swap_index;         // 0 = Disabled, 1 = Enabled
     int rumble_index;       // 0 = Enabled, 1 = Disabled
     int switch_index;       // 0 = Positional, 1 = By Letter
-    int usb_mode_override;  // 0 = Auto (Recommended), 1 = Force XInput, 2 = Force Switch, 3 = Force Generic HID
+    int usb_mode_override;  // 0 = Auto (Recommended), 1 = Force XInput, 2 = Force Switch, 3 = Force Generic HID, 4 = Force DS4 Mode
 
     // [DualSense]
     int ds_lightbar_mode;   // 0=Game Sync, 1=Static Color, 2=Battery, 3=Off
