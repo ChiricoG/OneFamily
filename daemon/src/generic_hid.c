@@ -876,10 +876,10 @@ int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, cons
     // Dedicated deterministic parsing for ShanWan and Betop DirectInput gamepads
     // (VID 0x2563: BSP-G6, PS3/PC Gamepad, Redragon G808; VID 0x20BC: Betop 2585N2, BTP-2185)
     if ((s_ctx.vid == 0x2563 || s_ctx.vid == 0x20BC) && len >= 6) {
-        int off = 0;
-        if (rx[0] <= 4 && len >= 7 && rx[1] >= 80 && rx[1] <= 180) {
-            off = 1; // rx[0] is Report ID (typically 0x01)
-        }
+        // ShanWan and Betop hardware chipsets prepend Report ID (typically 0x01) on standard gamepad reports.
+        // Never dynamically condition off on stick axes (e.g. rx[1]), as horizontal stick movements
+        // take rx[1] towards 0 or 255 which would incorrectly toggle the report offset.
+        int off = (len >= 7 && rx[0] <= 4) ? 1 : 0;
         s_state.lx = rx[off + 0];
         s_state.ly = rx[off + 1];
         s_state.rx = rx[off + 2];

@@ -967,9 +967,9 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
     if (!g_dev_handle || !g_usb_state.connected || !p_sceUsbdInterruptTransfer) {
         return;
     }
-    if (!g_daemon_config.enable_rumble) {
-        return;
-    }
+    // Note: In-game rumble filtering is handled upstream in vpad.c via g_daemon_config.enable_rumble.
+    // We allow direct calls to usb_driver_send_rumble so hardware diagnostic tests (e.g. Companion App tester)
+    // can verify motor functionality regardless of in-game rumble configuration.
 
     // Switch input-only pads (PowerA, PDP, etc.) have no rumble hardware or endpoint OUT
     if (g_usb_state.type == CONTROLLER_SWITCH) {

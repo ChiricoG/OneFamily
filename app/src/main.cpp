@@ -30,10 +30,22 @@ static void notify_daemon_reload() {
 }
 
 static void send_vibe_to_daemon(uint8_t lgMotor, uint8_t smMotor) {
+    static uint8_t s_last_sent_lg = 0;
+    static uint8_t s_last_sent_sm = 0;
+    static bool s_has_sent = false;
+
+    if (s_has_sent && lgMotor == s_last_sent_lg && smMotor == s_last_sent_sm) {
+        return; // State unchanged, avoid spamming filesystem I/O on 60fps render loop
+    }
+    s_last_sent_lg = lgMotor;
+    s_last_sent_sm = smMotor;
+    s_has_sent = true;
+
     if (lgMotor == 0 && smMotor == 0) {
         sceKernelUnlink("/data/onefamily/onefamily.vibe");
         sceKernelUnlink("/user/data/onefamily/onefamily.vibe");
         sceKernelUnlink("/data/GoldHEN/onefamily.vibe");
+        s_has_sent = false;
     } else {
         mkdir("/data", 0777);
         mkdir("/data/onefamily", 0777);
@@ -69,14 +81,12 @@ static void refresh_pad_handles(int padHandles[4], int initialUserId) {
             padHandles[i] = -1;
         }
 
-        // Try opening controller for user i
+        // Open controller for user slot i if that user is logged in
         if (hasUserList && userList.userId[i] != ORBIS_USER_SERVICE_USER_ID_INVALID) {
             padHandles[i] = scePadOpen(userList.userId[i], 0, 0, NULL);
-        }
-
-        // Fallback: try opening with initialUserId on port index i
-        if (padHandles[i] < 0 && initialUserId >= 0) {
-            padHandles[i] = scePadOpen(initialUserId, 0, i, NULL);
+        } else if (!hasUserList && i == 0 && initialUserId >= 0) {
+            // Fallback strictly for Player 1 only if user listing failed
+            padHandles[0] = scePadOpen(initialUserId, 0, 0, NULL);
         }
     }
 }
