@@ -1223,7 +1223,7 @@ void usb_driver_poll_step(void) {
     // For high-polling controllers (e.g. GuliKit KK3 Max 1000Hz, PowerA 1000Hz), drain pending packets to the newest real-time head.
     // NEVER bitwise-OR button masks: gamepads send absolute physical snapshots; OR-merging corrupts release packets into stuck buttons!
     bool is_high_polling = (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4);
-    if (ret == 0 && is_high_polling && xfer_dur_us < 250ULL &&
+    if (ret == 0 && is_high_polling && xfer_dur_us < 2000ULL &&
         ((g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) ||
          (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4))) {
         uint8_t next_rx[128];

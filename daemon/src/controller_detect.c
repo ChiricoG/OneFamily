@@ -407,12 +407,19 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
     // 2. Microsoft Xbox 360 & Xbox One / Series / PDP Victrix
     if (desc->idVendor == XBOX_VID) {
             if (desc->idProduct == XBOX360_PID) {
+                // Use descriptor parsing to capture actual endpoints and bInterval
+                // (e.g. 1000Hz dongles like GuliKit KK3 Max 2.4GHz Hyperlink with bInterval=1)
+                if (!controller_detect_by_descriptor(dev, out)) {
+                    out->type = CONTROLLER_XBOX360;
+                    out->interface_num = 0;
+                    out->ep_in = 0x81;
+                    out->ep_out = 0x01;
+                    out->bInterval = 4; // Safe standard 250Hz fallback
+                }
                 out->type = CONTROLLER_XBOX360;
                 out->vid = desc->idVendor;
                 out->pid = desc->idProduct;
-                out->interface_num = 0;
-                out->ep_in = 0x81;
-                out->ep_out = 0x01;
+                if (out->bInterval == 0) out->bInterval = 4;
                 return 1;
             } else if (is_xone_pid(desc->idProduct)) {
                 out->type = CONTROLLER_XBOXONE;
