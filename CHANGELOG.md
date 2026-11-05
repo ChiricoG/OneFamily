@@ -2,6 +2,28 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta6] - Pre-release (2026-11-05)
+
+### Multi-DualSense & Controller Subsystem
+- **Multi-DualSense Wireless Bluetooth Support**: Connect up to 4 DualSense controllers simultaneously (Players 1 to 4) over Bluetooth with independent slot binding.
+- **DualSense Edge (0x0DF2) Bluetooth Support**: Native registration in kernel Bluetooth driver with optimized slot allocation.
+- **Full Sensors, Touchpad & Heartbeat**: Real-time 6-axis gyroscope/accelerometer, 2-point capacitive touchpad coordinate translation, and periodic heartbeat output reports preventing idle sleep.
+
+### USB Driver, Handshakes & Input Lag Fixes
+- **Switch Pro Official Handshake & Clone Separation**: Distinguishes official Nintendo Switch Pro from third-party clones using USB string descriptors. Official controllers complete full USB lock with increased 150ms timeout; clones remain in passive mode without crash loops.
+- **Zero Input Lag on 1000Hz / 500Hz Controllers**: FIFO hardware drain for high-polling USB controllers (GuliKit KK3 Max, PowerA, Xbox One) without button-state corruption (eliminating sticky buttons).
+- **USB Audio Accessory & Headphone Filter**: Top-level application collection validation strictly enforces Gamepad/Joystick collections, ignoring USB headphones/headsets with volume keys (SteelSeries Arctis Nova, Corsair, HyperX).
+- **Third-Party PS4 Mode Support**: Native USB translation for GameSir (G7 SE, Cyclone 2, Nova Lite) and third-party DS4 controllers.
+- **60 Hz Idle Keepalive & 250 Hz Active Pacing**: Paced idle transmission to 60 Hz (~16.6ms) for frame-perfect input tracking in 60 FPS rhythm and fighting games (*Project DIVA Future Tone*, *Street Fighter*).
+- **8BitDo Ultimate 2C Wireless Dongle**: Idle receiver state (controller off) ignored; dongle reboot debounce eliminates user selection screen trap.
+
+### Companion App & In-App Updater
+- **Stable-Only In-App Updater**: Companion app queries `/releases/latest` and filters pre-releases, notifying and downloading only official stable releases.
+- **Multi-Controller Status & Tester**: Live 4-slot status display with automatic slot focus, battery indicators, and text geometry fixes.
+- **System Requirements Clarification**: Minimum requirement documented as **GoldHEN >= 2.4b18.10** for ELF user-service stability and AutoRun support across all exploits (including VueAfterFree on FW 12.50).
+
+---
+
 ## [v1.2.2] - Official Maintenance Release (2026-11-03)
 
 ### PS4 FW 5.05 - 7.55 Stability & Zero-Panic Kernel Guard
