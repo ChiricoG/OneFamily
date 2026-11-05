@@ -136,6 +136,8 @@ static int load_usbd(void) {
 }
 
 static int s_logged_first_report = 0;
+static int s_logged_x360_report = 0;
+static int s_logged_generic_report = 0;
 static int s_last_guide_pressed = 0;
 static int s_consecutive_disconnects = 0;
 static int s_consecutive_transfer_errors = 0;
@@ -215,6 +217,8 @@ static void close_controller(void) {
     g_usb_state.connected = false;
     s_xboxone_guide = 0;
     s_logged_first_report = 0;
+    s_logged_x360_report = 0;
+    s_logged_generic_report = 0;
     s_last_guide_pressed = 0;
     s_consecutive_disconnects = 0;
     s_consecutive_transfer_errors = 0;
@@ -767,6 +771,7 @@ static int scan_and_open(void) {
                     g_usb_state.endpoint_in = det.ep_in;
                     g_usb_state.endpoint_out = det.ep_out;
                     g_usb_state.is_wireless = det.is_wireless;
+                    g_usb_state.bInterval = det.bInterval;
                     found = 1;
 
                     if (det.type == CONTROLLER_GENERIC_HID) {
@@ -792,8 +797,8 @@ static int scan_and_open(void) {
                                       controller_type_to_str(det.type),
                                       (det.type == CONTROLLER_GENERIC_HID) ? generic_hid_get_nbuttons() : 16);
 
-                    daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X, EP_OUT:0x%02X, wireless=%d)",
-                               controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in, det.ep_out, det.is_wireless);
+                    daemon_log(LOG_LEVEL_INFO, "Controller claimed: %s (VID:0x%04X PID:0x%04X, EP_IN:0x%02X, EP_OUT:0x%02X, interval=%dms, wireless=%d)",
+                               controller_type_to_str(det.type), desc.idVendor, desc.idProduct, det.ep_in, det.ep_out, det.bInterval, det.is_wireless);
 
                     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
                     s_last_ds4.leftStick.x = 128;
@@ -1157,34 +1162,25 @@ void usb_driver_poll_step(void) {
     int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 8);
     uint64_t xfer_dur_us = daemon_sys_time_us() - xfer_start_us;
 
-    // High-Polling USB FIFO Drain (Targeted for Xbox 360 / XInput adapters and Xbox One / Series wired controllers):
-    // If a 500Hz/1000Hz controller streams reports faster than our 250 Hz loop consumes them (e.g. GuliKit KK3 Max, PowerA Enhanced),
-    // the host USB FIFO buffer accumulates reports, introducing hundreds of milliseconds of input lag and swallowing quick button taps.
-    // If the initial transfer completed almost instantaneously (< 250 us), queued reports are waiting in the hardware ring buffer.
-    // Safely drain pending packets to zero-latency head while merging button masks.
-    if (ret == 0 && xfer_dur_us < 250ULL &&
+    // High-Polling USB FIFO Drain (Targeted exclusively for high-polling 500Hz/1000Hz controllers with bInterval < 4ms):
+    // Standard 125Hz/250Hz controllers (bInterval >= 4) never accumulate backlogs in our 250 Hz loop and must NOT run this drain,
+    // avoiding 1ms blocking timeouts and frame stalling.
+    // For high-polling controllers (e.g. GuliKit KK3 Max 1000Hz, PowerA 1000Hz), drain pending packets to the newest real-time head.
+    // NEVER bitwise-OR button masks: gamepads send absolute physical snapshots; OR-merging corrupts release packets into stuck buttons!
+    bool is_high_polling = (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4);
+    if (ret == 0 && is_high_polling && xfer_dur_us < 250ULL &&
         ((g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) ||
          (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4))) {
         uint8_t next_rx[128];
         int next_transferred = 0;
         int drain_count = 0;
-        while (drain_count < 12) {
+        while (drain_count < 8) {
             int drain_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, next_rx, read_len, &next_transferred, 1);
             if (drain_ret == 0 && next_transferred > 0) {
                 if (g_usb_state.type == CONTROLLER_XBOX360) {
-                    if (!g_usb_state.is_wireless && next_transferred >= 14) {
-                        // Wired report: merge buttons
-                        next_rx[2] |= rx[2];
-                        next_rx[3] |= rx[3];
-                        memcpy(rx, next_rx, next_transferred);
-                        transferred = next_transferred;
-                    } else if (g_usb_state.is_wireless) {
+                    if (g_usb_state.is_wireless) {
                         // Wireless receiver report
                         if (next_transferred >= 24 && next_rx[1] == 0x01 && next_rx[4] == XBOX360_REPORT_INPUT) {
-                            if (transferred >= 24 && rx[1] == 0x01 && rx[4] == XBOX360_REPORT_INPUT) {
-                                next_rx[6] |= rx[6];
-                                next_rx[7] |= rx[7];
-                            }
                             memcpy(rx, next_rx, next_transferred);
                             transferred = next_transferred;
                         } else {
@@ -1198,20 +1194,18 @@ void usb_driver_poll_step(void) {
                                 transferred = next_transferred;
                             }
                         }
+                    } else if (next_transferred >= 14) {
+                        // Wired report: adopt newest state directly without button OR-merging
+                        memcpy(rx, next_rx, next_transferred);
+                        transferred = next_transferred;
                     }
                 } else if (g_usb_state.type == CONTROLLER_XBOXONE) {
                     if (next_rx[0] == XBOXONE_REPORT_INPUT && next_transferred >= 6) {
-                        if (rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6) {
-                            // Xbox One input report (0x20):
-                            // rx[4]: buttons_low (A, B, X, Y, Menu, View, Sync)
-                            // rx[5]: buttons_high (D-pad Up/Down/Left/Right, LB, RB, L3, R3)
-                            next_rx[4] |= rx[4];
-                            next_rx[5] |= rx[5];
-                        }
+                        // Adopt newest input report directly without button OR-merging
                         memcpy(rx, next_rx, next_transferred);
                         transferred = next_transferred;
                     } else if (next_rx[0] == XBOXONE_REPORT_GUIDE) {
-                        // Guide report (0x07): send ACK if requested
+                        // Guide report (0x07): send ACK if requested and update Guide state
                         if ((next_rx[1] & 0x10) || (next_rx[1] & 0x01)) {
                             uint8_t ack_pkt[13] = {
                                 0x01, 0x20, next_rx[2], 0x09, 0x00, 0x07, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -1278,7 +1272,6 @@ void usb_driver_poll_step(void) {
         }
 
         if (g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) {
-            static int s_logged_x360_report = 0;
             if (s_logged_x360_report < 5) {
                 daemon_log(LOG_LEVEL_INFO, "Xbox 360 report [%d bytes, wireless=%d]: rx[0]=0x%02X rx[1]=0x%02X rx[2]=0x%02X rx[3]=0x%02X",
                            transferred, g_usb_state.is_wireless, rx[0], rx[1], rx[2], rx[3]);
@@ -1500,7 +1493,6 @@ void usb_driver_poll_step(void) {
                 handle_pad_input_and_send(&ds4);
             }
         } else if (g_usb_state.type == CONTROLLER_GENERIC_HID && transferred > 0) {
-            static int s_logged_generic_report = 0;
             if (s_logged_generic_report < 10) {
                 daemon_log(LOG_LEVEL_INFO, "Generic HID report [%d bytes]: rx[0]=0x%02X rx[1]=0x%02X rx[2]=0x%02X rx[3]=0x%02X",
                            transferred, rx[0], (transferred > 1 ? rx[1] : 0), (transferred > 2 ? rx[2] : 0), (transferred > 3 ? rx[3] : 0));

@@ -86,13 +86,17 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
             // First interrupt IN and OUT endpoints of this alt setting
             uint8_t ep_in = 0;
             uint8_t ep_out = 0;
+            uint8_t interval = 0;
             for (int k = 0; k < alt->bNumEndpoints; k++) {
                 const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
                 if ((ep->bmAttributes & EP_XFER_MASK) != EP_XFER_INTERRUPT) {
                     continue;
                 }
                 if (ep->bEndpointAddress & EP_DIR_IN) {
-                    if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                    if (ep_in == 0) {
+                        ep_in = ep->bEndpointAddress;
+                        interval = ep->bInterval;
+                    }
                 } else {
                     if (ep_out == 0) ep_out = ep->bEndpointAddress;
                 }
@@ -110,6 +114,7 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
             out->alt_setting   = alt->bAlternateSetting;
             out->ep_in         = ep_in;
             out->ep_out        = ep_out;
+            out->bInterval     = interval;
             out->is_wireless   = is_wireless;
             out->kbd_interface_num = 0xFF;
             found = 1;
@@ -157,13 +162,17 @@ static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* ou
 
             uint8_t ep_in = 0;
             uint8_t ep_out = 0;
+            uint8_t interval = 0;
             for (int k = 0; k < alt->bNumEndpoints; k++) {
                 const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
                 daemon_log(LOG_LEVEL_INFO, "  DualSense HID EP [%d]: addr=0x%02X attr=0x%02X maxPkt=%d",
                            k, ep->bEndpointAddress, ep->bmAttributes, ep->wMaxPacketSize);
                 if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
                     if (ep->bEndpointAddress & EP_DIR_IN) {
-                        if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                        if (ep_in == 0) {
+                            ep_in = ep->bEndpointAddress;
+                            interval = ep->bInterval;
+                        }
                     } else {
                         if (ep_out == 0) ep_out = ep->bEndpointAddress;
                     }
@@ -176,6 +185,7 @@ static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* ou
                 out->alt_setting   = alt->bAlternateSetting;
                 out->ep_in         = ep_in;
                 out->ep_out        = ep_out ? ep_out : 0x03;
+                out->bInterval     = interval;
                 found = 1;
             }
         }
@@ -203,11 +213,15 @@ static int detect_switch_pro_endpoints(libusb_device* dev, DetectedController* o
 
             uint8_t ep_in = 0;
             uint8_t ep_out = 0;
+            uint8_t interval = 0;
             for (int k = 0; k < alt->bNumEndpoints; k++) {
                 const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
                 if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
                     if (ep->bEndpointAddress & EP_DIR_IN) {
-                        if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                        if (ep_in == 0) {
+                            ep_in = ep->bEndpointAddress;
+                            interval = ep->bInterval;
+                        }
                     } else {
                         if (ep_out == 0) ep_out = ep->bEndpointAddress;
                     }
@@ -220,6 +234,7 @@ static int detect_switch_pro_endpoints(libusb_device* dev, DetectedController* o
                 out->alt_setting   = alt->bAlternateSetting;
                 out->ep_in         = ep_in;
                 out->ep_out        = ep_out;
+                out->bInterval     = interval;
                 found = 1;
             }
         }
@@ -247,11 +262,15 @@ static int detect_stadia_endpoints(libusb_device* dev, DetectedController* out) 
 
             uint8_t ep_in = 0;
             uint8_t ep_out = 0;
+            uint8_t interval = 0;
             for (int k = 0; k < alt->bNumEndpoints; k++) {
                 const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
                 if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
                     if (ep->bEndpointAddress & EP_DIR_IN) {
-                        if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                        if (ep_in == 0) {
+                            ep_in = ep->bEndpointAddress;
+                            interval = ep->bInterval;
+                        }
                     } else {
                         if (ep_out == 0) ep_out = ep->bEndpointAddress;
                     }
@@ -264,6 +283,7 @@ static int detect_stadia_endpoints(libusb_device* dev, DetectedController* out) 
                 out->alt_setting   = alt->bAlternateSetting;
                 out->ep_in         = ep_in;
                 out->ep_out        = ep_out;
+                out->bInterval     = interval;
                 found = 1;
             }
         }
@@ -295,11 +315,15 @@ static int detect_ds4_endpoints(libusb_device* dev, DetectedController* out) {
 
             uint8_t ep_in = 0;
             uint8_t ep_out = 0;
+            uint8_t interval = 0;
             for (int k = 0; k < alt->bNumEndpoints; k++) {
                 const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
                 if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
                     if (ep->bEndpointAddress & EP_DIR_IN) {
-                        if (ep_in == 0) ep_in = ep->bEndpointAddress;
+                        if (ep_in == 0) {
+                            ep_in = ep->bEndpointAddress;
+                            interval = ep->bInterval;
+                        }
                     } else {
                         if (ep_out == 0) ep_out = ep->bEndpointAddress;
                     }
@@ -312,6 +336,7 @@ static int detect_ds4_endpoints(libusb_device* dev, DetectedController* out) {
                 out->alt_setting   = alt->bAlternateSetting;
                 out->ep_in         = ep_in;
                 out->ep_out        = ep_out ? ep_out : 0x03;
+                out->bInterval     = interval;
                 found = 1;
             }
         }
