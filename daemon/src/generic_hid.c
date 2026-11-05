@@ -536,6 +536,13 @@ static const struct { uint16_t vid, pid; const char *map; } k_builtin[] = {
                       "button10=r3\nbutton11=l2\nbutton12=r2\n" },
 };
 
+static int has_builtin_map(uint16_t vid, uint16_t pid) {
+    for (size_t i = 0; i < sizeof k_builtin / sizeof k_builtin[0]; i++) {
+        if (k_builtin[i].vid == vid && k_builtin[i].pid == pid) return 1;
+    }
+    return 0;
+}
+
 static int builtin_map(GenericHidContext *g, uint16_t vid, uint16_t pid) {
     char buf[1024];
     for (size_t i = 0; i < sizeof k_builtin / sizeof k_builtin[0]; i++) {
@@ -707,10 +714,18 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
     s_ctx.vid = vid;
     s_ctx.pid = pid;
 
-    static uint8_t report_desc[1024];
-    int desc_len = 0;
+    // Check for builtin profile first: if device has a known layout, avoid crashing EP0
+    int has_builtin = has_builtin_map(vid, pid);
+    if (has_builtin) {
+        s_ctx.is_gamepad = 1;
+    }
 
-    if (ctrl_transfer) {
+    static uint8_t report_desc[256];
+    int desc_len = 0;
+    bool is_legacy_hid = (vid == 0x2563 || vid == 0x20BC);
+
+    // Only query report descriptor for unmapped controllers that are not legacy/fragile chipsets
+    if (ctrl_transfer && !has_builtin && !is_legacy_hid) {
         // GET_DESCRIPTOR: type 0x22 (HID Report Descriptor), bmRequestType 0x81 (Standard, In, Interface)
         desc_len = ctrl_transfer(h, 0x81, 0x06, 0x2200, (uint16_t)iface, report_desc, sizeof(report_desc), 500);
         if (desc_len <= 0) {
@@ -722,7 +737,7 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
         // Skip SET_IDLE for ShanWan, Betop and Logitech (0x2563, 0x20BC, 0x046D):
         // Logitech RumblePad 2 / Cordless / Dual Action suffer from the LG_NOGET hardware quirk
         // where control requests stall the USB pipe and silence the interrupt endpoint.
-        if (vid != 0x2563 && vid != 0x20BC && vid != 0x046D) {
+        if (vid != 0x046D) {
             ctrl_transfer(h, 0x21, 0x0A, 0x0000, (uint16_t)iface, NULL, 0, 100);
         }
     }
@@ -753,19 +768,16 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
         }
     }
 
-    int has_builtin = builtin_map(&s_ctx, vid, pid);
-    if (has_builtin) {
-        s_ctx.is_gamepad = 1;
-    }
-
     if (desc_len <= 0) {
         if (!has_builtin) {
             daemon_log(LOG_LEVEL_WARN, "Generic HID (0x%04X:0x%04X): could not read report descriptor (ret=%d) — rejecting non-gamepad claim",
                        vid, pid, desc_len);
             return 0;
         }
-        daemon_log(LOG_LEVEL_WARN, "Generic HID (0x%04X:0x%04X): could not read report descriptor (ret=%d), using fallback mapping for known controller",
-                   vid, pid, desc_len);
+        if (!is_legacy_hid) {
+            daemon_log(LOG_LEVEL_WARN, "Generic HID (0x%04X:0x%04X): could not read report descriptor (ret=%d), using fallback mapping for known controller",
+                       vid, pid, desc_len);
+        }
     } else {
         bool has_directional_control = (s_ctx.axis[AX_X].present && s_ctx.axis[AX_Y].present) || s_ctx.axis[AX_HAT].present;
         if (!s_ctx.is_gamepad && !has_builtin && !has_directional_control) {
@@ -776,6 +788,7 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
     }
 
     default_mapping(&s_ctx);
+    has_builtin = builtin_map(&s_ctx, vid, pid);
     load_controller_ini(&s_ctx, vid, pid, has_builtin);
 
     return 1;
@@ -842,6 +855,58 @@ int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, cons
             if (rx[5] & (1 << i)) {
                 b |= s_ctx.button_map[4 + i];
             }
+        }
+
+        s_state.buttons = b;
+        s_state.l2 = (b & DS4_BUTTON_L2) ? 255 : 0;
+        s_state.r2 = (b & DS4_BUTTON_R2) ? 255 : 0;
+
+        uint8_t deadzone = cfg ? cfg->stick_deadzone : 15;
+        out->leftStick.x  = translator_apply_deadzone(s_state.lx, deadzone);
+        out->leftStick.y  = translator_apply_deadzone(s_state.ly, deadzone);
+        out->rightStick.x = translator_apply_deadzone(s_state.rx, deadzone);
+        out->rightStick.y = translator_apply_deadzone(s_state.ry, deadzone);
+        out->analogButtons.l2 = s_state.l2;
+        out->analogButtons.r2 = s_state.r2;
+        out->buttons = s_state.buttons;
+        out->connected = 1;
+        return 1;
+    }
+
+    // Dedicated deterministic parsing for ShanWan and Betop DirectInput gamepads
+    // (VID 0x2563: BSP-G6, PS3/PC Gamepad, Redragon G808; VID 0x20BC: Betop 2585N2, BTP-2185)
+    if ((s_ctx.vid == 0x2563 || s_ctx.vid == 0x20BC) && len >= 6) {
+        int off = 0;
+        if (rx[0] <= 4 && len >= 7 && rx[1] >= 80 && rx[1] <= 180) {
+            off = 1; // rx[0] is Report ID (typically 0x01)
+        }
+        s_state.lx = rx[off + 0];
+        s_state.ly = rx[off + 1];
+        s_state.rx = rx[off + 2];
+        s_state.ry = rx[off + 3];
+
+        uint8_t hat = rx[off + 4] & 0x0F;
+        uint32_t b = 0;
+        if (hat < 8) b |= dirs[hat];
+
+        // Buttons 1-4 (Square, Cross, Circle, Triangle) from high nibble of byte 4
+        if (rx[off + 4] & 0x10) b |= s_ctx.button_map[0]; // Button 1 -> Square
+        if (rx[off + 4] & 0x20) b |= s_ctx.button_map[1]; // Button 2 -> Cross
+        if (rx[off + 4] & 0x40) b |= s_ctx.button_map[2]; // Button 3 -> Circle
+        if (rx[off + 4] & 0x80) b |= s_ctx.button_map[3]; // Button 4 -> Triangle
+
+        // Buttons 5-12 (L1, R1, L2, R2, Select, Start, L3, R3) from byte 5
+        if (len >= off + 6) {
+            for (int i = 0; i < 8; i++) {
+                if (rx[off + 5] & (1 << i)) {
+                    b |= s_ctx.button_map[4 + i];
+                }
+            }
+        }
+
+        // Mode / Home button (bit 0 of byte 6)
+        if (len >= off + 7 && (rx[off + 6] & 0x01)) {
+            b |= DS4_BUTTON_PS;
         }
 
         s_state.buttons = b;
