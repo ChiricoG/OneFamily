@@ -743,10 +743,10 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
         state_changed = true;
     }
 
-    // Rate-limiting: only throttle when pad is completely neutral/untouched (keep-alive at 10 Hz)
+    // Rate-limiting: only throttle when pad is completely neutral/untouched (keep-alive at 60 Hz = ~16.6ms)
     // When buttons or sticks are active, never throttle: stream at full 250 Hz for zero input lag and rhythm games!
     if (is_neutral && !state_changed) {
-        if ((now - s->last_send_time_us) < 100000ULL) {
+        if ((now - s->last_send_time_us) < 16666ULL) {
             return 0; // Throttled cleanly when idle
         }
     }

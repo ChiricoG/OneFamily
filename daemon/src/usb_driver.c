@@ -468,7 +468,7 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
     uint8_t cmd_pkt[2];
 
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x02; // Handshake
-    int r = switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 30);
+    int r = switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 150);
     if (r != 0) {
         daemon_log(LOG_LEVEL_INFO, "Switch Pro 0x80 handshake ret=0x%08X (clone/unsupported) — preserving passive mode", r);
         return;
@@ -476,15 +476,15 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
     daemon_sys_usleep(5000);
 
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x03; // HighSpeed baudrate
-    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x03, 30);
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x03, 150);
     daemon_sys_usleep(5000);
 
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x02; // Handshake repeat
-    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 30);
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 150);
     daemon_sys_usleep(5000);
 
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x04; // Force USB
-    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x04, 30);
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x04, 150);
     daemon_sys_usleep(5000);
 
     uint8_t pkt[64];
