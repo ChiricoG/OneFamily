@@ -605,12 +605,13 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
     uint16_t raw_rx = (uint16_t)sw->right_stick[0] | (((uint16_t)sw->right_stick[1] & 0x0F) << 8);
     uint16_t raw_ry = (uint16_t)(sw->right_stick[1] >> 4) | (((uint16_t)sw->right_stick[2]) << 4);
 
-    // Scale 12-bit (0..4095) to 8-bit (0..255) with Switch throw normalization
-    // Switch Pro native Y axis matches PlayStation DS4 coordinate space (0 = top, 255 = bottom)
+    // Scale 12-bit (0..4095) to 8-bit (0..255) with Switch throw normalization.
+    // In Nintendo Switch HID protocol, Y=4095 is Top and Y=0 is Bottom (standard Cartesian space).
+    // On PlayStation DS4, Y=0 is Top and Y=255 is Bottom. Invert Y to match PlayStation coordinate space.
     uint8_t lx = scale_switch_stick_axis((uint8_t)(raw_lx >> 4));
-    uint8_t ly = scale_switch_stick_axis((uint8_t)(raw_ly >> 4));
+    uint8_t ly = scale_switch_stick_axis((uint8_t)(255 - (raw_ly >> 4)));
     uint8_t rx = scale_switch_stick_axis((uint8_t)(raw_rx >> 4));
-    uint8_t ry = scale_switch_stick_axis((uint8_t)(raw_ry >> 4));
+    uint8_t ry = scale_switch_stick_axis((uint8_t)(255 - (raw_ry >> 4)));
 
     // Apply Y-axis inversion if configured
     if (config->invert_left_y) {

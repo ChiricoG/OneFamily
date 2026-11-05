@@ -91,6 +91,7 @@ typedef struct {
     uint8_t last_color_g;
     uint8_t last_color_b;
     uint64_t last_rumble_send_us;
+    int stop_retries_remaining;
     int assigned_slot;
     char assigned_username[64];
     uint8_t packet_counter;
@@ -833,15 +834,22 @@ void vpad_poll_rumble(void) {
                                  (cr != g_slots[i].last_color_r || cg != g_slots[i].last_color_g || cb != g_slots[i].last_color_b));
             bool keepalive = ((lg > 0 || sm > 0) && (now - g_slots[i].last_rumble_send_us >= 100000ULL));
 
-            // Stop condition (lg=0, sm=0): send immediately so vibration cuts off without latency
-            // Dynamic condition (lg>0 || sm>0 or color change): rate-limit to at most 50 Hz (20ms interval)
-            // to avoid saturating the link and starving controller input polling.
+            // Stop condition (lg=0, sm=0): send immediately so vibration cuts off without latency.
+            // When stopping, trigger up to 3 additional repeats spaced by 50ms so a dropped packet
+            // or busy transfer never leaves the motors vibrating indefinitely.
             bool should_send = false;
             if (rumble_changed) {
                 if (lg == 0 && sm == 0) {
                     should_send = true;
+                    g_slots[i].stop_retries_remaining = 3;
                 } else if (now - g_slots[i].last_rumble_send_us >= 20000ULL) {
                     should_send = true;
+                    g_slots[i].stop_retries_remaining = 0;
+                }
+            } else if (lg == 0 && sm == 0 && g_slots[i].stop_retries_remaining > 0) {
+                if (now - g_slots[i].last_rumble_send_us >= 50000ULL) {
+                    should_send = true;
+                    g_slots[i].stop_retries_remaining--;
                 }
             } else if (color_changed) {
                 if (now - g_slots[i].last_rumble_send_us >= 20000ULL) {
@@ -849,6 +857,7 @@ void vpad_poll_rumble(void) {
                 }
             } else if (keepalive) {
                 should_send = true;
+                g_slots[i].stop_retries_remaining = 0;
             }
 
             if (should_send) {
