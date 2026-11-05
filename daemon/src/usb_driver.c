@@ -305,6 +305,11 @@ static void init_gip_controller(void) {
 }
 
 static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_num, uint8_t ep_out, int is_wireless) {
+    if (h && p_sceUsbdClearHalt && g_usb_state.endpoint_in) {
+        p_sceUsbdClearHalt(h, g_usb_state.endpoint_in);
+        daemon_sys_usleep(5000);
+    }
+
     daemon_log(LOG_LEVEL_INFO, "Sending Xbox 360 clone wake-up handshake (Shanwan/xpad, IF=%d)...", interface_num);
     uint8_t dummy[20];
     memset(dummy, 0, sizeof(dummy));
@@ -312,11 +317,6 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
         // Linux xpad: bmRequestType=0xC1 (Vendor Interface IN), bRequest=0x01, wValue=0x0100, wIndex=interface_num, len=20
         int ret = p_sceUsbdControlTransfer(h, 0xC1, 0x01, 0x0100, interface_num, dummy, sizeof(dummy), 100);
         daemon_log(LOG_LEVEL_INFO, "Xbox 360 clone control handshake sent (ret=0x%08X)", ret);
-    }
-
-    if (g_usb_state.vid == 0x2DC8) {
-        daemon_log(LOG_LEVEL_INFO, "Xbox 360: 8BitDo wireless adapter detected (VID:0x2DC8) — bypassing LED command");
-        return;
     }
 
     if (ep_out && p_sceUsbdInterruptTransfer && h) {
@@ -327,12 +327,17 @@ static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_n
             // byte[0]=0x00, byte[1]=0x00, byte[2]=0x08, byte[3]=0x40 + (cmd % 16), byte[4..11]=0x00
             // Command 0x02: LED 1 / top-left blink, then steady on (Player 1)
             uint8_t led_pkt[12] = { 0x00, 0x00, 0x08, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 5);
+            ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 100);
         } else {
             uint8_t led_pkt[3] = { 0x01, 0x03, 0x02 }; // LED 1 ON (Player 1)
-            ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 5);
+            ir = p_sceUsbdInterruptTransfer(h, ep_out, led_pkt, sizeof(led_pkt), &transferred, 100);
         }
         daemon_log(LOG_LEVEL_INFO, "Xbox 360 LED 1 command sent (ret=0x%08X, wireless=%d)", ir, is_wireless);
+        if (ir != 0 && p_sceUsbdClearHalt) {
+            daemon_log(LOG_LEVEL_WARN, "Xbox 360 LED command rejected (0x%08X), executing ClearHalt on ep_out=0x%02X", ir, ep_out);
+            p_sceUsbdClearHalt(h, ep_out);
+            daemon_sys_usleep(5000);
+        }
         if (ir == 0x802400FF || ir == 0x80240009) {
             // Wireless dongles (e.g. GuliKit KK3 Max 2.4GHz adapter) do not have LEDs and return 0x802400FF (Pipe Stall).
             // Permanently disable EP_OUT commands to avoid stalling the dongle's USB engine or flooding retries.
@@ -1209,12 +1214,14 @@ void usb_driver_poll_step(void) {
     // 2. Read from connected controller
     uint8_t rx[128];
     int transferred = 0;
-    // 64-byte max packet size covers all supported controllers (Xbox, Switch, DualSense, Stadia, Generic HID)
-    int read_len = 64;
-    // 8ms timeout safely covers 125 Hz (8ms) and 250 Hz (4ms) endpoint polling intervals (bInterval),
-    // while returning immediately (< 100us) whenever a packet is available.
+    int read_len = sizeof(rx);
+    if (g_usb_state.type == CONTROLLER_DUALSENSE || g_usb_state.type == CONTROLLER_GENERIC_HID) {
+        read_len = 64; // DualSense and Generic HID endpoints have wMaxPacketSize <= 64 bytes
+    }
+    // Timeout: 8ms for high-polling (bInterval < 4ms), 16ms for standard 125Hz/250Hz controllers (as in v1.2.1)
+    int poll_timeout_ms = (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4) ? 8 : 16;
     uint64_t xfer_start_us = daemon_sys_time_us();
-    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, 8);
+    int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, poll_timeout_ms);
     uint64_t xfer_dur_us = daemon_sys_time_us() - xfer_start_us;
 
     // High-Polling USB FIFO Drain (Targeted exclusively for high-polling 500Hz/1000Hz controllers with bInterval < 4ms):
@@ -1609,10 +1616,11 @@ void usb_driver_poll_step(void) {
                     s_logged_xb_err++;
                 }
                 int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
-                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors >= 10 && s_consecutive_transfer_errors % 25 == 0)) {
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors == 1 || s_consecutive_transfer_errors % 25 == 0)) {
                     daemon_log(LOG_LEVEL_WARN, "%s EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                controller_type_to_str(g_usb_state.type), ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(10000);
                 }
             } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
                 daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
@@ -1628,10 +1636,11 @@ void usb_driver_poll_step(void) {
                     s_logged_ds4_err++;
                 }
                 int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
-                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors >= 10 && s_consecutive_transfer_errors % 25 == 0)) {
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors == 1 || s_consecutive_transfer_errors % 25 == 0)) {
                     daemon_log(LOG_LEVEL_WARN, "DualShock 4 EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(10000);
                 }
             } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
                 static int s_logged_gen_err = 0;
@@ -1645,6 +1654,7 @@ void usb_driver_poll_step(void) {
                     daemon_log(LOG_LEVEL_WARN, "Generic HID EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
                                ret, s_consecutive_transfer_errors);
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(10000);
                 }
             }
 
