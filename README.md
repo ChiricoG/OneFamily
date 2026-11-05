@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/GoldHEN-≥%202.4b18.10-0070D1?style=for-the-badge&logo=playstation" alt="GoldHEN >= 2.4b18.10"/>
-  <img src="https://img.shields.io/badge/Version-v1.2.2--beta6-blueviolet?style=for-the-badge" alt="Version v1.2.2-beta6"/>
+  <img src="https://img.shields.io/badge/Version-v1.2.2--beta7-blueviolet?style=for-the-badge" alt="Version v1.2.2-beta7"/>
   <img src="https://img.shields.io/badge/Polling-250%20Hz%20(4ms)-brightgreen?style=for-the-badge" alt="250 Hz Polling"/>
   <img src="https://img.shields.io/badge/Platform-PlayStation%204-blue?style=for-the-badge" alt="Platform PS4"/>
   <img src="https://img.shields.io/badge/License-MIT-orange?style=for-the-badge" alt="License MIT"/>
