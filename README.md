@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/PS4-GoldHEN%20Compatible-0070D1?style=for-the-badge&logo=playstation" alt="GoldHEN Compatible"/>
+  <img src="https://img.shields.io/badge/GoldHEN-≥%202.4b18.10-0070D1?style=for-the-badge&logo=playstation" alt="GoldHEN >= 2.4b18.10"/>
   <img src="https://img.shields.io/badge/Version-v1.2.1-blueviolet?style=for-the-badge" alt="Version v1.2.1"/>
   <img src="https://img.shields.io/badge/Polling-250%20Hz%20(4ms)-brightgreen?style=for-the-badge" alt="250 Hz Polling"/>
   <img src="https://img.shields.io/badge/Platform-PlayStation%204-blue?style=for-the-badge" alt="Platform PS4"/>
@@ -24,6 +24,7 @@
 - [Screenshots](#screenshots)
 - [Key Features](#key-features)
 - [Supported Controllers](#supported-controllers)
+- [System Requirements](#system-requirements)
 - [Quick Start / Installation](#quick-start--installation)
 - [Bug Reports & Requesting New Controllers](#bug-reports--requesting-new-controllers)
 - [Building from Source](#building-from-source)
@@ -137,9 +138,28 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 
 ---
 
+## System Requirements
+
+| Component | Minimum Requirement | Notes |
+| :--- | :--- | :--- |
+| **PS4 Firmware** | **FW 5.05 up to 13.52+** | Full USB support across all firmwares; Bluetooth DualSense on FW 9.00+. |
+| **Jailbreak Exploit** | **Any Exploit** | Fully compatible with **PPPwn**, **POOBs4**, **VueAfterFree (FW 12.50)**, etc. |
+| **GoldHEN Version** | **≥ 2.4b18.10** *(Recommended: 2.4b18.12+)* | **Mandatory.** Required for background ELF user service stability and AutoRun. |
+
+> [!IMPORTANT]
+> **Why GoldHEN ≥ 2.4b18.10 is strictly required:**
+> - **ELF User Service Stability:** Earlier GoldHEN releases (such as 2.4b18.9) contained a known issue where calls into `libSceUserService` hung indefinitely inside background ELF payloads, preventing the virtual controller from being assigned to user profiles. This was resolved in GoldHEN 2.4b18.10 (*"Fixed sceUserServiceInitialize failure on ELF payloads"*).
+> - **AutoRun LaunchPad Support:** GoldHEN 2.4b18.10 officially added PayLoader AutoRun support (`[AutoRun]` in `/data/GoldHEN/payloads.ini`). Older versions ignore auto-boot directives.
+> - If you are using **VueAfterFree on FW 12.50**, simply update your GoldHEN payload to **2.4b18.10 or newer (e.g. 2.4b18.12)** and OneFamily will auto-boot and operate flawlessly!
+>
+> *(Ensure **Settings > GoldHEN > PayLoader > Enable AutoRun** is checked on your console).*
+
+---
+
 ## Quick Start / Installation
 
 1. **Install the Companion App:**
+   - Ensure your PS4 is running **GoldHEN ≥ 2.4b18.10** (recommended **2.4b18.12+**) with **Settings > GoldHEN > PayLoader > Enable AutoRun** checked.
    - Download `onefamily_companion.pkg` from the [Releases](../../releases) page.
    - Install it on your PS4 via GoldHEN Package Installer.
 
