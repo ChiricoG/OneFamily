@@ -378,27 +378,78 @@ static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expec
     return -1; // Timed out waiting for ack
 }
 
-static void init_switch_pro_controller(void) {
-    daemon_log(LOG_LEVEL_INFO, "Starting Switch Pro / Clone wake-up sequence...");
+static bool is_official_nintendo_switch_pro(libusb_device_handle* h, const struct libusb_device_descriptor* desc) {
+    if (!h || !p_sceUsbdControlTransfer || !desc) return false;
+    if (desc->idVendor != SWITCH_PRO_VID || desc->idProduct != SWITCH_PRO_PID) return false;
 
-    uint8_t probe_rx[64];
-    int probe_len = 0;
+    // 1. Query Manufacturer String Descriptor (index desc->iManufacturer)
+    if (desc->iManufacturer != 0) {
+        uint8_t str_buf[64];
+        memset(str_buf, 0, sizeof(str_buf));
+        int ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iManufacturer, 0x0409, str_buf, sizeof(str_buf), 100);
+        if (ret < 0) {
+            ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iManufacturer, 0x0000, str_buf, sizeof(str_buf), 100);
+        }
 
-    // 1. Passive Mode / Clone check:
-    // Third-party Switch Pro clones (like Trust GXT Muta, Nyko, PowerA) start streaming standard
-    // HID input reports immediately upon connection without needing any 0x80 handshake.
-    // If a third-party clone is already actively streaming input, DO NOT send 0x80 (it would crash the clone)!
-    // Official Nintendo Switch Pro controllers (VID 0x057E) MUST always execute the 0x80 handshake
-    // to lock the controller into USB mode (0x80 0x04) and prevent it from dropping USB / falling back to Bluetooth!
-    if (g_usb_state.vid != SWITCH_PRO_VID) {
-        int probe_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, probe_rx, sizeof(probe_rx), &probe_len, 40);
-        if (probe_ret == 0 && probe_len > 0) {
-            daemon_log(LOG_LEVEL_INFO, "Switch Pro Clone is already actively streaming input (%d bytes) — skipping 0x80 wake-up handshake (passive mode)", probe_len);
-            return;
+        if (ret >= 18 && str_buf[0] >= 18 && str_buf[1] == 0x03) {
+            // Check for "Nintendo" in UTF-16LE: 'N', 0, 'i', 0, 'n', 0, 't', 0, 'e', 0, 'n', 0, 'd', 0, 'o', 0
+            static const uint8_t nintendo_sig[16] = {
+                'N', 0x00, 'i', 0x00, 'n', 0x00, 't', 0x00,
+                'e', 0x00, 'n', 0x00, 'd', 0x00, 'o', 0x00
+            };
+            if (memcmp(&str_buf[2], nintendo_sig, sizeof(nintendo_sig)) == 0) {
+                daemon_log(LOG_LEVEL_INFO, "Device verified as Official Nintendo Switch Pro Controller via USB manufacturer descriptor");
+                return true;
+            }
         }
     }
 
+    // 2. Query Product String Descriptor (index desc->iProduct)
+    if (desc->iProduct != 0) {
+        uint8_t str_buf[64];
+        memset(str_buf, 0, sizeof(str_buf));
+        int ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iProduct, 0x0409, str_buf, sizeof(str_buf), 100);
+        if (ret < 0) {
+            ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iProduct, 0x0000, str_buf, sizeof(str_buf), 100);
+        }
+
+        if (ret >= 30 && str_buf[0] >= 30 && str_buf[1] == 0x03) {
+            // Check for "Pro Controller" in UTF-16LE
+            static const uint8_t pro_ctrl_sig[28] = {
+                'P', 0x00, 'r', 0x00, 'o', 0x00, ' ', 0x00,
+                'C', 0x00, 'o', 0x00, 'n', 0x00, 't', 0x00,
+                'r', 0x00, 'o', 0x00, 'l', 0x00, 'l', 0x00,
+                'e', 0x00, 'r', 0x00
+            };
+            if (memcmp(&str_buf[2], pro_ctrl_sig, sizeof(pro_ctrl_sig)) == 0) {
+                daemon_log(LOG_LEVEL_INFO, "Device verified as Official Nintendo Pro Controller via USB product descriptor");
+                return true;
+            }
+        }
+    }
+
+    daemon_log(LOG_LEVEL_INFO, "Device is a Switch Pro Clone (non-Nintendo descriptor) - passive mode enforced");
+    return false;
+}
+
+static void init_switch_pro_controller(libusb_device_handle* h, const struct libusb_device_descriptor* desc) {
+    daemon_log(LOG_LEVEL_INFO, "Starting Switch Pro / Clone wake-up sequence...");
+
+    // 1. Distinguish official Nintendo from third-party clones:
+    // Third-party Switch Pro clones (like Trust GXT Muta, Nyko, PowerA, Shanwan)
+    // start streaming standard HID input reports immediately upon connection without needing any 0x80 handshake.
+    // Transmitting 0x80 handshake packets on EP_OUT crashes clone microcontrollers (0x80240004 / disconnect loop).
+    // ONLY official Nintendo Switch Pro controllers (iManufacturer = "Nintendo Co., Ltd.")
+    // require the 0x80 handshake to lock the controller into USB mode (0x80 0x04) and prevent fallback to Bluetooth.
+    bool is_official = is_official_nintendo_switch_pro(h, desc);
+    if (!is_official) {
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro Clone detected - skipping 0x80 wake-up handshake (passive mode)");
+        return;
+    }
+
     // Drain any leftover input in the USB FIFO first
+    uint8_t probe_rx[64];
+    int probe_len = 0;
     for (int i = 0; i < 3; i++) {
         probe_len = 0;
         int dr = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, probe_rx, sizeof(probe_rx), &probe_len, 10);
@@ -414,7 +465,6 @@ static void init_switch_pro_controller(void) {
     // 2. Official Switch Pro USB Handshake (0x80 commands):
     // The 0x80 command packet is strictly 2 BYTES (u8 buf[2] = { 0x80, cmd }),
     // matching Linux kernel hid-nintendo (joycon_send_usb).
-    // Transmitting 64 bytes with 62 trailing zeros causes buffer overflow on clones and stalls.
     uint8_t cmd_pkt[2];
 
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x02; // Handshake
@@ -829,7 +879,7 @@ static int scan_and_open(void) {
                             p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F5, det.interface_num, dummy, 8, 100);
                         }
                     } else if (det.type == CONTROLLER_SWITCH_PRO) {
-                        init_switch_pro_controller();
+                        init_switch_pro_controller(h, &desc);
                     }
 
                     // Check if controller is still connected and alive after wake-up/handshake

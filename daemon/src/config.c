@@ -33,8 +33,6 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
     cfg->swap_triggers_bumpers = 0;
     cfg->switch_positional = 1;
 
-    // [Hardware]
-    cfg->usb_mode_override = 0; // 0=Auto (default)
 
     // [DualSense]
     cfg->dualsense_lightbar_mode = 0;
@@ -200,8 +198,6 @@ void daemon_config_load(DaemonConfig *cfg) {
                 cfg->dualsense_trigger_mode = parse_int(val, 0);
             } else if (str_case_eq(key, "dualsense_player_leds") || str_case_eq(key, "player_leds")) {
                 cfg->dualsense_player_leds = parse_int(val, 0);
-            } else if (str_case_eq(key, "usb_mode_override") || str_case_eq(key, "usb_override")) {
-                cfg->usb_mode_override = parse_int(val, 0);
             } else if (str_case_eq(key, "dualsense_mute_action") || str_case_eq(key, "mute_action")) {
                 cfg->dualsense_mute_action = parse_int(val, 0);
             }

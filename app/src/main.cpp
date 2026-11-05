@@ -352,7 +352,7 @@ int main() {
         }
 
         if (currentTabId == TAB_SETTINGS) {
-            const int TOTAL_CARDS = 6;
+            const int TOTAL_CARDS = 5;
 
             // Navigate Cards in Settings
             if (justPressed & ORBIS_PAD_BUTTON_UP) {
@@ -375,8 +375,6 @@ int main() {
                     cfg.rumble_index ^= 1; changed = true;
                 } else if (selectedCard == 4) {
                     cfg.switch_index ^= 1; changed = true;
-                } else if (selectedCard == 5) {
-                    if (cfg.usb_mode_override > 0) { cfg.usb_mode_override--; changed = true; }
                 }
                 if (changed) {
                     configMgr.save();
@@ -401,10 +399,6 @@ int main() {
                     cfg.rumble_index ^= 1; changed = true;
                 } else if (selectedCard == 4) {
                     cfg.switch_index ^= 1; changed = true;
-                } else if (selectedCard == 5) {
-                    if (cfg.usb_mode_override < (int)ConfigManager::USB_MODE_OPTIONS.size() - 1) {
-                        cfg.usb_mode_override++; changed = true;
-                    }
                 }
                 if (changed) {
                     configMgr.save();
