@@ -22,7 +22,7 @@ extern "C" {
     int ofHttpSetResponseHeaderMaxSize(int id, size_t size) __asm__("sceHttpSetResponseHeaderMaxSize");
 }
 
-#define GITHUB_API_RELEASES "https://api.github.com/repos/ChiricoG/OneFamily/releases"
+#define GITHUB_API_LATEST_RELEASE "https://api.github.com/repos/ChiricoG/OneFamily/releases/latest"
 #define HTTP_USER_AGENT "OneFamily-Companion/1.2.2-beta6 PS4"
 
 #define ONEFAMILY_NET_POOLSIZE    (256 * 1024)
@@ -194,27 +194,42 @@ bool PkgUpdater::check_network_ready() {
 bool PkgUpdater::is_version_newer(const std::string& remoteTag, const std::string& localVer) {
     if (remoteTag == localVer) return false;
 
+    // Strict Stable Guard: Reject any remote tag that is marked as a pre-release (beta, alpha, rc, pre)
+    std::string rLower = remoteTag;
+    for (size_t i = 0; i < rLower.size(); ++i) rLower[i] = (char)::tolower(rLower[i]);
+    if (rLower.find("beta") != std::string::npos ||
+        rLower.find("alpha") != std::string::npos ||
+        rLower.find("rc") != std::string::npos ||
+        rLower.find("-pre") != std::string::npos) {
+        return false; // Only stable releases trigger update notifications
+    }
+
     const char* r = remoteTag.c_str();
     const char* l = localVer.c_str();
     if (*r == 'v' || *r == 'V') r++;
     if (*l == 'v' || *l == 'V') l++;
 
-    int rMajor = 0, rMinor = 0, rPatch = 0, rBeta = 0;
-    int lMajor = 0, lMinor = 0, lPatch = 0, lBeta = 0;
+    int rMajor = 0, rMinor = 0, rPatch = 0;
+    int lMajor = 0, lMinor = 0, lPatch = 0;
 
     sscanf(r, "%d.%d.%d", &rMajor, &rMinor, &rPatch);
     sscanf(l, "%d.%d.%d", &lMajor, &lMinor, &lPatch);
 
-    const char* rBetaStr = strstr(r, "beta");
-    if (rBetaStr) sscanf(rBetaStr, "beta%d", &rBeta);
-
-    const char* lBetaStr = strstr(l, "beta");
-    if (lBetaStr) sscanf(lBetaStr, "beta%d", &lBeta);
-
     if (rMajor != lMajor) return rMajor > lMajor;
     if (rMinor != lMinor) return rMinor > lMinor;
     if (rPatch != lPatch) return rPatch > lPatch;
-    if (rBeta != lBeta) return rBeta > lBeta;
+
+    // If numeric version is identical (e.g. remote is "v1.2.2" stable and local is "v1.2.2-betaX"),
+    // the official stable release is strictly newer and takes precedence!
+    std::string lLower = localVer;
+    for (size_t i = 0; i < lLower.size(); ++i) lLower[i] = (char)::tolower(lLower[i]);
+    bool localIsPre = (lLower.find("beta") != std::string::npos ||
+                       lLower.find("alpha") != std::string::npos ||
+                       lLower.find("rc") != std::string::npos ||
+                       lLower.find("-pre") != std::string::npos);
+    if (localIsPre) {
+        return true;
+    }
 
     return false;
 }
@@ -232,13 +247,13 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
     sceHttpSetSendTimeOut(tpl, 10 * 1000 * 1000);
     ofHttpSetRecvTimeOut(tpl, 10 * 1000 * 1000);
 
-    int conn = sceHttpCreateConnectionWithURL(tpl, GITHUB_API_RELEASES, 1);
+    int conn = sceHttpCreateConnectionWithURL(tpl, GITHUB_API_LATEST_RELEASE, 1);
     if (conn < 0) {
         sceHttpDeleteTemplate(tpl);
         return false;
     }
 
-    int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, GITHUB_API_RELEASES, 0);
+    int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, GITHUB_API_LATEST_RELEASE, 0);
     if (req < 0) {
         sceHttpDeleteConnection(conn);
         sceHttpDeleteTemplate(tpl);
@@ -277,6 +292,15 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
     sceHttpDeleteConnection(conn);
     sceHttpDeleteTemplate(tpl);
 
+    // Guard against prerelease flags in JSON
+    size_t prePos = jsonBody.find("\"prerelease\":");
+    if (prePos != std::string::npos) {
+        if (jsonBody.compare(prePos, 17, "\"prerelease\":true") == 0 ||
+            jsonBody.compare(prePos, 18, "\"prerelease\": true") == 0) {
+            return false; // Skip any pre-release
+        }
+    }
+
     // 1. Extract tag_name of the newest release (first entry in array)
     size_t tagPos = jsonBody.find("\"tag_name\"");
     if (tagPos == std::string::npos) return false;
@@ -287,6 +311,16 @@ bool PkgUpdater::query_latest_release(std::string& outTag, std::string& outPkgUr
     if (tagEnd == std::string::npos) return false;
 
     outTag = jsonBody.substr(tagStart + 1, tagEnd - tagStart - 1);
+
+    // Strict client-side check on tag_name
+    std::string tagLower = outTag;
+    for (size_t i = 0; i < tagLower.size(); ++i) tagLower[i] = (char)::tolower(tagLower[i]);
+    if (tagLower.find("beta") != std::string::npos ||
+        tagLower.find("alpha") != std::string::npos ||
+        tagLower.find("rc") != std::string::npos ||
+        tagLower.find("-pre") != std::string::npos) {
+        return false; // Pre-release tags strictly ignored
+    }
 
     // 2. Look for "onefamily_companion.pkg" in assets
     size_t pkgPos = jsonBody.find("\"onefamily_companion.pkg\"");
