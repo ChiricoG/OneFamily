@@ -82,6 +82,9 @@ typedef struct {
     /* Active device identifiers */
     uint16_t    vid;
     uint16_t    pid;
+
+    /* HID Application Collection classification */
+    uint8_t     is_gamepad;
 } GenericHidContext;
 
 typedef struct {
@@ -196,7 +199,21 @@ static int parse_descriptor(GenericHidContext *g, const uint8_t *d, int n) {
             case 2: umax = (uint32_t)val; has_range = 1; break;
             }
         } else if (type == 0) { /* main */
-            if (tag == 8) { /* input */
+            if (tag == 10) { /* Collection */
+                uint16_t page = gl.page;
+                uint32_t usage = (nusages > 0) ? usages[0] : 0;
+                if (usage >> 16) {
+                    page = (uint16_t)(usage >> 16);
+                    usage = (uint16_t)usage;
+                }
+                if (page == 0x01 && (usage == 0x04 || usage == 0x05 || usage == 0x08)) {
+                    // Generic Desktop: 4=Joystick, 5=Gamepad, 8=Multi-axis Controller
+                    g->is_gamepad = 1;
+                } else if (page == 0x02) {
+                    // Simulation Controls (Flight Sim, Automobile Wheel/Pedals)
+                    g->is_gamepad = 1;
+                }
+            } else if (tag == 8) { /* input */
                 uint16_t *off = &offset[gl.rid];
                 uint32_t bits = gl.size * gl.count;
                 if (*off + bits > MAX_REPORT_BITS) return 0;
@@ -734,13 +751,31 @@ int generic_hid_setup(libusb_device_handle* h, uint16_t vid, uint16_t pid, uint8
                 return 0;
             }
         }
-    } else {
-        daemon_log(LOG_LEVEL_WARN, "Generic HID (0x%04X:0x%04X): could not read report descriptor (ret=%d), using fallback mapping",
+    }
+
+    int has_builtin = builtin_map(&s_ctx, vid, pid);
+    if (has_builtin) {
+        s_ctx.is_gamepad = 1;
+    }
+
+    if (desc_len <= 0) {
+        if (!has_builtin) {
+            daemon_log(LOG_LEVEL_WARN, "Generic HID (0x%04X:0x%04X): could not read report descriptor (ret=%d) — rejecting non-gamepad claim",
+                       vid, pid, desc_len);
+            return 0;
+        }
+        daemon_log(LOG_LEVEL_WARN, "Generic HID (0x%04X:0x%04X): could not read report descriptor (ret=%d), using fallback mapping for known controller",
                    vid, pid, desc_len);
+    } else {
+        bool has_directional_control = (s_ctx.axis[AX_X].present && s_ctx.axis[AX_Y].present) || s_ctx.axis[AX_HAT].present;
+        if (!s_ctx.is_gamepad && !has_builtin && !has_directional_control) {
+            daemon_log(LOG_LEVEL_INFO, "Generic HID (0x%04X:0x%04X): non-gamepad HID device (no Gamepad/Joystick collection or directional axes) — rejecting claim",
+                       vid, pid);
+            return 0;
+        }
     }
 
     default_mapping(&s_ctx);
-    int has_builtin = builtin_map(&s_ctx, vid, pid);
     load_controller_ini(&s_ctx, vid, pid, has_builtin);
 
     return 1;
