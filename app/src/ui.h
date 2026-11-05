@@ -33,9 +33,10 @@ struct TesterState {
     int rumblePhase;        // 0 = none, 1 = left (heavy), 2 = right (light), 3 = both
     int selectedSlot;       // 0..3 (Player 1..4)
     bool slotConnected[4];  // whether each slot is currently active/connected
+    bool testMode;          // true when inputs are isolated for testing
     CalibrationState calib;
 
-    TesterState() : rumbleFrames(0), rumblePhase(0), selectedSlot(0) {
+    TesterState() : rumbleFrames(0), rumblePhase(0), selectedSlot(0), testMode(false) {
         for (int i = 0; i < 4; i++) slotConnected[i] = false;
     }
 };

@@ -754,6 +754,40 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
     int thresh_val = ConfigManager::TRIGGER_VALUES[cfg.trigger_index];
 
     // ========================================================
+    // HEADER AREA: INFO CARD & TEST MODE R3 BADGE
+    // ========================================================
+    // Card 1: Tester Info (X = CARD_X, Y = 135, W = 1060, H = 76)
+    draw_rounded_rect(scene, CARD_X, 135, 1060, 76, 10, COLOR_CARD_BG);
+    draw_rounded_outline(scene, CARD_X, 135, 1060, 76, 10, COLOR_CARD_BORDER, 1);
+    draw_image(scene, iconMode, CARD_X + 20, 135 + (76 - iconMode.height) / 2);
+
+    draw_text(scene, "Pure Hardware Input Tester", fontCardTitle, CARD_X + 75, 164, COLOR_WHITE);
+    draw_text(scene, "Live raw stick telemetry, trigger threshold ranges, button state visualizer", fontCardDesc, CARD_X + 75, 194, COLOR_TEXT_DIM);
+
+    // Card 2: Test Mode R3 Badge Card (X = CARD_X + 1080 = 1460, Y = 135, W = 360, H = 76)
+    int testCardX = CARD_X + 1080;
+    int testCardW = 360;
+    int testCardH = 76;
+
+    if (tester.testMode) {
+        Color badgeBg = Color{ 15, 60, 40 };
+        Color badgeBorder = Color{ 0, 255, 150 };
+        draw_rounded_rect(scene, testCardX, 135, testCardW, testCardH, 10, badgeBg);
+        draw_rounded_outline(scene, testCardX, 135, testCardW, testCardH, 10, badgeBorder, 2);
+        draw_image(scene, btnR3, testCardX + 16, 135 + (testCardH - btnR3.height) / 2);
+        draw_text(scene, "TEST MODE: ACTIVE", fontCardTitle, testCardX + 60, 164, Color{ 0, 255, 150 });
+        draw_text(scene, "Press R3 to return", fontCardDesc, testCardX + 60, 194, COLOR_WHITE);
+    } else {
+        Color badgeBg = Color{ 14, 24, 38 };
+        Color badgeBorder = COLOR_CARD_BORDER;
+        draw_rounded_rect(scene, testCardX, 135, testCardW, testCardH, 10, badgeBg);
+        draw_rounded_outline(scene, testCardX, 135, testCardW, testCardH, 10, badgeBorder, 1);
+        draw_image(scene, btnR3, testCardX + 16, 135 + (testCardH - btnR3.height) / 2);
+        draw_text(scene, "TEST MODE: OFF", fontCardTitle, testCardX + 60, 164, COLOR_WHITE);
+        draw_text(scene, "Press R3 to isolate inputs", fontCardDesc, testCardX + 60, 194, COLOR_BLUE_BRIGHT);
+    }
+
+    // ========================================================
     // CONTROLLER SLOT SELECTION BAR (Player 1..4)
     // ========================================================
     int barX = CARD_X;
@@ -787,7 +821,11 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
 
     int r2X = pillsStartX + 4 * pillW + 3 * pillGap + 10;
     draw_image(scene, btnR2, r2X, barY + 9);
-    draw_text(scene, "Switch: [L2]/[R2] or [D-Pad]", fontCardDesc, r2X + 38, barY + 27, COLOR_TEXT_DIM);
+    if (tester.testMode) {
+        draw_text(scene, "Slot switching locked (Test Mode active)", fontCardDesc, r2X + 38, barY + 27, Color{ 0, 255, 150 });
+    } else {
+        draw_text(scene, "Switch: [L2]/[R2] or [D-Pad]", fontCardDesc, r2X + 38, barY + 27, COLOR_TEXT_DIM);
+    }
 
     // Check if selected controller slot is connected
     if (!padData.connected) {
@@ -1090,23 +1128,34 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
     draw_image(scene, iconMode, 60, 890);
     snprintf(buf, sizeof(buf), "Input Tester - Slot %d (Player %d)", tester.selectedSlot + 1, tester.selectedSlot + 1);
     draw_text(scene, buf, fontCardTitle, 120, 912, COLOR_WHITE);
-    draw_text(scene, "Pure hardware mode (isolated per-player inputs)", fontFooter, 120, 938, COLOR_BLUE_BRIGHT);
 
-    // Hints with authentic button icons
-    draw_image(scene, btnArrows, 980, 901);
-    draw_text(scene, "Slot", fontFooter, 1025, 922, COLOR_TEXT_DIM);
+    if (tester.testMode) {
+        draw_text(scene, "Test Mode Active - All inputs isolated, navigation locked", fontFooter, 120, 938, Color{ 0, 255, 150 });
 
-    draw_image(scene, btnSquare, 1140, 897);
-    draw_text(scene, "Rumble", fontFooter, 1185, 922, COLOR_TEXT_DIM);
+        draw_image(scene, btnR3, 1600, 897);
+        draw_text(scene, "Exit Test Mode", fontFooter, 1645, 922, Color{ 0, 255, 150 });
+    } else {
+        draw_text(scene, "Pure hardware mode (isolated per-player inputs)", fontFooter, 120, 938, COLOR_BLUE_BRIGHT);
 
-    draw_image(scene, btnTriangle, 1300, 897);
-    draw_text(scene, "Calib", fontFooter, 1345, 922, COLOR_TEXT_DIM);
+        // Hints with authentic button icons
+        draw_image(scene, btnR3, 820, 897);
+        draw_text(scene, "Test Mode", fontFooter, 865, 922, COLOR_BLUE_BRIGHT);
 
-    draw_image(scene, btnCross, 1460, 897);
-    draw_text(scene, "Apply", fontFooter, 1505, 922, tester.calib.completed ? COLOR_BLUE_BRIGHT : COLOR_TEXT_DIM);
+        draw_image(scene, btnArrows, 980, 901);
+        draw_text(scene, "Slot", fontFooter, 1025, 922, COLOR_TEXT_DIM);
 
-    draw_image(scene, btnOptions, 1630, 900);
-    draw_text(scene, "Exit", fontFooter, 1710, 922, COLOR_TEXT_DIM);
+        draw_image(scene, btnSquare, 1140, 897);
+        draw_text(scene, "Rumble", fontFooter, 1185, 922, COLOR_TEXT_DIM);
+
+        draw_image(scene, btnTriangle, 1300, 897);
+        draw_text(scene, "Calib", fontFooter, 1345, 922, COLOR_TEXT_DIM);
+
+        draw_image(scene, btnCross, 1460, 897);
+        draw_text(scene, "Apply", fontFooter, 1505, 922, tester.calib.completed ? COLOR_BLUE_BRIGHT : COLOR_TEXT_DIM);
+
+        draw_image(scene, btnOptions, 1630, 900);
+        draw_text(scene, "Exit", fontFooter, 1710, 922, COLOR_TEXT_DIM);
+    }
 }
 
 void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile& profile,

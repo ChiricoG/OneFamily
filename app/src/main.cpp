@@ -221,18 +221,21 @@ int main() {
 
         // Smart Active Slot Auto-Detection:
         // Automatically switch tester.selectedSlot to whichever controller slot is actively sending inputs
-        for (int i = 0; i < 4; i++) {
-            if (tester.slotConnected[i]) {
-                const OrbisPadData& d = padDataSlots[i];
-                bool hasStick = (abs((int)d.leftStick.x - 128) > 20 ||
-                                 abs((int)d.leftStick.y - 128) > 20 ||
-                                 abs((int)d.rightStick.x - 128) > 20 ||
-                                 abs((int)d.rightStick.y - 128) > 20);
-                bool hasTrig = (d.analogButtons.l2 > 30 || d.analogButtons.r2 > 30);
-                bool hasBtn = (d.buttons != 0);
-                if (hasStick || hasTrig || hasBtn) {
-                    tester.selectedSlot = i;
-                    break;
+        // (suspended when in Input Tester Test Mode to prevent accidental slot jumping)
+        if (!tester.testMode) {
+            for (int i = 0; i < 4; i++) {
+                if (tester.slotConnected[i]) {
+                    const OrbisPadData& d = padDataSlots[i];
+                    bool hasStick = (abs((int)d.leftStick.x - 128) > 20 ||
+                                     abs((int)d.leftStick.y - 128) > 20 ||
+                                     abs((int)d.rightStick.x - 128) > 20 ||
+                                     abs((int)d.rightStick.y - 128) > 20);
+                    bool hasTrig = (d.analogButtons.l2 > 30 || d.analogButtons.r2 > 30);
+                    bool hasBtn = (d.buttons != 0);
+                    if (hasStick || hasTrig || hasBtn) {
+                        tester.selectedSlot = i;
+                        break;
+                    }
                 }
             }
         }
@@ -262,7 +265,11 @@ int main() {
         else if (padData.leftStick.x > 128 + STICK_NAV_THRESHOLD) stickNav |= ORBIS_PAD_BUTTON_RIGHT;
 
         uint32_t stickJustPressed = 0;
-        if (stickNav != 0) {
+        // Suppress stick navigation emulation during Remap Test Mode or Tester Test Mode
+        if (remapTestMode || tester.testMode) {
+            s_stickNavButtons = 0;
+            s_stickRepeatFrames = 0;
+        } else if (stickNav != 0) {
             if (stickNav != s_stickNavButtons) {
                 stickJustPressed = stickNav;
                 s_stickNavButtons = stickNav;
@@ -322,13 +329,13 @@ int main() {
 
         AppConfig& cfg = configMgr.getConfig();
 
-        // Exit on OPTIONS or CIRCLE (suspended during Remap Test Mode)
-        if (!remapTestMode && ((justPressed & ORBIS_PAD_BUTTON_OPTIONS) || (justPressed & ORBIS_PAD_BUTTON_CIRCLE))) {
+        // Exit on OPTIONS or CIRCLE (suspended during Remap Test Mode and Tester Test Mode)
+        if (!remapTestMode && !tester.testMode && ((justPressed & ORBIS_PAD_BUTTON_OPTIONS) || (justPressed & ORBIS_PAD_BUTTON_CIRCLE))) {
             break;
         }
 
-        // Tab Switching via L1 / R1 (suspended during Remap Test Mode)
-        if (!remapTestMode) {
+        // Tab Switching via L1 / R1 (suspended during Remap Test Mode and Tester Test Mode)
+        if (!remapTestMode && !tester.testMode) {
             if (justPressed & ORBIS_PAD_BUTTON_L1) {
                 activeTabIndex = (activeTabIndex + numTabs - 1) % numTabs;
                 currentTabId = activeTabs[activeTabIndex];
@@ -359,6 +366,9 @@ int main() {
 
         if (currentTabId != TAB_REMAP_HID) {
             remapTestMode = false;
+        }
+        if (currentTabId != TAB_TESTER) {
+            tester.testMode = false;
         }
 
         if (currentTabId == TAB_SETTINGS) {
@@ -426,36 +436,43 @@ int main() {
             }
         } else if (currentTabId == TAB_TESTER) {
             // --- TESTER & CALIBRATION TAB ---
-            // Left / Right / L2 / R2: Switch controller slot under test
-            if ((justPressed & ORBIS_PAD_BUTTON_LEFT) || (justPressed & ORBIS_PAD_BUTTON_L2)) {
-                tester.selectedSlot = (tester.selectedSlot + 3) % 4;
-            }
-            if ((justPressed & ORBIS_PAD_BUTTON_RIGHT) || (justPressed & ORBIS_PAD_BUTTON_R2)) {
-                tester.selectedSlot = (tester.selectedSlot + 1) % 4;
+            // R3 toggles between Normal Mode and isolated Test Mode
+            if (justPressed & ORBIS_PAD_BUTTON_R3) {
+                tester.testMode = !tester.testMode;
             }
 
-            // Square: Start Vibration Test
-            if (justPressed & ORBIS_PAD_BUTTON_SQUARE) {
-                tester.rumbleFrames = 180; // 3 seconds
-            }
+            if (!tester.testMode) {
+                // Left / Right / L2 / R2: Switch controller slot under test
+                if ((justPressed & ORBIS_PAD_BUTTON_LEFT) || (justPressed & ORBIS_PAD_BUTTON_L2)) {
+                    tester.selectedSlot = (tester.selectedSlot + 3) % 4;
+                }
+                if ((justPressed & ORBIS_PAD_BUTTON_RIGHT) || (justPressed & ORBIS_PAD_BUTTON_R2)) {
+                    tester.selectedSlot = (tester.selectedSlot + 1) % 4;
+                }
 
-            // Triangle: Start Drift Auto-Calibration
-            if (justPressed & ORBIS_PAD_BUTTON_TRIANGLE) {
-                tester.calib.active = true;
-                tester.calib.completed = false;
-                tester.calib.currentFrame = 0;
-                tester.calib.maxNoise = 0;
-            }
+                // Square: Start Vibration Test
+                if (justPressed & ORBIS_PAD_BUTTON_SQUARE) {
+                    tester.rumbleFrames = 180; // 3 seconds
+                }
 
-            // Cross: Apply suggested deadzone if calibration completed
-            if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
-                if (tester.calib.completed) {
-                    cfg.deadzone_index = tester.calib.suggestedIndex;
-                    if (configMgr.save()) {
-                        toastText = "Deadzone auto-calibrated & saved!";
-                        toastFrames = 180;
-                    }
+                // Triangle: Start Drift Auto-Calibration
+                if (justPressed & ORBIS_PAD_BUTTON_TRIANGLE) {
+                    tester.calib.active = true;
                     tester.calib.completed = false;
+                    tester.calib.currentFrame = 0;
+                    tester.calib.maxNoise = 0;
+                }
+
+                // Cross: Apply suggested deadzone if calibration completed
+                if (justPressed & ORBIS_PAD_BUTTON_CROSS) {
+                    if (tester.calib.completed) {
+                        cfg.deadzone_index = tester.calib.suggestedIndex;
+                        if (configMgr.save()) {
+                            toastText = "Deadzone auto-calibrated & saved!";
+                            toastFrames = 180;
+                        }
+                        tester.calib.completed = false;
+                    }
                 }
             }
 
