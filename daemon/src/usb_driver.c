@@ -180,6 +180,11 @@ static uint16_t s_failed_cooldown_vid = 0;
 static uint16_t s_failed_cooldown_pid = 0;
 static uint64_t s_failed_cooldown_until_us = 0;
 
+// Track when the current controller was connected to suppress spurious notifications
+// for multi-mode controllers that re-enumerate (e.g. Trust GXT Muta 542 DS4->Switch Pro).
+static uint64_t s_usb_connect_time_us = 0;
+static bool     s_usb_is_reenum_ds4 = false; // true when DS4 third-party claimed as re-enum step
+
 static int      s_usb_vpad_slot = -1;
 static bool     s_share_combo_active = false;
 
@@ -189,6 +194,14 @@ static void close_controller(void) {
     uint16_t closing_pid = g_usb_state.pid;
     int had_any_reports = s_logged_first_report;
     int had_errors = s_consecutive_transfer_errors;
+
+    // Detect fast-disconnect re-enumeration: a DS4 third-party (multi-mode clone cycling personality)
+    // that disconnects within 2 seconds with zero input reports is just re-enumerating.
+    // Suppress the user-visible notifications to avoid spam (e.g. Trust GXT Muta 542 DS4->Switch Pro).
+    uint64_t alive_us = (s_usb_connect_time_us > 0) ? (daemon_sys_time_us() - s_usb_connect_time_us) : UINT64_MAX;
+    bool is_reenum_disconnect = (s_usb_is_reenum_ds4 && !had_any_reports && alive_us < 2000000ULL);
+    s_usb_connect_time_us = 0;
+    s_usb_is_reenum_ds4 = false;
 
     if (s_usb_vpad_slot >= 0) {
         vpad_slot_close(s_usb_vpad_slot);
@@ -243,9 +256,13 @@ static void close_controller(void) {
                    closing_vid, closing_pid, had_errors);
     }
 
-    daemon_log(LOG_LEVEL_INFO, "Controller disconnected from USB");
-    if (had_vpad) {
-        daemon_notify("OneFamily: Controller Disconnected");
+    if (is_reenum_disconnect) {
+        daemon_log(LOG_LEVEL_INFO, "Controller disconnected from USB (re-enumeration: personality switch in progress)");
+    } else {
+        daemon_log(LOG_LEVEL_INFO, "Controller disconnected from USB");
+        if (had_vpad) {
+            daemon_notify("OneFamily: Controller Disconnected");
+        }
     }
 }
 
@@ -447,14 +464,25 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
     // ONLY official Nintendo Switch Pro controllers (iManufacturer = "Nintendo Co., Ltd.")
     // require the 0x80 handshake to lock the controller into USB mode (0x80 0x04) and prevent fallback to Bluetooth.
     bool is_official = is_official_nintendo_switch_pro(h, desc);
+
+    // Declarations at top to avoid jumping over variable-length declarations with goto
+    uint8_t probe_rx[64];
+    int     probe_len  = 0;
+    uint8_t cmd_pkt[2];
+    uint8_t pkt[64];
+    int     handshake_r;
+
     if (!is_official) {
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro Clone detected - skipping 0x80 wake-up handshake (passive mode)");
-        return;
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro Clone detected - skipping 0x80 wake-up handshake, sending standard subcommands only");
+        // Do NOT return: fall through to standard subcommands below.
+        // Standard subcommands (0x40 IMU, 0x48 vibration, 0x03 input mode) follow the
+        // AnyPad / hid-nintendo model and work on ALL clone controllers including the
+        // Trust GXT Muta 542 and similar multi-mode clones. Without them the clone
+        // firmware times out the USB connection within 1 second (0x80240004).
+        goto switch_pro_standard_subcommands;
     }
 
     // Drain any leftover input in the USB FIFO first
-    uint8_t probe_rx[64];
-    int probe_len = 0;
     for (int i = 0; i < 3; i++) {
         probe_len = 0;
         int dr = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, probe_rx, sizeof(probe_rx), &probe_len, 10);
@@ -470,12 +498,10 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
     // 2. Official Switch Pro USB Handshake (0x80 commands):
     // The 0x80 command packet is strictly 2 BYTES (u8 buf[2] = { 0x80, cmd }),
     // matching Linux kernel hid-nintendo (joycon_send_usb).
-    uint8_t cmd_pkt[2];
-
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x02; // Handshake
-    int r = switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 150);
-    if (r != 0) {
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro 0x80 handshake ret=0x%08X (clone/unsupported) — preserving passive mode", r);
+    handshake_r = switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 150);
+    if (handshake_r != 0) {
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro 0x80 handshake ret=0x%08X (clone/unsupported) — preserving passive mode", handshake_r);
         return;
     }
     daemon_sys_usleep(5000);
@@ -492,7 +518,7 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
     switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x04, 150);
     daemon_sys_usleep(5000);
 
-    uint8_t pkt[64];
+switch_pro_standard_subcommands:
     // Standard Switch Subcommands (AnyPad / Linux hid-nintendo model): Works on ALL official and clone controllers!
     // Step 1: Subcommand 0x03 (Set Input Report Mode to 0x30 Full Mode)
     for (int attempt = 1; attempt <= 3; attempt++) {
@@ -621,8 +647,11 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
 
         // Require at least 4 characters to evaluate ("SONY" has 4 letters).
         // If the string was read successfully with r >= 4, check for "SONY".
-        // If the read was truncated (r < 4) or failed, default to genuine Sony (return 1)
-        // to prevent hijacking an official DualShock 4 due to transient USB errors.
+        // If the read was truncated (r < 4), retry once after a 5ms settle.
+        // Genuine Sony DS4 returns "Sony Computer Entertainment" (28 chars); a
+        // single-character truncation almost always means a multi-mode clone
+        // (e.g. Trust GXT Muta 542) cycling personality during USB enumeration.
+        // A retry resolves any genuine transient USB read error on a real DS4.
         if (r >= 4) {
             daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X iManufacturer='%s'", desc->idVendor, desc->idProduct, mfg);
             for (int i = 0; mfg[i]; i++) {
@@ -635,9 +664,30 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
             }
             return 0; // Read successfully, but does not contain "Sony" (e.g. GameSir, Brook, etc.)
         } else if (r > 0) {
-            daemon_log(LOG_LEVEL_WARN, "Device 0x%04X:0x%04X iManufacturer truncated ('%s', len=%d) — defaulting to genuine Sony",
-                       desc->idVendor, desc->idProduct, mfg, r);
-            return 1;
+            // Truncated read: retry once with a 5ms settle to resolve transient USB errors.
+            daemon_sys_usleep(5000);
+            char mfg2[128] = {0};
+            libusb_device_handle* h2 = NULL;
+            int r2 = -1;
+            if (p_sceUsbdOpen && p_sceUsbdOpen(dev, &h2) == 0 && h2) {
+                r2 = usb_get_string_ascii(h2, desc->iManufacturer, mfg2, sizeof(mfg2));
+                p_sceUsbdClose(h2);
+            }
+            if (r2 >= 4) {
+                daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X iManufacturer (retry)='%s'", desc->idVendor, desc->idProduct, mfg2);
+                for (int i = 0; mfg2[i]; i++) {
+                    if ((mfg2[i] == 'S' || mfg2[i] == 's') &&
+                        (mfg2[i+1] == 'O' || mfg2[i+1] == 'o') &&
+                        (mfg2[i+2] == 'N' || mfg2[i+2] == 'n') &&
+                        (mfg2[i+3] == 'Y' || mfg2[i+3] == 'y')) {
+                        return 1; // Genuine Sony on retry
+                    }
+                }
+                return 0; // Retry succeeded; not Sony (third-party clone)
+            }
+            daemon_log(LOG_LEVEL_WARN, "Device 0x%04X:0x%04X iManufacturer still truncated after retry (r=%d r2=%d) - treating as third-party",
+                       desc->idVendor, desc->idProduct, r, r2);
+            return 0; // Persistent truncation = multi-mode clone cycling personality
         }
     }
     // If opening or descriptor read failed, default to treating Sony VID as genuine Sony to be safe
@@ -857,6 +907,15 @@ static int scan_and_open(void) {
                     g_usb_state.wMaxPacketSize = det.wMaxPacketSize;
                     found = 1;
 
+                    // Record connect time and re-enumeration flag for notification suppression.
+                    // A DS4 third-party claim on a Sony VID/PID (0x054C:0x05C4/0x09CC) is a
+                    // multi-mode clone cycling personality: suppress connect/disconnect notifications
+                    // if it disconnects within 2s with zero input reports (re-enumeration signal).
+                    s_usb_connect_time_us = daemon_sys_time_us();
+                    s_usb_is_reenum_ds4 = (det.type == CONTROLLER_DS4 &&
+                                           desc.idVendor == 0x054C &&
+                                           (desc.idProduct == 0x05C4 || desc.idProduct == 0x09CC || desc.idProduct == 0x0BA0));
+
                     if (det.type == CONTROLLER_GENERIC_HID) {
                         if (!generic_hid_setup(h, desc.idVendor, desc.idProduct, det.interface_num, p_sceUsbdControlTransfer)) {
                             daemon_log(LOG_LEVEL_INFO, "Generic HID (0x%04X:0x%04X) rejected: not an active gamepad — releasing interface",
@@ -940,7 +999,12 @@ static int scan_and_open(void) {
                     }
 
                     int slot = vpad_get_assigned_slot_num(s_usb_vpad_slot);
-                    if (slot == 2) {
+                    if (s_usb_is_reenum_ds4) {
+                        // Suppress notification: this is a multi-mode clone in DS4 personality
+                        // during re-enumeration. The user will see the notification only after the
+                        // controller settles in its final mode (e.g. Switch Pro).
+                        daemon_log(LOG_LEVEL_INFO, "OneFamily: %s claimed (re-enumeration: suppressing notification)", friendly_name);
+                    } else if (slot == 2) {
                         daemon_notify("OneFamily: %s (Player 2)", friendly_name);
                     } else {
                         daemon_notify("OneFamily: %s Connected", friendly_name);
