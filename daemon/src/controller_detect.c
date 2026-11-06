@@ -404,6 +404,12 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             }
             return 1;
         }
+        // Non-controller Sony peripherals (PlayStation VR Processor Unit 0x09AF/0x09B0,
+        // PS Move, Wireless Headset dongles, etc.) must never be hijacked by generic HID detection.
+        // Leave them completely untouched for native Orbis OS drivers!
+        daemon_log(LOG_LEVEL_INFO, "Skipping non-controller Sony peripheral (VID:0x%04X PID:0x%04X) for Orbis OS",
+                   desc->idVendor, desc->idProduct);
+        return 0;
     }
 
     // 2. Microsoft Xbox 360 & Xbox One / Series / PDP Victrix

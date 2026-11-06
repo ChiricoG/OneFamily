@@ -864,7 +864,7 @@ static int scan_and_open(void) {
                             g_dev_handle = NULL;
                             g_usb_state.connected = false;
                             found = 0;
-                            break;
+                            continue;
                         }
                     }
 
@@ -920,7 +920,7 @@ static int scan_and_open(void) {
                         g_dev_handle = NULL;
                         g_usb_state.connected = false;
                         found = 0;
-                        break;
+                        continue;
                     }
 
                     // Initialize Virtual DualShock 4 (Type 1) ONLY once controller is confirmed ready!
