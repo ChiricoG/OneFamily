@@ -1042,16 +1042,24 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         if (s_xone_ep_out_stalls >= 5) {
             return;
         }
-        // Standard Linux xpad.c Xbox One / GIP rumble packet (12 bytes)
-        // Motor mask 0x03 targets left and right grip motors only, avoiding trigger motor stalls on 3rd-party/PowerA pads
-        uint8_t pkt[12] = {
-            0x09, 0x08, 0x00, 0x08,
-            0x00, 0x03, // Mode 0x00, Motor select: 0x01 (Left) | 0x02 (Right) = 0x03
+        // If user disabled rumble, only permit stop commands (lg=0, sm=0)
+        if (!g_daemon_config.enable_rumble && (large_motor > 0 || small_motor > 0)) {
+            return;
+        }
+        static uint8_t s_xone_seq = 0;
+        // Standard Microsoft GIP / Linux xpad.c Xbox One rumble packet (13 bytes)
+        // Motor mask 0x0C selects Left Grip (0x04) and Right Grip (0x08) motors.
+        // Motor mask 0x0F enables all motors; 0x0C targets grip motors exclusively
+        // ensuring 3rd-party controllers without trigger motors (e.g. PowerA) never stall or reject.
+        uint8_t pkt[13] = {
+            0x09, 0x00, s_xone_seq++, 0x09,
+            0x00, 0x0C, // Mode 0x00, Motor select: 0x04 (Left grip) | 0x08 (Right grip) = 0x0C
             0x00, 0x00, // Left/Right trigger motors: 0x00 (not present on 3rd-party)
             large_motor, // Left heavy grip motor (0..255)
             small_motor, // Right light grip motor (0..255)
-            (large_motor > 0 || small_motor > 0) ? 0x80 : 0x00, // Duration / pulse length (0x80 continuous, 0x00 stop)
-            0x00  // Period of pulse
+            (large_motor > 0 || small_motor > 0) ? 0xFF : 0x00, // Duration (0xFF = continuous, 0 = stop)
+            0x00, // Delay
+            0x00  // Repeat count (0 = continuous until next packet)
         };
         int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
         if (ret != 0) {
@@ -1260,24 +1268,28 @@ void usb_driver_poll_step(void) {
             read_len = 64; // Safe fallback
         }
     }
-    // Timeout: 8ms for high-polling (bInterval < 4ms), 16ms for standard 125Hz/250Hz controllers (as in v1.2.1)
-    int poll_timeout_ms = (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4) ? 8 : 16;
+    // Timeout: 8ms for high-polling (bInterval < 4ms) and Xbox One, 16ms for standard 125Hz/250Hz controllers (as in v1.2.1)
+    int poll_timeout_ms = (g_usb_state.type == CONTROLLER_XBOXONE || (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4)) ? 8 : 16;
     uint64_t xfer_start_us = daemon_sys_time_us();
     int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, poll_timeout_ms);
     uint64_t xfer_dur_us = daemon_sys_time_us() - xfer_start_us;
 
-    // High-Polling USB FIFO Drain (Targeted exclusively for high-polling 500Hz/1000Hz controllers with bInterval < 4ms):
-    // Standard 125Hz/250Hz controllers (bInterval >= 4) never accumulate backlogs in our 250 Hz loop and must NOT run this drain,
+    // High-Polling USB FIFO Drain:
+    // Standard 125Hz/250Hz Xbox 360 controllers (bInterval >= 4) never accumulate backlogs in our 250 Hz loop and must NOT run this drain,
     // avoiding 1ms blocking timeouts and frame stalling.
-    // For high-polling controllers (e.g. GuliKit KK3 Max 1000Hz, PowerA 1000Hz), drain pending packets to the newest real-time head.
-    // NEVER bitwise-OR button masks: gamepads send absolute physical snapshots; OR-merging corrupts release packets into stuck buttons!
+    // For high-polling adapters (bInterval < 4, e.g. GuliKit KK3 Max 1000Hz) AND Xbox One / Series controllers
+    // (where bInterval is nominally 4 in the descriptor but internal MCU streams at 250-1000Hz and ring buffer backlogs accumulate):
+    // Drain pending packets to the newest real-time head while preserving transient button/D-pad transitions.
     bool is_high_polling = (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4);
-    if (ret == 0 && is_high_polling && xfer_dur_us < 2000ULL &&
+    bool should_drain = (is_high_polling || g_usb_state.type == CONTROLLER_XBOXONE);
+    if (ret == 0 && should_drain && xfer_dur_us < 2000ULL &&
         ((g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) ||
          (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4))) {
         uint8_t next_rx[128];
         int next_transferred = 0;
         int drain_count = 0;
+        uint8_t xone_burst_btn_low = (g_usb_state.type == CONTROLLER_XBOXONE && rx[0] == XBOXONE_REPORT_INPUT && transferred >= 5) ? rx[4] : 0;
+        uint8_t xone_burst_btn_high = (g_usb_state.type == CONTROLLER_XBOXONE && rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6) ? rx[5] : 0;
         while (drain_count < 8) {
             int drain_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, next_rx, read_len, &next_transferred, 1);
             if (drain_ret == 0 && next_transferred > 0) {
@@ -1305,7 +1317,10 @@ void usb_driver_poll_step(void) {
                     }
                 } else if (g_usb_state.type == CONTROLLER_XBOXONE) {
                     if (next_rx[0] == XBOXONE_REPORT_INPUT && next_transferred >= 6) {
-                        // Adopt newest input report directly without button OR-merging
+                        // Accumulate button/D-pad transitions so short taps in the burst are never skipped
+                        xone_burst_btn_low |= next_rx[4];
+                        xone_burst_btn_high |= next_rx[5];
+                        // Adopt newest input report directly for sticks, triggers, and physical state
                         memcpy(rx, next_rx, next_transferred);
                         transferred = next_transferred;
                     } else if (next_rx[0] == XBOXONE_REPORT_GUIDE) {
@@ -1342,6 +1357,13 @@ void usb_driver_poll_step(void) {
             } else {
                 break; // Hardware FIFO queue is now fully drained!
             }
+        }
+        // Apply latched burst buttons to the final input report:
+        // Analog sticks and triggers remain at the newest real-time snapshot,
+        // while any button or D-pad tap that occurred during the burst is guaranteed to be held for this 4ms frame.
+        if (g_usb_state.type == CONTROLLER_XBOXONE && rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6) {
+            rx[4] |= xone_burst_btn_low;
+            rx[5] |= xone_burst_btn_high;
         }
     }
 

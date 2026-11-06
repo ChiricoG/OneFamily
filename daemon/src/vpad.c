@@ -874,10 +874,12 @@ void vpad_poll_rumble(void) {
                         bt_driver_send_rumble_slot(i, lg, sm, color);
                     }
                 } else if (g_slots[i].source == VPAD_SOURCE_USB) {
-                    if (g_rumble_cb) {
-                        g_rumble_cb(lg, sm);
-                    } else {
-                        usb_driver_send_rumble(lg, sm);
+                    if (g_daemon_config.enable_rumble || (lg == 0 && sm == 0)) {
+                        if (g_rumble_cb) {
+                            g_rumble_cb(lg, sm);
+                        } else {
+                            usb_driver_send_rumble(lg, sm);
+                        }
                     }
                 }
             }
