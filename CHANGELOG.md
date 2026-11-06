@@ -2,6 +2,14 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta9] - Pre-release (2026-11-06)
+
+### Bluetooth Controller Support & Pairing
+- **DualSense Bluetooth Pairing on FW 11.00 and FW 9.00**: Added native wireless pairing and connection support for DualSense and DualSense Edge controllers over Bluetooth on PlayStation 4 Firmware 11.00 and Firmware 9.00.
+- **Enhanced Bluetooth Pairing Engine**: Implemented verified kernel allowlist tables and hardened pattern matching across all supported firmware versions (5.05 - 11.00).
+
+---
+
 ## [v1.2.2-beta8] - Pre-release (2026-11-06)
 
 ### Controller Compatibility & Hardware Fixes
