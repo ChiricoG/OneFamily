@@ -2,6 +2,18 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta8] - Pre-release (2026-11-06)
+
+### Controller Compatibility & Hardware Fixes
+- **Logitech RumblePad 2 & Legacy Gamepads Native Support (Issue #41)**: Added native support for Logitech RumblePad 2 (`0x046D:0xC218`), Logitech Dual Action (`0x046D:0xC216`), and Logitech F310/F710 DirectInput mode. Adapted endpoint packet sizing (`wMaxPacketSize = 8`) and polling intervals (`bInterval`), implemented hardware quirk protection preventing microcontroller freezes, and aligned force feedback to the `hid-lg2ff` rumble protocol.
+- **PSVR Coexistence & Sony USB Bus Scan Optimization (Issue #52)**: Added hardware filtering for non-gamepad Sony USB devices (PSVR headset / processor unit `0x054C:0x09AF`, PlayStation Cameras, and USB audio devices) preventing false Generic HID detection. Fixed bus scan abort logic, allowing PS3 DualShock 3 and other gamepads to connect simultaneously with PSVR hardware plugged in.
+- **Official DualShock 4 Protection & Switch Pro Protocol Hardening (Issue #22)**: Hardened Sony manufacturer string detection against partial/truncated USB reads (`iManufacturer`), preventing official wired DualShock 4 controllers from being hijacked. Aligned Nintendo Switch Pro transfer buffers to 64 bytes (`wMaxPacketSize`) and enforced host kernel driver detachment (`p_sceUsbdDetachKernelDriver`) across all claimed controller interfaces.
+
+### Companion App Features
+- **Isolated Test Mode in Input Tester Tab**: Added an isolated Test Mode toggled via R3 (Right Stick Click). When active, Player slot switching via L2, R2, and analog sticks is locked, allowing users to freely test analog sticks, triggers, and full-range inputs without switching player tabs.
+
+---
+
 ## [v1.2.2-beta7] - Pre-release (2026-11-05)
 
 ### Controller Compatibility & Gameplay Fixes
