@@ -619,7 +619,11 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
         int r = (desc->iManufacturer != 0) ? usb_get_string_ascii(h, desc->iManufacturer, mfg, sizeof(mfg)) : -1;
         if (p_sceUsbdClose) p_sceUsbdClose(h);
 
-        if (r > 0) {
+        // Require at least 4 characters to evaluate ("SONY" has 4 letters).
+        // If the string was read successfully with r >= 4, check for "SONY".
+        // If the read was truncated (r < 4) or failed, default to genuine Sony (return 1)
+        // to prevent hijacking an official DualShock 4 due to transient USB errors.
+        if (r >= 4) {
             daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X iManufacturer='%s'", desc->idVendor, desc->idProduct, mfg);
             for (int i = 0; mfg[i]; i++) {
                 if ((mfg[i] == 'S' || mfg[i] == 's') &&
@@ -629,7 +633,11 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
                     return 1;
                 }
             }
-            return 0; // Read successfully, but does not contain "Sony" (e.g. GameSir)
+            return 0; // Read successfully, but does not contain "Sony" (e.g. GameSir, Brook, etc.)
+        } else if (r > 0) {
+            daemon_log(LOG_LEVEL_WARN, "Device 0x%04X:0x%04X iManufacturer truncated ('%s', len=%d) — defaulting to genuine Sony",
+                       desc->idVendor, desc->idProduct, mfg, r);
+            return 1;
         }
     }
     // If opening or descriptor read failed, default to treating Sony VID as genuine Sony to be safe
@@ -825,7 +833,7 @@ static int scan_and_open(void) {
                     }
                 }
 
-                if (p_sceUsbdDetachKernelDriver && (det.type == CONTROLLER_GENERIC_HID || det.type == CONTROLLER_DS4 || det.type == CONTROLLER_DS3)) {
+                if (p_sceUsbdDetachKernelDriver) {
                     p_sceUsbdDetachKernelDriver(h, det.interface_num);
                 }
 
@@ -1241,8 +1249,10 @@ void usb_driver_poll_step(void) {
     uint8_t rx[128];
     int transferred = 0;
     int read_len = sizeof(rx);
-    if (g_usb_state.type == CONTROLLER_DUALSENSE) {
-        read_len = 64; // DualSense endpoint has wMaxPacketSize = 64 bytes
+    if (g_usb_state.type == CONTROLLER_DUALSENSE ||
+        g_usb_state.type == CONTROLLER_SWITCH_PRO ||
+        g_usb_state.type == CONTROLLER_SWITCH) {
+        read_len = 64; // DualSense and Switch Pro endpoints have wMaxPacketSize = 64 bytes
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         if (g_usb_state.wMaxPacketSize > 0 && g_usb_state.wMaxPacketSize <= 64) {
             read_len = g_usb_state.wMaxPacketSize;
