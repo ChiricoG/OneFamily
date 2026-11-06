@@ -473,8 +473,17 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
     int     handshake_r;
 
     if (!is_official) {
+        // Joy-Con L/R (0x2006/0x2007), Grip (0x200E) and Nintendo retro controllers
+        // (SNES 0x2017, Genesis 0x2019, MD-2 0x201A, N64 0x201E) share VID 0x057E but
+        // are NOT Pro Controllers and do not support the standard Pro subcommand set over USB.
+        // Preserve passive mode (identical to pre-bf47ce0 behavior for these devices).
+        if (desc->idVendor == SWITCH_PRO_VID && desc->idProduct != SWITCH_PRO_PID) {
+            daemon_log(LOG_LEVEL_INFO, "Nintendo non-Pro controller (PID=0x%04X) - passive mode (no subcommands)", desc->idProduct);
+            return;
+        }
+        // Third-party Switch Pro clones (Trust GXT Muta 542, Nyko, etc.): skip 0x80
+        // handshake but send standard subcommands to initialize firmware.
         daemon_log(LOG_LEVEL_INFO, "Switch Pro Clone detected - skipping 0x80 wake-up handshake, sending standard subcommands only");
-        // Do NOT return: fall through to standard subcommands below.
         // Standard subcommands (0x40 IMU, 0x48 vibration, 0x03 input mode) follow the
         // AnyPad / hid-nintendo model and work on ALL clone controllers including the
         // Trust GXT Muta 542 and similar multi-mode clones. Without them the clone
