@@ -263,9 +263,13 @@ static int aob_find_allowlist_offsets(uint64_t base, uint32_t out_offsets[12], u
 
     // 1. VID Phase: Scan safe kernel window for CMP imm32 == 0x044F (Thrustmaster VID)
     // 0x044F is exceptionally rare in the kernel and only present in bthid allowlists.
+    // In Orbis OS bthid, all valid allowlist VIDs reside within a compact ~20 KB cluster window.
     for (uint64_t a = base + AOB_SAFE_SCAN_START; a + 4 <= base + AOB_SAFE_SCAN_END; ++a) {
         if (*(const volatile uint32_t*)a == 0x0000044FUL) {
             if (aob_is_cmp_imm((const uint8_t*)a)) {
+                if (n_vid > 0 && ((a - base) - vids[0]) > 0x8000UL) {
+                    continue; // Skip out-of-cluster false positive (e.g. at +85 KB in non-BT drivers)
+                }
                 if (n_vid < 8) vids[n_vid++] = (uint32_t)(a - base);
             }
         }
@@ -304,30 +308,50 @@ static int aob_find_allowlist_offsets(uint64_t base, uint32_t out_offsets[12], u
         return 0x320 + n_pid; // Expected at least 5 Thrustmaster PIDs
     }
 
-    // 3. Greedy Nearest-Pairing: assign each VID to its closest unused companion PID
+    // 3. Structural Delta Matching: assign each VID to its architectural companion PID
+    // Sony compiler produces invariant deltas across PS4 kernels:
+    // Pair 0: +0x30, Pair 1: +0x33, Pair 2: +0xBF2, Pair 3: +0x4E1, Pair 4: +0x4F3
+    static const uint32_t s_arch_deltas[5] = { 0x30, 0x33, 0xBF2, 0x4E1, 0x4F3 };
     bool pid_used[8] = {false};
     uint32_t pairs = 0;
 
-    for (int i = 0; i < n_vid && pairs < 6; ++i) {
+    for (int i = 0; i < n_vid && pairs < 5; ++i) {
         uint32_t v = vids[i];
         int best_idx = -1;
-        uint32_t best_dist = 0xFFFFFFFFU;
 
-        // Prefer forward PID within 4096 bytes
-        for (int j = 0; j < n_pid; ++j) {
-            if (pid_used[j]) continue;
-            uint32_t p = pids[j];
-            if (p > v && (p - v) < 4096) {
-                uint32_t dist = p - v;
-                if (dist < best_dist) {
-                    best_dist = dist;
+        // Pass A: Exact architectural delta match (within +- 16 bytes for padding)
+        if (i < 5) {
+            uint32_t target = v + s_arch_deltas[i];
+            for (int j = 0; j < n_pid; ++j) {
+                if (pid_used[j]) continue;
+                uint32_t p = pids[j];
+                uint32_t diff = (p > target) ? (p - target) : (target - p);
+                if (diff <= 16) {
                     best_idx = j;
+                    break;
                 }
             }
         }
 
-        // Fallback: Closest available overall
+        // Pass B Fallback: Prefer forward PID within 4096 bytes
         if (best_idx < 0) {
+            uint32_t best_dist = 0xFFFFFFFFU;
+            for (int j = 0; j < n_pid; ++j) {
+                if (pid_used[j]) continue;
+                uint32_t p = pids[j];
+                if (p > v && (p - v) < 4096) {
+                    uint32_t dist = p - v;
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        best_idx = j;
+                    }
+                }
+            }
+        }
+
+        // Pass C Fallback: Closest available overall
+        if (best_idx < 0) {
+            uint32_t best_dist = 0xFFFFFFFFU;
             for (int j = 0; j < n_pid; ++j) {
                 if (pid_used[j]) continue;
                 uint32_t p = pids[j];
@@ -416,7 +440,47 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
         req->is_dynamic = 0;
         req->pair_count = 5;
     }
-    // Path 2: Verified Static Table (FW 13.52)
+    // Path 2: Verified Static Table (FW 11.00)
+    else if (req->fw_version == 0x1100) {
+        if (*(volatile uint32_t*)(base + 0x5A4206) != 0x0000044FUL) {
+            req->detail_code = 0x1100;
+            return 22;
+        }
+        lock_off = 0;
+        unlock_off = 0;
+        const uint32_t static_1100[10] = {
+            0x5A4206, 0x5A4236, // Pair 0 (diff +0x30)
+            0x5A4A76, 0x5A4AA9, // Pair 1 (diff +0x33)
+            0x5A8838, 0x5A942A, // Pair 2 (diff +0xBF2)
+            0x5A8BED, 0x5A90CE, // Pair 3 (diff +0x4E1)
+            0x5A8C6B, 0x5A915E  // Pair 4 (diff +0x4F3)
+        };
+        for (int i = 0; i < 10; ++i) active_offsets[i] = static_1100[i];
+        total_offsets = 10;
+        req->is_dynamic = 0;
+        req->pair_count = 5;
+    }
+    // Path 3: Verified Static Table (FW 9.00)
+    else if (req->fw_version == 0x0900) {
+        if (*(volatile uint32_t*)(base + 0x5A5E56) != 0x0000044FUL) {
+            req->detail_code = 0x0900;
+            return 22;
+        }
+        lock_off = 0;
+        unlock_off = 0;
+        const uint32_t static_0900[10] = {
+            0x5A5E56, 0x5A5E86, // Pair 0 (diff +0x30)
+            0x5A66C6, 0x5A66F9, // Pair 1 (diff +0x33)
+            0x5AA498, 0x5AB08A, // Pair 2 (diff +0xBF2)
+            0x5AA84D, 0x5AAD2E, // Pair 3 (diff +0x4E1)
+            0x5AA8CB, 0x5AADBE  // Pair 4 (diff +0x4F3)
+        };
+        for (int i = 0; i < 10; ++i) active_offsets[i] = static_0900[i];
+        total_offsets = 10;
+        req->is_dynamic = 0;
+        req->pair_count = 5;
+    }
+    // Path 4: Verified Static Table (FW 13.52)
     else if (req->fw_version == 0x1352) {
         if (*(volatile uint32_t*)(base + 0x5B1616) != 0x0000044FUL) {
             req->detail_code = 0x1352;
