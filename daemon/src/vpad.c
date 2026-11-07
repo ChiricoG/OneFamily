@@ -704,14 +704,14 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
         return -1;
     }
 
-    // Power off physical DS4 before opening the first virtual pad so its link drops cleanly.
-    // In MERGE mode: always. In AUTO mode: only when 1 user is logged in (USB goes to Player 1).
-    // In SECONDARY mode: never (DS4 stays on Player 1, USB goes to Player 2).
+    // Power off physical DS4 before opening the first virtual pad only when explicitly in MERGE mode.
+    // In AUTO mode, the native "Who is using this controller?" user picker handles profile selection
+    // and automatically replaces Player 1's DS4 only if the user chooses Player 1's account.
     bool any_prior_active = false;
     for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
         if (g_slots[i].active) { any_prior_active = true; break; }
     }
-    if (!any_prior_active && g_daemon_config.mode != CONFIG_MODE_SECONDARY) {
+    if (!any_prior_active && g_daemon_config.mode == CONFIG_MODE_MERGE && source == VPAD_SOURCE_USB) {
         vpad_poweroff_physical_ds4();
     }
 
@@ -1029,9 +1029,15 @@ void vpad_poll_rumble(void) {
                 g_slots[i].last_rumble_send_us = now;
 
                 if (g_slots[i].source == VPAD_SOURCE_BT) {
-                    if (g_daemon_config.enable_rumble) {
-                        uint8_t color[3] = { cr, cg, cb };
-                        bt_driver_send_rumble_slot(i, lg, sm, color);
+                    if (g_daemon_config.enable_rumble || (lg == 0 && sm == 0) || color_changed) {
+                        uint8_t out_lg = g_daemon_config.enable_rumble ? lg : 0;
+                        uint8_t out_sm = g_daemon_config.enable_rumble ? sm : 0;
+                        uint8_t color[3] = {
+                            cr > 63 ? 255 : (uint8_t)(cr * 4),
+                            cg > 63 ? 255 : (uint8_t)(cg * 4),
+                            cb > 63 ? 255 : (uint8_t)(cb * 4)
+                        };
+                        bt_driver_send_rumble_slot(i, out_lg, out_sm, color);
                     }
                 } else if (g_slots[i].source == VPAD_SOURCE_USB) {
                     if (g_daemon_config.enable_rumble || (lg == 0 && sm == 0)) {

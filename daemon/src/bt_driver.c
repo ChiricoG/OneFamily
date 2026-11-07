@@ -47,7 +47,7 @@ typedef struct {
     float accel_bias[3];
 } DualSenseCalibration;
 
-#define BT_INPUT_TIMEOUT_US 10000000ULL
+#define BT_INPUT_TIMEOUT_US 30000000ULL
 #define BT_PAD_GRACE_US     600000000ULL
 
 typedef struct {
@@ -74,11 +74,19 @@ typedef struct {
     bool     calibration_requested;
     uint64_t last_calibration_attempt;
     OrbisPadData last_pad_data;
+    uint8_t  last_raw_report[80];
+    long     last_raw_len;
+    bool     initialized_output;
+    bool     capacity_patched;
+    uint32_t original_capacity;
+    uint32_t output_errors;
+    bool     output_unsupported;
 } BtDevice;
 
 static BtDevice s_devices[BT_MAX_DEVICES];
 
 static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, const uint8_t color[3]);
+static int apply_controller_capacity(BtDevice* dev, int restore);
 
 static void bt_device_init_entry(BtDevice *dev) {
     if (!dev) return;
@@ -110,6 +118,9 @@ static void bt_devices_reset(void) {
 
 static void bt_dev_release(BtDevice *dev) {
     if (!dev) return;
+    if (dev->capacity_patched && dev->original_capacity != 0) {
+        apply_controller_capacity(dev, 1);
+    }
     if (dev->vpad_slot >= 0) {
         vpad_slot_close(dev->vpad_slot);
     }
@@ -641,6 +652,100 @@ static int apply_kernel_allowlist_patch(int restore, uint32_t fw_version) {
 }
 
 // -------------------------------------------------------------
+// Output Report Capacity Patch (FW 12.50 Verified Offsets)
+// -------------------------------------------------------------
+// In Orbis OS bthid, the Thrustmaster 044F:1000 allowlist entry initializes the per-link
+// output report capacity (link + 0x1574) to 22 bytes. Sending a 78-byte 0x31 output report
+// via ioctl 0x80206232UL without raising *capacity to 78 truncates the packet and causes
+// the DualSense to drop the Bluetooth connection.
+
+struct CapacityRequest {
+    uint64_t address;
+    uint32_t restore;
+    uint32_t original;
+};
+
+struct CapacityArgs {
+    void* function;
+    struct CapacityRequest* request;
+};
+
+static int controller_capacity(void* thread, struct CapacityArgs* args) {
+    (void)thread;
+    uint32_t low, high;
+    __asm__ volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(0xC0000082));
+    uint64_t base = (((uint64_t)high << 32) | low) - 0x1C0;
+    if ((base >> 48) != 0xFFFF || (base & 0x3FFF) || !args || !args->request) return 22;
+
+    struct CapacityRequest* r = args->request;
+    if (!r->address || (r->address >> 48) || r->restore > 1) return 22;
+    if (*(volatile uint64_t*)(base + 0x5B6D00) != 0x56415741E5894855UL) return 22;
+
+    int (*lock)(void) = (void*)(base + 0x5A6B80);
+    int (*unlock)(int) = (void*)(base + 0x5A6C00);
+    int (*copyout)(const void*, void*, uint64_t) = (void*)(base + 0x36C6A0);
+
+    int rc = lock();
+    if (rc) return rc;
+
+    uint8_t* context = *(void**)(base + 0x2612550);
+    rc = 2;
+    if (context && ((uint64_t)context >> 48) == 0xFFFF) {
+        for (uint32_t offset = 0x42A8; offset < 0x185A0; offset += 0x1588) {
+            uint8_t* link = context + offset;
+            if (*(volatile uint64_t*)(link + 0x30) != r->address) continue;
+            uint8_t* device = *(void**)(link + 0x638);
+            if (!device || ((uint64_t)device >> 48) != 0xFFFF ||
+                *(volatile uint16_t*)(device + 0x28) != 0x054C ||
+                *(volatile uint16_t*)(device + 0x2A) != 0x0CE6) {
+                break;
+            }
+            uint32_t* capacity = (void*)(link + 0x1574);
+            if (*capacity != 22 && *capacity != 49 && *capacity != 78) {
+                rc = 22;
+                break;
+            }
+            if (r->restore) {
+                if (r->original != 22 && r->original != 49 && r->original != 78) {
+                    rc = 22;
+                    break;
+                }
+                *capacity = r->original;
+                rc = 0;
+            } else {
+                uint32_t previous = *capacity;
+                rc = copyout(&previous, &r->original, sizeof(previous));
+                if (!rc) *capacity = 78;
+            }
+            break;
+        }
+    }
+    unlock(0);
+    return rc;
+}
+
+static int apply_controller_capacity(BtDevice* dev, int restore) {
+    if (!dev || !dev->address || s_current_fw_bcd != 0x1250) return -1;
+    struct CapacityRequest req = {
+        .address = dev->address,
+        .restore = restore ? 1U : 0U,
+        .original = restore ? dev->original_capacity : 0U
+    };
+    long rc = daemon_syscall(SYS_KEXEC, (long)controller_capacity, (long)&req, 0);
+    if (rc == 0) {
+        if (!restore) {
+            if (req.original != 78 || dev->original_capacity == 0) {
+                dev->original_capacity = req.original;
+            }
+            dev->capacity_patched = true;
+        } else {
+            dev->capacity_patched = false;
+        }
+    }
+    return (int)rc;
+}
+
+// -------------------------------------------------------------
 // Helper Routines for IMU Calibration & Motion Processing
 // -------------------------------------------------------------
 
@@ -867,8 +972,6 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
         data = report + 2; // Data payload begins at offset 2
         if (!dev->extended_mode) {
             dev->extended_mode = true;
-            uint8_t init_color[3] = { 0, 112, 209 };
-            bt_send_rumble_dev(dev, 0, 0, init_color);
         }
     } else {
         dev->decode_drops++;
@@ -897,7 +1000,7 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             daemon_log(LOG_LEVEL_INFO, "controller_reconnected: DualSense BT 0x%llX (Slot %d, Player %d)",
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
             vpad_reactivate_slot(dev->vpad_slot);
-            dev->last_calibration_attempt = daemon_sys_time_us() - 500000ULL;
+            dev->last_calibration_attempt = daemon_sys_time_us();
         } else {
             // New device connection
             if (vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot) != 0 || dev->vpad_slot < 0) {
@@ -908,7 +1011,7 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             }
             dev->connected = true;
             dev->away_since = 0;
-            dev->last_calibration_attempt = daemon_sys_time_us() - 500000ULL;
+            dev->last_calibration_attempt = daemon_sys_time_us();
             int slot_num = vpad_get_assigned_slot_num(dev->vpad_slot);
             daemon_notify("OneFamily: DualSense Wireless (Player %d)", slot_num);
             daemon_log(LOG_LEVEL_INFO, "controller_connected: DualSense BT 0x%llX (Slot %d, Player %d)",
@@ -1117,7 +1220,7 @@ void bt_driver_poll_step(void) {
     uint64_t now_us = daemon_sys_time_us();
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->address && (!dev->calibration_requested || !dev->extended_mode) &&
+        if (dev->connected && dev->address && !dev->calibration_requested &&
             (now_us - dev->last_calibration_attempt > 1000000ULL)) {
             dev->last_calibration_attempt = now_us;
             struct { uint64_t address; uint8_t report_id; uint8_t reserved[7]; } feature = { dev->address, 5, {0} };
@@ -1130,12 +1233,15 @@ void bt_driver_poll_step(void) {
         }
     }
 
-    // Periodic Bluetooth output report keep-alive heartbeat (every 2.5 seconds)
-    // Only sent once extended 0x31 report mode is active to avoid stalling initial 0x01 handshake
+    // Periodic Bluetooth output report keep-alive heartbeat (every 2.5s, or immediately on initial extended_mode)
+    // Strictly gated on firmwares where controller_capacity (78-byte output report size) is supported.
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->extended_mode && dev->address && (now_us - dev->last_output_time >= 2500000ULL)) {
-            bt_send_rumble_dev(dev, 0, 0, dev->last_color);
+        if (dev->connected && dev->extended_mode && dev->address && !dev->output_unsupported && s_current_fw_bcd == 0x1250) {
+            uint64_t interval = dev->initialized_output ? 2500000ULL : 20000ULL;
+            if (now_us - dev->last_output_time >= interval) {
+                bt_send_rumble_dev(dev, 0, 0, dev->last_color);
+            }
         }
     }
 
@@ -1179,7 +1285,46 @@ void bt_driver_poll_step(void) {
     } event;
 
     long ready = daemon_sys_call6(SYS_KEVENT, s_bt_queue, 0, 0, (long)&event, 1, (long)&timeout);
-    if (ready <= 0) return;
+    if (ready <= 0) {
+        // Fallback poll: if bthid missed an edge-triggered kevent notification (e.g. after Feature Report 0x05),
+        // directly check ioctl 0x80206233UL for known devices when quiet for >= 16ms.
+        for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+            BtDevice *dev = &s_devices[i];
+            if (!dev->address || (now_us - dev->last_input_time < 16000ULL)) continue;
+
+            uint8_t report[80];
+            memset(report, 0, sizeof(report));
+            struct {
+                uint64_t address;
+                void*    buffer;
+                uint64_t capacity;
+                uint64_t reserved;
+            } req = { dev->address, report, sizeof(report), 0 };
+
+            long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
+            if (result > 0 && result <= (long)sizeof(report)) {
+                if (result != dev->last_raw_len || memcmp(report, dev->last_raw_report, (size_t)result) != 0) {
+                    memcpy(dev->last_raw_report, report, (size_t)result);
+                    dev->last_raw_len = result;
+                    if (result == 43 && report[0] == 41 && report[2] == 5) {
+                        int rc = dualsense_calibration_bluetooth(report + 2, 41, &dev->calibration);
+                        if (rc == 0) {
+                            dev->calibration_valid = true;
+                            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): factory calibration loaded",
+                                       (unsigned long long)dev->address);
+                        } else {
+                            daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): calibration decode failed (rc=%d)",
+                                       (unsigned long long)dev->address, rc);
+                        }
+                    } else if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
+                        dev->reports_seen++;
+                        decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
+                    }
+                }
+            }
+        }
+        return;
+    }
 
     uint8_t buffer[256];
     long count = daemon_sys_read(s_bt_fd, buffer, sizeof(buffer));
@@ -1198,10 +1343,14 @@ void bt_driver_poll_step(void) {
                 if (existing) {
                     existing->calibration_requested = false;
                     existing->extended_mode = false;
+                    existing->initialized_output = false;
+                    existing->capacity_patched = false;
+                    existing->output_errors = 0;
+                    existing->output_unsupported = false;
                 }
             }
 
-            for (int drain = 0; drain < 16; ++drain) {
+            for (int drain = 0; drain < 8; ++drain) {
                 uint8_t report[80];
                 memset(report, 0, sizeof(report));
                 struct {
@@ -1212,24 +1361,31 @@ void bt_driver_poll_step(void) {
                 } req = { address, report, sizeof(report), 0 };
 
                 long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
-                if (result <= 0) break;
+                if (result <= 0 || result > (long)sizeof(report)) break;
 
                 BtDevice* dev = bt_dev_acquire(address);
-                if (dev) {
-                    if (result == 43 && report[0] == 41 && report[2] == 5) {
-                        int rc = dualsense_calibration_bluetooth(report + 2, 41, &dev->calibration);
-                        if (rc == 0) {
-                            dev->calibration_valid = true;
-                            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): factory calibration loaded",
-                                       (unsigned long long)address);
-                        } else {
-                            daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): calibration decode failed (rc=%d)",
-                                       (unsigned long long)address, rc);
-                        }
-                    } else if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
-                        dev->reports_seen++;
-                        decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
+                if (!dev) break;
+
+                if (drain > 0 && result == dev->last_raw_len &&
+                    memcmp(report, dev->last_raw_report, (size_t)result) == 0) {
+                    break;
+                }
+                memcpy(dev->last_raw_report, report, (size_t)result);
+                dev->last_raw_len = result;
+
+                if (result == 43 && report[0] == 41 && report[2] == 5) {
+                    int rc = dualsense_calibration_bluetooth(report + 2, 41, &dev->calibration);
+                    if (rc == 0) {
+                        dev->calibration_valid = true;
+                        daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): factory calibration loaded",
+                                   (unsigned long long)address);
+                    } else {
+                        daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): calibration decode failed (rc=%d)",
+                                   (unsigned long long)address, rc);
                     }
+                } else if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
+                    dev->reports_seen++;
+                    decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
                 }
             }
         }
@@ -1343,8 +1499,17 @@ int bt_driver_init(void) {
     }
 
     // 7. Register DualSense devices with Bluetooth driver (ioctl 0x8004622B)
-    long reg_rc = bt_register_pair(SONY_VID, SONY_DUALSENSE_PID, "dualsense");
-    if (reg_rc != 0) {
+    // Register up to BT_MAX_DEVICES (4) routing slots for 054C:0CE6 (matches patch_allowlist 044F:1000 -> 054C:0CE6)
+    s_bt_reg_count = 0;
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        long reg_rc = bt_register_pair(SONY_VID, SONY_DUALSENSE_PID, "dualsense");
+        if (reg_rc == 0) {
+            s_bt_reg_count++;
+        } else {
+            break;
+        }
+    }
+    if (s_bt_reg_count == 0) {
         apply_kernel_allowlist_patch(1 /* restore */, s_current_fw_bcd);
         daemon_sys_close(s_bt_queue);
         s_bt_queue = -1;
@@ -1355,20 +1520,12 @@ int bt_driver_init(void) {
     }
 
     s_bt_registered = true;
-    s_bt_reg_count = 1;
-
-    // Register DualSense Edge (0x0DF2) with Bluetooth driver
-    // /dev/bt kernel table stores allowed (VID, PID) device filters with limited capacity.
-    // Registering 1 entry per PID leaves slots available for both standard DualSense and DualSense Edge!
     s_bt_edge_reg_count = 0;
-    if (bt_register_pair(SONY_VID, SONY_DUALSENSE_EDGE_PID, "dualsense_edge") == 0) {
-        s_bt_edge_reg_count = 1;
-    }
 
     s_bt_running = true;
     s_bt_supported = true;
-    daemon_log(LOG_LEVEL_INFO, "DualSense Bluetooth Subsystem initialized (FW 0x%04X, reg_count=%d, edge_reg=%d)",
-               s_current_fw_bcd, s_bt_reg_count, s_bt_edge_reg_count);
+    daemon_log(LOG_LEVEL_INFO, "DualSense Bluetooth Subsystem initialized (FW 0x%04X, reg_count=%d)",
+               s_current_fw_bcd, s_bt_reg_count);
     return 0;
 }
 
@@ -1430,6 +1587,17 @@ int bt_driver_connected_count(void) {
 
 static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, const uint8_t color[3]) {
     if (!dev || !dev->connected || !dev->extended_mode || s_bt_fd < 0 || !dev->address) return;
+    if (dev->output_unsupported || s_current_fw_bcd != 0x1250) return;
+
+    // Ensure kernel bthid output report capacity is patched to 78 bytes before sending Report 0x31
+    if (apply_controller_capacity(dev, 0) != 0) {
+        if (++dev->output_errors == 1) {
+            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): output capacity patch unavailable on FW 0x%04X, skipping BT output reports",
+                       (unsigned long long)dev->address, s_current_fw_bcd);
+        }
+        dev->output_unsupported = true;
+        return;
+    }
 
     dev->last_output_time = daemon_sys_time_us();
     if (color && (color[0] || color[1] || color[2])) {
@@ -1442,108 +1610,113 @@ static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, cons
     memset(out, 0, sizeof(out));
 
     out[0] = 0x31;                  // Extended BT Output Report ID
+    out[1] = (dev->rumble_seq & 0x0F) << 4;
     dev->rumble_seq = (dev->rumble_seq + 1) & 0x0F;
-    out[1] = dev->rumble_seq << 4;   // Sequence tag
     out[2] = 0x10;
-    out[3] = 0x03 | 0x0C;           // Enable motors (0x03) + Enable trigger effects L2/R2 (0x0C)
-    out[4] = 0x14;                  // Player Indicator Control Enable (0x10) | Lightbar Control Enable (0x04)
-    out[5] = small;                 // Weak motor
-    out[6] = large;                 // Strong motor
 
-    // 1. Adaptive Trigger Effects
-    int trig = g_daemon_config.dualsense_trigger_mode;
-    if (trig == 1) {
-        // Hair Trigger (rigid snap click at ~10% travel)
-        out[13] = 0x02; out[14] = 0x01; out[15] = 0x02; out[16] = 0x08;
-        out[24] = 0x02; out[25] = 0x01; out[26] = 0x02; out[27] = 0x08;
-    } else if (trig == 2) {
-        // Continuous Resistance
-        out[13] = 0x01; out[14] = 0x00; out[15] = 0x06;
-        out[24] = 0x01; out[25] = 0x00; out[26] = 0x06;
-    } else if (trig == 3) {
-        // Vibration / Pulsation
-        out[13] = 0x06; out[14] = 0x01; out[15] = 0x04; out[16] = 0x20;
-        out[24] = 0x06; out[25] = 0x01; out[26] = 0x04; out[27] = 0x20;
+    if (!dev->initialized_output) {
+        // First output report: exit DualSense Bluetooth pairing lightbar fade animation (Diram1x reset_leds)
+        out[41] = 0x02;
+        out[44] = 0x02;
     } else {
-        // Standard / Off
-        out[13] = 0x00;
-        out[24] = 0x00;
-    }
+        out[3] = 0x03 | 0x0C;       // Enable motors (0x03) + Enable trigger effects L2/R2 (0x0C)
+        out[4] = 0x14;              // Player Indicator Control Enable (0x10) | Lightbar Control Enable (0x04)
+        out[5] = small;             // Weak motor
+        out[6] = large;             // Strong motor
 
-    // 2. Control Flags
-    out[41] = 0x02; // Lightbar Setup Control Enable (enables brightness & setup)
-
-    // 3. Lightbar Setup & LED Brightness
-    out[44] = 0x00; // Standard lightbar setup
-    int br = g_daemon_config.dualsense_brightness;
-    if (br < 0 || br > 2) br = 0;
-    out[45] = (uint8_t)br; // 0=High, 1=Medium, 2=Low
-
-    // 4. Player Indicator LEDs (out[46])
-    int p_led = g_daemon_config.dualsense_player_leds;
-    if (p_led == 1) {
-        out[46] = 0x1F; // All 5 LEDs On
-    } else if (p_led == 2) {
-        out[46] = 0x00; // Off
-    } else {
-        // Dynamic Player Slot (1..4)
-        int slot = vpad_get_assigned_slot_num(dev->vpad_slot);
-        if (slot == 2) {
-            out[46] = 0x0A; // Player 2: 2 LEDs
-        } else if (slot == 3) {
-            out[46] = 0x15; // Player 3: 3 LEDs
-        } else if (slot == 4) {
-            out[46] = 0x1B; // Player 4: 4 LEDs
+        // 1. Adaptive Trigger Effects
+        int trig = g_daemon_config.dualsense_trigger_mode;
+        if (trig == 1) {
+            // Hair Trigger (rigid snap click at ~10% travel)
+            out[13] = 0x02; out[14] = 0x01; out[15] = 0x02; out[16] = 0x08;
+            out[24] = 0x02; out[25] = 0x01; out[26] = 0x02; out[27] = 0x08;
+        } else if (trig == 2) {
+            // Continuous Resistance
+            out[13] = 0x01; out[14] = 0x00; out[15] = 0x06;
+            out[24] = 0x01; out[25] = 0x00; out[26] = 0x06;
+        } else if (trig == 3) {
+            // Vibration / Pulsation
+            out[13] = 0x06; out[14] = 0x01; out[15] = 0x04; out[16] = 0x20;
+            out[24] = 0x06; out[25] = 0x01; out[26] = 0x04; out[27] = 0x20;
         } else {
-            out[46] = 0x04; // Player 1: Center LED
+            // Standard / Off
+            out[13] = 0x00;
+            out[24] = 0x00;
         }
-    }
 
-    // 5. Lightbar RGB (out[47..49])
-    int lb_mode = g_daemon_config.dualsense_lightbar_mode;
-    if (lb_mode == 1) {
-        // Static Color
-        static const uint8_t static_colors[6][3] = {
-            { 0, 112, 209 },  // 0: PlayStation Blue
-            { 255, 0, 0 },    // 1: Red
-            { 0, 255, 0 },    // 2: Green
-            { 128, 0, 255 },  // 3: Purple
-            { 0, 255, 255 },  // 4: Cyan
-            { 255, 255, 255 } // 5: White
-        };
-        int c_idx = g_daemon_config.dualsense_lightbar_color;
-        if (c_idx < 0 || c_idx > 5) c_idx = 0;
-        out[47] = static_colors[c_idx][0];
-        out[48] = static_colors[c_idx][1];
-        out[49] = static_colors[c_idx][2];
-    } else if (lb_mode == 2) {
-        // Battery Indicator
-        if (dev->battery_pct > 60) {
-            out[47] = 0; out[48] = 255; out[49] = 0; // Green
-        } else if (dev->battery_pct >= 20) {
-            out[47] = 255; out[48] = 200; out[49] = 0; // Yellow
-        } else {
-            out[47] = 255; out[48] = 0; out[49] = 0; // Red
+        // 2. LED Brightness
+        int br = g_daemon_config.dualsense_brightness;
+        if (br > 0 && br <= 2) {
+            out[41] = 0x01;         // Player indicator brightness control enable
+            out[45] = (uint8_t)br;  // 0=High, 1=Medium, 2=Low
         }
-    } else if (lb_mode == 3) {
-        // Off
-        out[47] = 0;
-        out[48] = 0;
-        out[49] = 0;
-    } else {
-        // Mode 0: Game Sync
-        if (color && (color[0] || color[1] || color[2])) {
-            out[47] = color[0];
-            out[48] = color[1];
-            out[49] = color[2];
-        } else if (dev->last_color[0] || dev->last_color[1] || dev->last_color[2]) {
-            out[47] = dev->last_color[0];
-            out[48] = dev->last_color[1];
-            out[49] = dev->last_color[2];
+
+        // 3. Player Indicator LEDs (out[46])
+        int p_led = g_daemon_config.dualsense_player_leds;
+        if (p_led == 1) {
+            out[46] = 0x1F; // All 5 LEDs On
+        } else if (p_led == 2) {
+            out[46] = 0x00; // Off
         } else {
+            // Dynamic Player Slot (1..4)
+            int slot = vpad_get_assigned_slot_num(dev->vpad_slot);
+            if (slot == 2) {
+                out[46] = 0x0A; // Player 2: 2 LEDs
+            } else if (slot == 3) {
+                out[46] = 0x15; // Player 3: 3 LEDs
+            } else if (slot == 4) {
+                out[46] = 0x1B; // Player 4: 4 LEDs
+            } else {
+                out[46] = 0x04; // Player 1: Center LED
+            }
+        }
+
+        // 4. Lightbar RGB (out[47..49])
+        int lb_mode = g_daemon_config.dualsense_lightbar_mode;
+        if (lb_mode == 1) {
+            // Static Color
+            static const uint8_t static_colors[6][3] = {
+                { 0, 112, 209 },  // 0: PlayStation Blue
+                { 255, 0, 0 },    // 1: Red
+                { 0, 255, 0 },    // 2: Green
+                { 128, 0, 255 },  // 3: Purple
+                { 0, 255, 255 },  // 4: Cyan
+                { 255, 255, 255 } // 5: White
+            };
+            int c_idx = g_daemon_config.dualsense_lightbar_color;
+            if (c_idx < 0 || c_idx > 5) c_idx = 0;
+            out[47] = static_colors[c_idx][0];
+            out[48] = static_colors[c_idx][1];
+            out[49] = static_colors[c_idx][2];
+        } else if (lb_mode == 2) {
+            // Battery Indicator
+            if (dev->battery_pct > 60) {
+                out[47] = 0; out[48] = 255; out[49] = 0; // Green
+            } else if (dev->battery_pct >= 20) {
+                out[47] = 255; out[48] = 200; out[49] = 0; // Yellow
+            } else {
+                out[47] = 255; out[48] = 0; out[49] = 0; // Red
+            }
+        } else if (lb_mode == 3) {
+            // Off
             out[47] = 0;
-            out[48] = 112;
-            out[49] = 209; // Default PlayStation Blue
+            out[48] = 0;
+            out[49] = 0;
+        } else {
+            // Mode 0: Game Sync
+            if (color && (color[0] || color[1] || color[2])) {
+                out[47] = color[0];
+                out[48] = color[1];
+                out[49] = color[2];
+            } else if (dev->last_color[0] || dev->last_color[1] || dev->last_color[2]) {
+                out[47] = dev->last_color[0];
+                out[48] = dev->last_color[1];
+                out[49] = dev->last_color[2];
+            } else {
+                out[47] = 0;
+                out[48] = 112;
+                out[49] = 209; // Default PlayStation Blue
+            }
         }
     }
 
@@ -1561,7 +1734,17 @@ static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, cons
         uint64_t report_id;
     } req = { dev->address, out, 78, 0x31 };
 
-    daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206232UL, (long)&req);
+    long rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206232UL, (long)&req);
+    if (rc == 0) {
+        dev->initialized_output = true;
+        dev->output_errors = 0;
+    } else if ((uint32_t)rc != 0x802F3707U) {
+        if (++dev->output_errors >= 3) {
+            dev->output_unsupported = true;
+            daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): disabling output reports after error 0x%lX",
+                       (unsigned long long)dev->address, rc);
+        }
+    }
 }
 
 void bt_driver_send_rumble_slot(int vpad_slot, uint8_t large, uint8_t small, const uint8_t color[3]) {
