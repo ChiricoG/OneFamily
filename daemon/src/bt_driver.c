@@ -1245,13 +1245,13 @@ void bt_driver_poll_step(void) {
         }
     }
 
-    // Continuous Virtual DS4 keep-alive feed while connected (matches Diram1x native.c & USB driver):
-    // When DualSense is in 0x01 mode or momentarily idle without new BT interrupt packets,
+    // Continuous Virtual DS4 keep-alive feed while connected or in grace period (matches Diram1x native.c & USB driver):
+    // When DualSense is in 0x01 mode, momentarily idle, or holding its slot during away_since grace period,
     // keep feeding vpad_send_data_slot (rate-limited to 60 Hz when neutral) so SceMbus never drops the port.
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->vpad_slot >= 0) {
-            if (now_us - dev->last_input_time > 500000ULL) {
+        if (dev->vpad_slot >= 0 && (dev->connected || dev->away_since != 0)) {
+            if (!dev->connected || (now_us - dev->last_input_time > 500000ULL)) {
                 dev->last_pad_data.buttons = 0;
                 dev->last_pad_data.leftStick.x = 128;
                 dev->last_pad_data.leftStick.y = 128;
@@ -1499,15 +1499,10 @@ int bt_driver_init(void) {
     }
 
     // 7. Register DualSense devices with Bluetooth driver (ioctl 0x8004622B)
-    // Register up to BT_MAX_DEVICES (4) routing slots for 054C:0CE6 (matches patch_allowlist 044F:1000 -> 054C:0CE6)
+    // Register the (VID, PID) filter on s_bt_fd once (multiplexing up to 4 controllers by MAC address)
     s_bt_reg_count = 0;
-    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
-        long reg_rc = bt_register_pair(SONY_VID, SONY_DUALSENSE_PID, "dualsense");
-        if (reg_rc == 0) {
-            s_bt_reg_count++;
-        } else {
-            break;
-        }
+    if (bt_register_pair(SONY_VID, SONY_DUALSENSE_PID, "dualsense") == 0) {
+        s_bt_reg_count = 1;
     }
     if (s_bt_reg_count == 0) {
         apply_kernel_allowlist_patch(1 /* restore */, s_current_fw_bcd);

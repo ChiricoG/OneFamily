@@ -556,8 +556,6 @@ void vpad_reactivate_slot(int slot) {
         daemon_log(LOG_LEVEL_INFO, "vpad_reactivate_slot(%d): scePadSetConnection(0x%X, 1) = 0x%08X",
                    slot, g_slots[slot].handle, r);
     }
-    daemon_sys_usleep(50000);
-    vpad_pulse_ps_button_slot(slot);
 }
 
 int vpad_get_assigned_slot(void) {
@@ -597,7 +595,12 @@ void vpad_check_user_rebind(ConfigMode mode) {
                     if (p_scePadSetConnection) {
                         p_scePadSetConnection(g_slots[i].handle, 1);
                     }
-                    if (mode != CONFIG_MODE_AUTO) {
+                    if (mode == CONFIG_MODE_AUTO) {
+                        if (num_logged_in == 0) {
+                            daemon_sys_usleep(100000);
+                            vpad_pulse_ps_button_slot(i);
+                        }
+                    } else {
                         vpad_bind_user_slot(i, mode, NULL, NULL, 0);
                     }
                 }
