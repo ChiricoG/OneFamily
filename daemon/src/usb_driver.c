@@ -185,8 +185,174 @@ static uint64_t s_failed_cooldown_until_us = 0;
 static uint64_t s_usb_connect_time_us = 0;
 static bool     s_usb_is_reenum_ds4 = false; // true when DS4 third-party claimed as re-enum step
 
+// Track multi-mode Switch Pro / DS4 clones cycling on the USB bus (e.g. GXtrust Muta 542)
+static uint64_t s_last_switch_clone_seen_us = 0;
+static uint64_t s_last_unclaimed_ds4_disconnect_us = 0;
+static bool     s_force_claim_cycling_ds4 = false;
+static uint16_t s_cached_sony_vid = 0;
+static uint16_t s_cached_sony_pid = 0;
+static int      s_cached_sony_result = -1;
+static int      s_ds4_ep_out_stalls = 0;
+
+// Blacklist of non-gamepad HID devices (e.g. USB headsets/DACs/mice) rejected by generic_hid_setup
+// so scan_and_open does not re-open and detach their kernel driver every 1.5s.
+#define MAX_REJECTED_HID_DEVICES 16
+typedef struct {
+    uint16_t vid;
+    uint16_t pid;
+} RejectedHidEntry;
+static RejectedHidEntry s_rejected_hid[MAX_REJECTED_HID_DEVICES];
+static int s_rejected_hid_count = 0;
+
+static bool is_rejected_hid_device(uint16_t vid, uint16_t pid) {
+    for (int i = 0; i < s_rejected_hid_count; i++) {
+        if (s_rejected_hid[i].vid == vid && s_rejected_hid[i].pid == pid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void add_rejected_hid_device(uint16_t vid, uint16_t pid) {
+    if (is_rejected_hid_device(vid, pid)) return;
+    if (s_rejected_hid_count < MAX_REJECTED_HID_DEVICES) {
+        s_rejected_hid[s_rejected_hid_count].vid = vid;
+        s_rejected_hid[s_rejected_hid_count].pid = pid;
+        s_rejected_hid_count++;
+    }
+}
+
 static int      s_usb_vpad_slot = -1;
 static bool     s_share_combo_active = false;
+
+// Universal per-controller button remapping (Issue #59: supports all native and generic controllers via VVVV_PPPP.ini)
+#define REMAP_BTN_COUNT 17
+typedef struct {
+    const char* name;
+    uint32_t    bit;
+} RemapButtonDef;
+
+static const RemapButtonDef s_remap_btns[REMAP_BTN_COUNT] = {
+    { "cross",    DS4_BUTTON_CROSS },
+    { "circle",   DS4_BUTTON_CIRCLE },
+    { "square",   DS4_BUTTON_SQUARE },
+    { "triangle", DS4_BUTTON_TRIANGLE },
+    { "l1",       DS4_BUTTON_L1 },
+    { "r1",       DS4_BUTTON_R1 },
+    { "l2",       DS4_BUTTON_L2 },
+    { "r2",       DS4_BUTTON_R2 },
+    { "l3",       DS4_BUTTON_L3 },
+    { "r3",       DS4_BUTTON_R3 },
+    { "share",    DS4_BUTTON_SHARE },
+    { "create",   DS4_BUTTON_SHARE },
+    { "options",  DS4_BUTTON_OPTIONS },
+    { "touchpad", DS4_BUTTON_TOUCHPAD },
+    { "ps",       DS4_BUTTON_PS },
+    { "up",       DS4_BUTTON_DPAD_UP },
+    { "down",     DS4_BUTTON_DPAD_DOWN }
+};
+
+typedef struct {
+    uint32_t src_bit;
+    uint32_t dst_bit;
+} ButtonRemapRule;
+
+#define MAX_REMAP_RULES 16
+static ButtonRemapRule s_remap_rules[MAX_REMAP_RULES];
+static int s_remap_rule_count = 0;
+
+static bool remap_str_eq(const char* a, const char* b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        char ca = (*a >= 'A' && *a <= 'Z') ? (*a + 32) : *a;
+        char cb = (*b >= 'A' && *b <= 'Z') ? (*b + 32) : *b;
+        if (ca != cb) return false;
+        a++; b++;
+    }
+    return (*a == '\0' && *b == '\0');
+}
+
+static bool parse_remap_btn_name(const char* name, uint32_t* out_bit) {
+    if (!name || !out_bit) return false;
+    if (remap_str_eq(name, "none") || remap_str_eq(name, "disabled")) {
+        *out_bit = 0;
+        return true;
+    }
+    if (remap_str_eq(name, "left"))  { *out_bit = DS4_BUTTON_DPAD_LEFT;  return true; }
+    if (remap_str_eq(name, "right")) { *out_bit = DS4_BUTTON_DPAD_RIGHT; return true; }
+    for (int i = 0; i < REMAP_BTN_COUNT; i++) {
+        if (remap_str_eq(name, s_remap_btns[i].name)) {
+            *out_bit = s_remap_btns[i].bit;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void load_controller_remap_ini(uint16_t vid, uint16_t pid) {
+    s_remap_rule_count = 0;
+    if (vid == 0 && pid == 0) return;
+
+    char path[128];
+    snprintf(path, sizeof(path), "/data/onefamily/controllers/%04X_%04X.ini", vid, pid);
+    int fd = daemon_sys_open(path, 0 /* O_RDONLY */, 0);
+    if (fd < 0) {
+        snprintf(path, sizeof(path), "/user/data/onefamily/controllers/%04X_%04X.ini", vid, pid);
+        fd = daemon_sys_open(path, 0 /* O_RDONLY */, 0);
+    }
+    if (fd < 0) return;
+
+    char buf[2048];
+    memset(buf, 0, sizeof(buf));
+    int n = daemon_sys_read(fd, buf, sizeof(buf) - 1);
+    daemon_sys_close(fd);
+    if (n <= 0) return;
+
+    char* line = buf;
+    while (line && *line) {
+        char* next = strchr(line, '\n');
+        if (next) *next++ = '\0';
+
+        while (*line == ' ' || *line == '\t' || *line == '\r') line++;
+        if (*line == '\0' || *line == '#' || *line == ';' || *line == '[') {
+            line = next;
+            continue;
+        }
+
+        char* eq = strchr(line, '=');
+        if (eq && s_remap_rule_count < MAX_REMAP_RULES) {
+            *eq = '\0';
+            char* key = line;
+            char* val = eq + 1;
+            char* kend = key + strlen(key) - 1;
+            while (kend > key && (*kend == ' ' || *kend == '\t' || *kend == '\r')) *kend-- = '\0';
+            while (*val == ' ' || *val == '\t' || *val == '\r') val++;
+            char* vend = val + strlen(val) - 1;
+            while (vend > val && (*vend == ' ' || *vend == '\t' || *vend == '\r')) *vend-- = '\0';
+
+            if ((strncmp(key, "remap_", 6) == 0 || strncmp(key, "REMAP_", 6) == 0)) {
+                key += 6;
+            }
+            uint32_t src_bit = 0, dst_bit = 0;
+            if (parse_remap_btn_name(key, &src_bit) && src_bit != 0 && parse_remap_btn_name(val, &dst_bit)) {
+                s_remap_rules[s_remap_rule_count].src_bit = src_bit;
+                s_remap_rules[s_remap_rule_count].dst_bit = dst_bit;
+                s_remap_rule_count++;
+            }
+        }
+        line = next;
+    }
+
+    if (s_remap_rule_count > 0) {
+        daemon_log(LOG_LEVEL_INFO, "Loaded %d custom button remap rule(s) from %s", s_remap_rule_count, path);
+    }
+}
+
+void usb_driver_reload_remap(void) {
+    if (g_usb_state.connected) {
+        load_controller_remap_ini(g_usb_state.vid, g_usb_state.pid);
+    }
+}
 
 static void close_controller(void) {
     bool had_vpad = (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active());
@@ -238,8 +404,10 @@ static void close_controller(void) {
     s_consecutive_timeouts = 0;
     s_x360_ep_out_stalls = 0;
     s_xone_ep_out_stalls = 0;
+    s_ds4_ep_out_stalls = 0;
     s_x360_wireless_present = -1;
     s_share_combo_active = false;
+    s_remap_rule_count = 0;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
     s_last_ds4.leftStick.x = 128;
     s_last_ds4.leftStick.y = 128;
@@ -404,24 +572,30 @@ static bool is_official_nintendo_switch_pro(libusb_device_handle* h, const struc
     if (!h || !p_sceUsbdControlTransfer || !desc) return false;
     if (desc->idVendor != SWITCH_PRO_VID || desc->idProduct != SWITCH_PRO_PID) return false;
 
+    int any_string_read = 0;
+
     // 1. Query Manufacturer String Descriptor (index desc->iManufacturer)
     if (desc->iManufacturer != 0) {
         uint8_t str_buf[64];
         memset(str_buf, 0, sizeof(str_buf));
-        int ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iManufacturer, 0x0409, str_buf, sizeof(str_buf), 100);
+        int ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iManufacturer, 0x0409, str_buf, sizeof(str_buf), 150);
         if (ret < 0) {
-            ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iManufacturer, 0x0000, str_buf, sizeof(str_buf), 100);
+            daemon_sys_usleep(5000);
+            ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iManufacturer, 0x0000, str_buf, sizeof(str_buf), 150);
         }
 
-        if (ret >= 18 && str_buf[0] >= 18 && str_buf[1] == 0x03) {
-            // Check for "Nintendo" in UTF-16LE: 'N', 0, 'i', 0, 'n', 0, 't', 0, 'e', 0, 'n', 0, 'd', 0, 'o', 0
-            static const uint8_t nintendo_sig[16] = {
-                'N', 0x00, 'i', 0x00, 'n', 0x00, 't', 0x00,
-                'e', 0x00, 'n', 0x00, 'd', 0x00, 'o', 0x00
-            };
-            if (memcmp(&str_buf[2], nintendo_sig, sizeof(nintendo_sig)) == 0) {
-                daemon_log(LOG_LEVEL_INFO, "Device verified as Official Nintendo Switch Pro Controller via USB manufacturer descriptor");
-                return true;
+        if (ret >= 4 && str_buf[1] == 0x03) {
+            any_string_read = 1;
+            if (ret >= 18 && str_buf[0] >= 18) {
+                // Check for "Nintendo" in UTF-16LE: 'N', 0, 'i', 0, 'n', 0, 't', 0, 'e', 0, 'n', 0, 'd', 0, 'o', 0
+                static const uint8_t nintendo_sig[16] = {
+                    'N', 0x00, 'i', 0x00, 'n', 0x00, 't', 0x00,
+                    'e', 0x00, 'n', 0x00, 'd', 0x00, 'o', 0x00
+                };
+                if (memcmp(&str_buf[2], nintendo_sig, sizeof(nintendo_sig)) == 0) {
+                    daemon_log(LOG_LEVEL_INFO, "Device verified as Official Nintendo Switch Pro Controller via USB manufacturer descriptor");
+                    return true;
+                }
             }
         }
     }
@@ -430,26 +604,38 @@ static bool is_official_nintendo_switch_pro(libusb_device_handle* h, const struc
     if (desc->iProduct != 0) {
         uint8_t str_buf[64];
         memset(str_buf, 0, sizeof(str_buf));
-        int ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iProduct, 0x0409, str_buf, sizeof(str_buf), 100);
+        int ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iProduct, 0x0409, str_buf, sizeof(str_buf), 150);
         if (ret < 0) {
-            ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iProduct, 0x0000, str_buf, sizeof(str_buf), 100);
+            daemon_sys_usleep(5000);
+            ret = p_sceUsbdControlTransfer(h, 0x80, 0x06, (0x03 << 8) | desc->iProduct, 0x0000, str_buf, sizeof(str_buf), 150);
         }
 
-        if (ret >= 30 && str_buf[0] >= 30 && str_buf[1] == 0x03) {
-            // Check for "Pro Controller" in UTF-16LE
-            static const uint8_t pro_ctrl_sig[28] = {
-                'P', 0x00, 'r', 0x00, 'o', 0x00, ' ', 0x00,
-                'C', 0x00, 'o', 0x00, 'n', 0x00, 't', 0x00,
-                'r', 0x00, 'o', 0x00, 'l', 0x00, 'l', 0x00,
-                'e', 0x00, 'r', 0x00
-            };
-            if (memcmp(&str_buf[2], pro_ctrl_sig, sizeof(pro_ctrl_sig)) == 0) {
-                daemon_log(LOG_LEVEL_INFO, "Device verified as Official Nintendo Pro Controller via USB product descriptor");
-                return true;
+        if (ret >= 4 && str_buf[1] == 0x03) {
+            any_string_read = 1;
+            if (ret >= 30 && str_buf[0] >= 30) {
+                // Check for "Pro Controller" in UTF-16LE
+                static const uint8_t pro_ctrl_sig[28] = {
+                    'P', 0x00, 'r', 0x00, 'o', 0x00, ' ', 0x00,
+                    'C', 0x00, 'o', 0x00, 'n', 0x00, 't', 0x00,
+                    'r', 0x00, 'o', 0x00, 'l', 0x00, 'l', 0x00,
+                    'e', 0x00, 'r', 0x00
+                };
+                if (memcmp(&str_buf[2], pro_ctrl_sig, sizeof(pro_ctrl_sig)) == 0) {
+                    daemon_log(LOG_LEVEL_INFO, "Device verified as Official Nintendo Pro Controller via USB product descriptor");
+                    return true;
+                }
             }
         }
     }
 
+    // If the device is 0x057E:0x2009 with non-zero string indices, but EP0 string reads timed out/failed,
+    // treat as Official Nintendo Switch Pro so the 0x80 0x02 / 0x80 0x04 wake-up sequence is still attempted.
+    if (!any_string_read && desc->iManufacturer != 0 && desc->iProduct != 0) {
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro (0x057E:0x2009) string descriptor read failed — attempting official 0x80 handshake");
+        return true;
+    }
+
+    s_last_switch_clone_seen_us = daemon_sys_time_us();
     daemon_log(LOG_LEVEL_INFO, "Device is a Switch Pro Clone (non-Nintendo descriptor) - passive mode enforced");
     return false;
 }
@@ -459,13 +645,12 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
 
     // 1. Distinguish official Nintendo from third-party clones:
     // Third-party Switch Pro clones (like Trust GXT Muta, Nyko, PowerA, Shanwan)
-    // start streaming standard HID input reports immediately upon connection without needing any 0x80 handshake.
-    // Transmitting 0x80 handshake packets on EP_OUT crashes clone microcontrollers (0x80240004 / disconnect loop).
+    // start streaming standard HID input reports immediately upon connection without needing any 0x80 handshake
+    // or 0x01 subcommands. Transmitting 0x80 or 0x01 packets on EP_OUT stalls clone microcontrollers (0x802400FF / 0x80240004).
     // ONLY official Nintendo Switch Pro controllers (iManufacturer = "Nintendo Co., Ltd.")
-    // require the 0x80 handshake to lock the controller into USB mode (0x80 0x04) and prevent fallback to Bluetooth.
+    // require the 0x80 handshake (0x80 0x02 .. 0x80 0x04) and 0x01 subcommands to lock into USB mode.
     bool is_official = is_official_nintendo_switch_pro(h, desc);
 
-    // Declarations at top to avoid jumping over variable-length declarations with goto
     uint8_t probe_rx[64];
     int     probe_len  = 0;
     uint8_t cmd_pkt[2];
@@ -473,22 +658,9 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
     int     handshake_r;
 
     if (!is_official) {
-        // Joy-Con L/R (0x2006/0x2007), Grip (0x200E) and Nintendo retro controllers
-        // (SNES 0x2017, Genesis 0x2019, MD-2 0x201A, N64 0x201E) share VID 0x057E but
-        // are NOT Pro Controllers and do not support the standard Pro subcommand set over USB.
-        // Preserve passive mode (identical to pre-bf47ce0 behavior for these devices).
-        if (desc->idVendor == SWITCH_PRO_VID && desc->idProduct != SWITCH_PRO_PID) {
-            daemon_log(LOG_LEVEL_INFO, "Nintendo non-Pro controller (PID=0x%04X) - passive mode (no subcommands)", desc->idProduct);
-            return;
-        }
-        // Third-party Switch Pro clones (Trust GXT Muta 542, Nyko, etc.): skip 0x80
-        // handshake but send standard subcommands to initialize firmware.
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro Clone detected - skipping 0x80 wake-up handshake, sending standard subcommands only");
-        // Standard subcommands (0x40 IMU, 0x48 vibration, 0x03 input mode) follow the
-        // AnyPad / hid-nintendo model and work on ALL clone controllers including the
-        // Trust GXT Muta 542 and similar multi-mode clones. Without them the clone
-        // firmware times out the USB connection within 1 second (0x80240004).
-        goto switch_pro_standard_subcommands;
+        daemon_log(LOG_LEVEL_INFO, "Switch Pro Clone / Non-Pro controller (VID:0x%04X PID:0x%04X) - passive mode (no OUT commands)",
+                   desc->idVendor, desc->idProduct);
+        return;
     }
 
     // Drain any leftover input in the USB FIFO first
@@ -507,28 +679,30 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
     // 2. Official Switch Pro USB Handshake (0x80 commands):
     // The 0x80 command packet is strictly 2 BYTES (u8 buf[2] = { 0x80, cmd }),
     // matching Linux kernel hid-nintendo (joycon_send_usb).
+    // Note: Always execute through 0x80 0x04 (Force USB) for official Nintendo Switch Pro controllers
+    // even if an early ACK arrives slightly after the poll window, otherwise the controller stays in charging-only mode.
+    cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x01; // MAC / Status request
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x01, 200);
+    daemon_sys_usleep(5000);
+
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x02; // Handshake
-    handshake_r = switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 150);
-    if (handshake_r != 0) {
-        daemon_log(LOG_LEVEL_INFO, "Switch Pro 0x80 handshake ret=0x%08X (clone/unsupported) — preserving passive mode", handshake_r);
-        return;
-    }
+    handshake_r = switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 300);
+    daemon_log(LOG_LEVEL_INFO, "Switch Pro 0x80 0x02 handshake ret=%d", handshake_r);
     daemon_sys_usleep(5000);
 
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x03; // HighSpeed baudrate
-    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x03, 150);
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x03, 250);
     daemon_sys_usleep(5000);
 
     cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x02; // Handshake repeat
-    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 150);
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x02, 250);
     daemon_sys_usleep(5000);
 
-    cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x04; // Force USB
-    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x04, 150);
+    cmd_pkt[0] = 0x80; cmd_pkt[1] = 0x04; // Force USB (mandatory for Official Switch Pro)
+    switch_pro_send_and_wait(cmd_pkt, sizeof(cmd_pkt), 0x04, 250);
     daemon_sys_usleep(5000);
 
-switch_pro_standard_subcommands:
-    // Standard Switch Subcommands (AnyPad / Linux hid-nintendo model): Works on ALL official and clone controllers!
+    // Standard Switch Subcommands (AnyPad / Linux hid-nintendo model):
     // Step 1: Subcommand 0x03 (Set Input Report Mode to 0x30 Full Mode)
     for (int attempt = 1; attempt <= 3; attempt++) {
         memset(pkt, 0, sizeof(pkt));
@@ -645,8 +819,45 @@ static int usb_get_string_ascii(libusb_device_handle* h, uint8_t idx, char* buf,
     return -1;
 }
 
+static bool str_contains_nocase(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !*needle) return false;
+    for (int i = 0; haystack[i]; i++) {
+        int j = 0;
+        while (needle[j] && haystack[i + j]) {
+            char c1 = haystack[i + j];
+            char c2 = needle[j];
+            if (c1 >= 'a' && c1 <= 'z') c1 -= 32;
+            if (c2 >= 'a' && c2 <= 'z') c2 -= 32;
+            if (c1 != c2) break;
+            j++;
+        }
+        if (!needle[j]) return true;
+    }
+    return false;
+}
+
 int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descriptor* desc) {
     if (!dev || !desc || desc->idVendor != SONY_VID) return 0;
+
+    uint64_t now_us = daemon_sys_time_us();
+
+    // 1. If a multi-mode clone (e.g. GXtrust Muta 542) recently enumerated as a Switch Pro clone
+    // or cycled its 0x054C:0x05C4 USB connection due to watchdog timeout, claim it immediately!
+    if (desc->idProduct == SONY_DS4_V1_PID) {
+        if (s_force_claim_cycling_ds4 ||
+            (s_last_switch_clone_seen_us != 0 && (now_us - s_last_switch_clone_seen_us) < 20000000ULL) ||
+            (s_last_unclaimed_ds4_disconnect_us != 0 && (now_us - s_last_unclaimed_ds4_disconnect_us) < 15000000ULL)) {
+            s_force_claim_cycling_ds4 = true;
+            daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X detected as cycling/multi-mode DS4 clone — claiming as CONTROLLER_DS4",
+                       desc->idVendor, desc->idProduct);
+            return 0;
+        }
+    }
+
+    // 2. Return cached result if the USB bus topology has not changed since the last check
+    if (s_cached_sony_result >= 0 && s_cached_sony_vid == desc->idVendor && s_cached_sony_pid == desc->idProduct) {
+        return s_cached_sony_result;
+    }
 
     libusb_device_handle* h = NULL;
     if (p_sceUsbdOpen && p_sceUsbdOpen(dev, &h) == 0 && h != NULL) {
@@ -654,24 +865,28 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
         int r = (desc->iManufacturer != 0) ? usb_get_string_ascii(h, desc->iManufacturer, mfg, sizeof(mfg)) : -1;
         if (p_sceUsbdClose) p_sceUsbdClose(h);
 
-        // Require at least 4 characters to evaluate ("SONY" has 4 letters).
-        // If the string was read successfully with r >= 4, check for "SONY".
-        // If the read was truncated (r < 4), retry once after a 5ms settle.
-        // Genuine Sony DS4 returns "Sony Computer Entertainment" (28 chars); a
-        // single-character truncation almost always means a multi-mode clone
-        // (e.g. Trust GXT Muta 542) cycling personality during USB enumeration.
-        // A retry resolves any genuine transient USB read error on a real DS4.
         if (r >= 4) {
             daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X iManufacturer='%s'", desc->idVendor, desc->idProduct, mfg);
-            for (int i = 0; mfg[i]; i++) {
-                if ((mfg[i] == 'S' || mfg[i] == 's') &&
-                    (mfg[i+1] == 'O' || mfg[i+1] == 'o') &&
-                    (mfg[i+2] == 'N' || mfg[i+2] == 'n') &&
-                    (mfg[i+3] == 'Y' || mfg[i+3] == 'y')) {
-                    return 1;
-                }
+            // Genuine Sony DualShock 4 v1 (0x054C:0x05C4, 2013) ALWAYS has iManufacturer = "Sony Computer Entertainment".
+            // Third-party controllers in DS4 mode (e.g. GameSir Nova 2 Lite) use v1 PID 0x05C4 with "Sony Interactive Entertainment".
+            if (desc->idProduct == SONY_DS4_V1_PID && str_contains_nocase(mfg, "Interactive")) {
+                daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X has 'Interactive' on v1 PID 0x05C4 — third-party DS4 controller",
+                           desc->idVendor, desc->idProduct);
+                s_cached_sony_vid = desc->idVendor;
+                s_cached_sony_pid = desc->idProduct;
+                s_cached_sony_result = 0;
+                return 0;
             }
-            return 0; // Read successfully, but does not contain "Sony" (e.g. GameSir, Brook, etc.)
+            if (str_contains_nocase(mfg, "SONY")) {
+                s_cached_sony_vid = desc->idVendor;
+                s_cached_sony_pid = desc->idProduct;
+                s_cached_sony_result = 1;
+                return 1;
+            }
+            s_cached_sony_vid = desc->idVendor;
+            s_cached_sony_pid = desc->idProduct;
+            s_cached_sony_result = 0;
+            return 0; // Read successfully, does not contain "Sony" (e.g. GameSir, Brook, etc.)
         } else if (r > 0) {
             // Truncated read: retry once with a 5ms settle to resolve transient USB errors.
             daemon_sys_usleep(5000);
@@ -684,18 +899,26 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
             }
             if (r2 >= 4) {
                 daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X iManufacturer (retry)='%s'", desc->idVendor, desc->idProduct, mfg2);
-                for (int i = 0; mfg2[i]; i++) {
-                    if ((mfg2[i] == 'S' || mfg2[i] == 's') &&
-                        (mfg2[i+1] == 'O' || mfg2[i+1] == 'o') &&
-                        (mfg2[i+2] == 'N' || mfg2[i+2] == 'n') &&
-                        (mfg2[i+3] == 'Y' || mfg2[i+3] == 'y')) {
-                        return 1; // Genuine Sony on retry
-                    }
+                if (desc->idProduct == SONY_DS4_V1_PID && str_contains_nocase(mfg2, "Interactive")) {
+                    s_cached_sony_vid = desc->idVendor;
+                    s_cached_sony_pid = desc->idProduct;
+                    s_cached_sony_result = 0;
+                    return 0;
                 }
+                if (str_contains_nocase(mfg2, "SONY")) {
+                    s_cached_sony_vid = desc->idVendor;
+                    s_cached_sony_pid = desc->idProduct;
+                    s_cached_sony_result = 1;
+                    return 1; // Genuine Sony on retry
+                }
+                s_cached_sony_vid = desc->idVendor;
+                s_cached_sony_pid = desc->idProduct;
+                s_cached_sony_result = 0;
                 return 0; // Retry succeeded; not Sony (third-party clone)
             }
             daemon_log(LOG_LEVEL_WARN, "Device 0x%04X:0x%04X iManufacturer still truncated after retry (r=%d r2=%d) - treating as third-party",
                        desc->idVendor, desc->idProduct, r, r2);
+            s_force_claim_cycling_ds4 = true;
             return 0; // Persistent truncation = multi-mode clone cycling personality
         }
     }
@@ -769,9 +992,24 @@ static int scan_and_open(void) {
     ssize_t count = p_sceUsbdGetDeviceList(&list);
     if (count <= 0 || !list) {
         if (s_last_bus_device_count != 0) {
+            // Check if an unclaimed 0x054C:0x05C4 just dropped off the bus (watchdog reset of a multi-mode clone like Muta 542)
+            for (int i = 0; i < s_last_bus_device_count && i < USB_MAX_SNAPSHOT_DEVICES; i++) {
+                if (s_last_bus_devices[i].vid == SONY_VID && s_last_bus_devices[i].pid == SONY_DS4_V1_PID) {
+                    s_last_unclaimed_ds4_disconnect_us = daemon_sys_time_us();
+                }
+                if (s_last_bus_devices[i].vid == SWITCH_PRO_VID && s_last_bus_devices[i].pid == SWITCH_PRO_PID) {
+                    s_last_switch_clone_seen_us = daemon_sys_time_us();
+                }
+            }
             daemon_log(LOG_LEVEL_INFO, "USB Bus: 0 devices detected (bus empty)");
             s_last_bus_device_count = 0;
             memset(s_last_bus_devices, 0, sizeof(s_last_bus_devices));
+            s_cached_sony_result = -1;
+            s_rejected_hid_count = 0;
+        }
+        if (s_force_claim_cycling_ds4 && s_last_unclaimed_ds4_disconnect_us != 0 &&
+            (daemon_sys_time_us() - s_last_unclaimed_ds4_disconnect_us) > 20000000ULL) {
+            s_force_claim_cycling_ds4 = false;
         }
         if (s_failed_cooldown_vid != 0) {
             s_failed_cooldown_vid = 0;
@@ -810,6 +1048,44 @@ static int scan_and_open(void) {
     }
 
     if (bus_changed) {
+        // Check if a previously present 0x054C:0x05C4 or 0x057E:0x2009 vanished in this topology transition
+        if (s_last_bus_device_count > 0) {
+            for (int i = 0; i < s_last_bus_device_count && i < USB_MAX_SNAPSHOT_DEVICES; i++) {
+                uint16_t old_vid = s_last_bus_devices[i].vid;
+                uint16_t old_pid = s_last_bus_devices[i].pid;
+                bool still_here = false;
+                for (int j = 0; j < cur_count; j++) {
+                    if (cur_devices[j].vid == old_vid && cur_devices[j].pid == old_pid) {
+                        still_here = true;
+                        break;
+                    }
+                }
+                if (!still_here) {
+                    if (old_vid == SONY_VID && old_pid == SONY_DS4_V1_PID) {
+                        s_last_unclaimed_ds4_disconnect_us = daemon_sys_time_us();
+                    } else if (old_vid == SWITCH_PRO_VID && old_pid == SWITCH_PRO_PID) {
+                        s_last_switch_clone_seen_us = daemon_sys_time_us();
+                    }
+                }
+            }
+        }
+        // Prune rejected HID cache entries that are no longer on the bus
+        int write_idx = 0;
+        for (int i = 0; i < s_rejected_hid_count; i++) {
+            bool present = false;
+            for (int j = 0; j < cur_count; j++) {
+                if (cur_devices[j].vid == s_rejected_hid[i].vid && cur_devices[j].pid == s_rejected_hid[i].pid) {
+                    present = true;
+                    break;
+                }
+            }
+            if (present) {
+                s_rejected_hid[write_idx++] = s_rejected_hid[i];
+            }
+        }
+        s_rejected_hid_count = write_idx;
+        s_cached_sony_result = -1;
+
         daemon_log(LOG_LEVEL_INFO, "USB Bus topology change detected (%d devices on bus):", (int)count);
         for (int i = 0; i < cur_count; i++) {
             daemon_log(LOG_LEVEL_INFO, "  USB Device [%d]: VID:0x%04X PID:0x%04X (Class:0x%02X)",
@@ -826,6 +1102,11 @@ static int scan_and_open(void) {
         libusb_device* dev = list[i];
         struct libusb_device_descriptor desc;
         if (p_sceUsbdGetDeviceDescriptor(dev, &desc) != 0) continue;
+
+        // Skip non-gamepad HID peripherals (USB headsets, DACs, mice) already rejected on this bus session
+        if (is_rejected_hid_device(desc.idVendor, desc.idProduct)) {
+            continue;
+        }
 
         // Skip device if currently under failure cooldown to prevent notification loops
         if (s_failed_cooldown_vid != 0 && desc.idVendor == s_failed_cooldown_vid && desc.idProduct == s_failed_cooldown_pid) {
@@ -859,13 +1140,10 @@ static int scan_and_open(void) {
             if (p_sceUsbdOpen(dev, &h) == 0 && h != NULL) {
 
                 // Probe Microsoft OS String Descriptor (Index 0xEE "MSFT100"):
-                // Replicates Windows USB host enumeration behavior. Many multi-mode controllers
-                // (e.g. Trust GXT Muta, 8BitDo, Machenike) default to Switch Pro mode on non-Windows hosts,
-                // but switch personality to native Xbox 360 (045E:028E) when probed with MS OS Descriptors!
-                // Skip MS OS probe for legacy PC DirectInput controllers (Logitech 0x046D, ShanWan 0x2563, Betop 0x20BC)
-                // whose firmware hangs or pipe-stalls (LG_NOGET hardware quirk) upon receiving unsupported control descriptors.
-                bool is_legacy_hid = (desc.idVendor == 0x046D || desc.idVendor == 0x2563 || desc.idVendor == 0x20BC);
-                if ((det.type == CONTROLLER_SWITCH_PRO || det.type == CONTROLLER_SWITCH || det.type == CONTROLLER_GENERIC_HID) && !is_legacy_hid) {
+                // Skip MS OS probe for Nintendo VID 0x057E (stalls official Switch Pro EP0 before string check)
+                // and for legacy PC DirectInput controllers (Logitech 0x046D, ShanWan 0x2563, Betop 0x20BC).
+                bool is_legacy_hid = (desc.idVendor == 0x046D || desc.idVendor == 0x2563 || desc.idVendor == 0x20BC || desc.idVendor == SWITCH_PRO_VID);
+                if (det.type == CONTROLLER_GENERIC_HID && !is_legacy_hid) {
                     if (probe_microsoft_os_descriptor(h)) {
                         daemon_sys_usleep(20000);
                         if (p_sceUsbdCheckConnected && p_sceUsbdCheckConnected(h) != 0) {
@@ -916,19 +1194,14 @@ static int scan_and_open(void) {
                     g_usb_state.wMaxPacketSize = det.wMaxPacketSize;
                     found = 1;
 
-                    // Record connect time and re-enumeration flag for notification suppression.
-                    // A DS4 third-party claim on a Sony VID/PID (0x054C:0x05C4/0x09CC) is a
-                    // multi-mode clone cycling personality: suppress connect/disconnect notifications
-                    // if it disconnects within 2s with zero input reports (re-enumeration signal).
                     s_usb_connect_time_us = daemon_sys_time_us();
-                    s_usb_is_reenum_ds4 = (det.type == CONTROLLER_DS4 &&
-                                           desc.idVendor == 0x054C &&
-                                           (desc.idProduct == 0x05C4 || desc.idProduct == 0x09CC || desc.idProduct == 0x0BA0));
+                    s_usb_is_reenum_ds4 = false;
 
                     if (det.type == CONTROLLER_GENERIC_HID) {
                         if (!generic_hid_setup(h, desc.idVendor, desc.idProduct, det.interface_num, p_sceUsbdControlTransfer)) {
-                            daemon_log(LOG_LEVEL_INFO, "Generic HID (0x%04X:0x%04X) rejected: not an active gamepad — releasing interface",
+                            daemon_log(LOG_LEVEL_INFO, "Generic HID (0x%04X:0x%04X) rejected: not an active gamepad — blacklisting for this bus session and releasing interface",
                                        desc.idVendor, desc.idProduct);
+                            add_rejected_hid_device(desc.idVendor, desc.idProduct);
                             if (s_claimed_kbd_interface >= 0 && p_sceUsbdReleaseInterface) {
                                 p_sceUsbdReleaseInterface(h, s_claimed_kbd_interface);
                                 s_claimed_kbd_interface = -1;
@@ -945,6 +1218,7 @@ static int scan_and_open(void) {
                     }
 
                     const char* friendly_name = controller_friendly_name(det.type, desc.idVendor, desc.idProduct);
+                    load_controller_remap_ini(desc.idVendor, desc.idProduct);
                     write_status_file(true, det.type, desc.idVendor, desc.idProduct,
                                       friendly_name,
                                       (det.type == CONTROLLER_GENERIC_HID) ? generic_hid_get_nbuttons() : 16);
@@ -1078,6 +1352,10 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         ep = (g_usb_state.type == CONTROLLER_XBOXONE) ? 0x02 : 0x01;
     }
 
+    // Use a timeout >= endpoint bInterval (5ms on GameSir Cyclone 2, 8ms on Switch Pro, 10ms on Logitech)
+    // so libSceUsbd does not abort the Interrupt OUT transfer before the USB frame is scheduled.
+    uint32_t rumble_timeout_ms = (large_motor == 0 && small_motor == 0) ? 16 : 12;
+
     // Do not spam synchronous disk I/O on dynamic rumble steps to avoid thread latency
     int transferred = 0;
     if (g_usb_state.type == CONTROLLER_XBOX360) {
@@ -1088,20 +1366,20 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
                 0x00, large_motor, small_motor, 0x00,
                 0x00, 0x00, 0x00, 0x00
             };
-            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt12, sizeof(pkt12), &transferred, 2);
+            p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt12, sizeof(pkt12), &transferred, rumble_timeout_ms);
         } else {
             if (s_x360_ep_out_stalls >= 5) {
                 // If endpoint OUT is permanently stalled on this controller, avoid flooding
                 return;
             }
             uint8_t pkt[8] = { 0x00, 0x08, 0x00, large_motor, small_motor, 0x00, 0x00, 0x00 };
-            int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
+            int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
             if (ret != 0) {
                 if (ret == 0x802400FF || ret == 0x80240009) {
                     s_x360_ep_out_stalls += 2;
                 }
                 uint8_t pkt4[4] = { 0x00, 0x04, large_motor, small_motor };
-                int ret4 = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, 2);
+                int ret4 = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt4, sizeof(pkt4), &transferred, rumble_timeout_ms);
                 if (ret4 != 0) {
                     s_x360_ep_out_stalls += 3;
                 } else {
@@ -1134,7 +1412,7 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
             0x00, // Delay
             0x00  // Repeat count (0 = continuous until next packet)
         };
-        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
+        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
         if (ret != 0) {
             if (ret == 0x802400FF || ret == 0x80240009) {
                 s_xone_ep_out_stalls += 2;
@@ -1149,7 +1427,7 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         }
     } else if (g_usb_state.type == CONTROLLER_DS3) {
         uint8_t pkt[8] = { 0x00, 0xFF, 0x00, (small_motor > 0) ? 1 : 0, large_motor, 0x00, 0x00, 0x00 };
-        p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
+        p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
     } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO || g_usb_state.type == CONTROLLER_SWITCH) {
         uint8_t pkt[10];
         static uint8_t s_switch_rumble_cnt = 0;
@@ -1159,9 +1437,9 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         encode_switch_rumble(&pkt[2], large_motor, small_motor); // Left motor
         encode_switch_rumble(&pkt[6], large_motor, small_motor); // Right motor
 
-        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2);
+        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
         if (ret != 0 && p_sceUsbdControlTransfer) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0210, g_claimed_interface, pkt, sizeof(pkt), 2);
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0210, g_claimed_interface, pkt, sizeof(pkt), 10);
         }
     } else if (g_usb_state.type == CONTROLLER_STADIA) {
         // Stadia Rumble Output Report (Report ID 0x05, 5 bytes)
@@ -1179,14 +1457,17 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         };
         int sent = 0;
         if (ep != 0) {
-            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 2) == 0) {
+            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms) == 0) {
                 sent = 1;
             }
         }
         if (!sent && p_sceUsbdControlTransfer) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, pkt, sizeof(pkt), 2);
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, pkt, sizeof(pkt), 10);
         }
     } else if (g_usb_state.type == CONTROLLER_DS4) {
+        if (s_ds4_ep_out_stalls >= 5) {
+            return;
+        }
         DS4OutputReport pkt;
         memset(&pkt, 0, sizeof(pkt));
         pkt.report_id = 0x05;
@@ -1194,14 +1475,20 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         pkt.motor_right = small_motor;
         pkt.motor_left = large_motor;
         pkt.lightbar_blue = 255; // Default blue LED
-        int sent = 0;
         if (ep != 0) {
-            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, (uint8_t*)&pkt, sizeof(pkt), &transferred, 2) == 0) {
-                sent = 1;
+            int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, (uint8_t*)&pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
+            if (ret != 0) {
+                if (ret == 0x802400FF || ret == 0x80240009) {
+                    s_ds4_ep_out_stalls += 2;
+                    if (p_sceUsbdClearHalt) {
+                        p_sceUsbdClearHalt(g_dev_handle, ep);
+                    }
+                }
+            } else {
+                s_ds4_ep_out_stalls = 0;
             }
-        }
-        if (!sent && p_sceUsbdControlTransfer) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, (unsigned char*)&pkt, sizeof(pkt), 2);
+        } else if (p_sceUsbdControlTransfer) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0205, g_claimed_interface, (unsigned char*)&pkt, sizeof(pkt), 10);
         }
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         generic_hid_send_rumble(g_dev_handle, g_usb_state.vid, g_usb_state.pid,
@@ -1304,6 +1591,24 @@ static void apply_universal_shortcuts(OrbisPadData* ds4) {
 
 static void handle_pad_input_and_send(const OrbisPadData* ds4) {
     OrbisPadData out_ds4 = *ds4;
+    if (s_remap_rule_count > 0) {
+        uint32_t orig_btns = out_ds4.buttons;
+        uint32_t new_btns  = orig_btns;
+        for (int i = 0; i < s_remap_rule_count; i++) {
+            new_btns &= ~s_remap_rules[i].src_bit;
+        }
+        for (int i = 0; i < s_remap_rule_count; i++) {
+            if (orig_btns & s_remap_rules[i].src_bit) {
+                new_btns |= s_remap_rules[i].dst_bit;
+                if (s_remap_rules[i].dst_bit == DS4_BUTTON_L2 && out_ds4.analogButtons.l2 == 0) {
+                    out_ds4.analogButtons.l2 = 255;
+                } else if (s_remap_rules[i].dst_bit == DS4_BUTTON_R2 && out_ds4.analogButtons.r2 == 0) {
+                    out_ds4.analogButtons.r2 = 255;
+                }
+            }
+        }
+        out_ds4.buttons = new_btns;
+    }
     apply_universal_shortcuts(&out_ds4);
 
     s_last_ds4 = out_ds4;
@@ -1328,12 +1633,14 @@ void usb_driver_poll_step(void) {
 
     // 2. Read from connected controller
     uint8_t rx[128];
+    memset(rx, 0, sizeof(rx));
     int transferred = 0;
     int read_len = sizeof(rx);
     if (g_usb_state.type == CONTROLLER_DUALSENSE ||
+        g_usb_state.type == CONTROLLER_DS4 ||
         g_usb_state.type == CONTROLLER_SWITCH_PRO ||
         g_usb_state.type == CONTROLLER_SWITCH) {
-        read_len = 64; // DualSense and Switch Pro endpoints have wMaxPacketSize = 64 bytes
+        read_len = 64; // DualSense, DS4, and Switch Pro endpoints have wMaxPacketSize = 64 bytes
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         if (g_usb_state.wMaxPacketSize > 0 && g_usb_state.wMaxPacketSize <= 64) {
             read_len = g_usb_state.wMaxPacketSize;
@@ -1680,11 +1987,6 @@ void usb_driver_poll_step(void) {
                 memset(&ds4_pkt, 0, sizeof(ds4_pkt));
                 memcpy(&ds4_pkt, rx, transferred < (int)sizeof(ds4_pkt) ? transferred : sizeof(ds4_pkt));
                 ds4_report = &ds4_pkt;
-            } else if (transferred >= 9) {
-                memset(&ds4_pkt, 0, sizeof(ds4_pkt));
-                ds4_pkt.report_id = 0x01;
-                memcpy(&ds4_pkt.left_stick_x, rx, transferred < (int)(sizeof(ds4_pkt) - 1) ? transferred : (sizeof(ds4_pkt) - 1));
-                ds4_report = &ds4_pkt;
             }
 
             if (ds4_report) {
@@ -1814,7 +2116,12 @@ void usb_driver_poll_step(void) {
             }
 
             // Check if device has persistent transfer failures
-            int max_allowed_errors = (g_usb_state.type == CONTROLLER_GENERIC_HID) ? 250 : 100;
+            int max_allowed_errors = 100;
+            if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
+                max_allowed_errors = 250;
+            } else if (g_usb_state.type == CONTROLLER_DS4) {
+                max_allowed_errors = 25;
+            }
             if (s_consecutive_transfer_errors >= max_allowed_errors) {
                 daemon_log(LOG_LEVEL_INFO, "Closing controller after persistent transfer failure (ret=0x%08X, err_count=%d)",
                            ret, s_consecutive_transfer_errors);
@@ -1822,7 +2129,19 @@ void usb_driver_poll_step(void) {
                 s_consecutive_disconnects = 0;
                 close_controller();
             } else {
-                // Keep 250 Hz alive with last known state during transient error recovery
+                // Prevent "ghost phase" during USB transfer error loops: after 3 consecutive transfer errors
+                // (e.g. pipe stall 0x802400FF), neutralize held buttons and sticks so the game never latches
+                // the last pressed direction or button while the endpoint recovers or closes.
+                if (s_consecutive_transfer_errors >= 3) {
+                    s_last_ds4.buttons = 0;
+                    s_last_ds4.analogButtons.l2 = 0;
+                    s_last_ds4.analogButtons.r2 = 0;
+                    s_last_ds4.leftStick.x = 128;
+                    s_last_ds4.leftStick.y = 128;
+                    s_last_ds4.rightStick.x = 128;
+                    s_last_ds4.rightStick.y = 128;
+                }
+                // Keep 250 Hz alive with neutral/last state during transient error recovery
                 if (s_last_ds4.connected && (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active())) {
                     s_last_ds4.timestamp = daemon_sys_time_us();
                     if (s_usb_vpad_slot >= 0) {

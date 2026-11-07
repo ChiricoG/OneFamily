@@ -1059,14 +1059,17 @@ static void send_hid_output_packet(libusb_device_handle* h, uint8_t ep_out, uint
     int transferred = 0;
     int sent = 0;
     if (ep_out != 0 && intr_transfer) {
-        if (intr_transfer(h, ep_out, pkt, len, &transferred, 2) == 0) {
+        if (intr_transfer(h, ep_out, pkt, len, &transferred, 16) == 0) {
             sent = 1;
         }
     }
-    if (!sent && ctrl_transfer) {
+    // Never fall back to EP0 SET_REPORT on Logitech (0x046D), ShanWan (0x2563) or Betop (0x20BC),
+    // as control transfers trigger the LG_NOGET hardware bug, stalling EP_IN and locking motors.
+    bool is_noget_quirk = (s_ctx.vid == 0x046D || s_ctx.vid == 0x2563 || s_ctx.vid == 0x20BC);
+    if (!sent && ctrl_transfer && !is_noget_quirk) {
         // HID Class-Specific Request: SET_REPORT (bRequest=0x09), Report Type: Output (0x02)
         uint16_t wValue = (uint16_t)(0x0200 | report_id);
-        ctrl_transfer(h, 0x21, 0x09, wValue, (uint16_t)iface, pkt, (uint16_t)len, 2);
+        ctrl_transfer(h, 0x21, 0x09, wValue, (uint16_t)iface, pkt, (uint16_t)len, 10);
     }
 }
 
@@ -1077,10 +1080,46 @@ void generic_hid_send_rumble(libusb_device_handle* h, uint16_t vid, uint16_t pid
                              int (*ctrl_transfer)(libusb_device_handle*, uint8_t, uint8_t, uint16_t, uint16_t, unsigned char*, uint16_t, uint32_t)) {
     if (!h) return;
 
-    // 1. Level 1: User-defined custom rumble template in /data/onefamily/controllers/VVVV_PPPP.ini
+    // 1. Check if explicitly disabled via `rumble = none`
     if (s_ctx.custom_rumble_len == 0xFF) {
-        return; // Explicitly disabled via `rumble = none`
+        return;
     }
+
+    // 2. Logitech DirectInput (VID 0x046D — F310, F710, RumblePad 2, Dual Action) [Linux hid-lgff.c / hid-lg2ff.c]
+    // Must run BEFORE custom_rumble_len template handling so `rumble = logitech` in 046D_C218.ini
+    // never triggers an EP0 SET_REPORT control transfer (LG_NOGET hardware quirk) or a 2ms timeout on 10ms bInterval.
+    if (vid == 0x046D) {
+        uint8_t pkt[7];
+        if (pid == 0xC218) {
+            // Logitech RumblePad 2 USB follows hid-lg2ff.c:
+            // Report ID 0x51 (7 bytes): 0x51, 0x00, weak/small, 0x00, strong/large, 0x00, 0x00
+            pkt[0] = 0x51;
+            pkt[1] = 0x00;
+            pkt[2] = small_motor;
+            pkt[3] = 0x00;
+            pkt[4] = large_motor;
+            pkt[5] = 0x00;
+            pkt[6] = 0x00;
+        } else {
+            // Other Logitech DirectInput controllers (hid-lgff.c / WingMan / Cordless RumblePad 2)
+            if (large_motor == 0 && small_motor == 0) {
+                uint8_t stop[7] = { 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                memcpy(pkt, stop, sizeof(pkt));
+            } else {
+                uint8_t play[7] = { 0x51, 0x00, small_motor, 0x00, large_motor, 0x00, 0x00 };
+                memcpy(pkt, play, sizeof(pkt));
+            }
+        }
+        // LG_NOGET hardware quirk: sending EP0 control transfers crashes the controller.
+        // Send only via interrupt transfer with a 16ms timeout (>= 10ms bInterval).
+        if (ep_out != 0 && intr_transfer) {
+            int transferred = 0;
+            intr_transfer(h, ep_out, pkt, sizeof(pkt), &transferred, 16);
+        }
+        return;
+    }
+
+    // 3. User-defined custom rumble template in /data/onefamily/controllers/VVVV_PPPP.ini
     if (s_ctx.custom_rumble_len > 0) {
         uint8_t pkt[32];
         int len = 0;
@@ -1136,38 +1175,6 @@ void generic_hid_send_rumble(libusb_device_handle* h, uint16_t vid, uint16_t pid
         if (s_ctx.out_present && s_ctx.out_rid == 0x05) {
             uint8_t pkt05[5] = { 0x05, large_motor, small_motor, 0x00, 0x00 };
             send_hid_output_packet(h, ep_out, iface, 0x05, pkt05, sizeof(pkt05), intr_transfer, ctrl_transfer);
-        }
-        return;
-    }
-
-    // 2b. Logitech DirectInput (VID 0x046D — F310, F710, RumblePad 2, Dual Action) [Linux hid-lgff.c / hid-lg2ff.c]
-    if (vid == 0x046D) {
-        uint8_t pkt[7];
-        if (pid == 0xC218) {
-            // Logitech RumblePad 2 USB follows hid-lg2ff.c:
-            // Report ID 0x51 (7 bytes). Stop is 0x51 with all zeros.
-            pkt[0] = 0x51;
-            pkt[1] = 0x00;
-            pkt[2] = large_motor;
-            pkt[3] = 0x00;
-            pkt[4] = small_motor;
-            pkt[5] = 0x00;
-            pkt[6] = 0x00;
-        } else {
-            // Other Logitech DirectInput controllers (hid-lgff.c / WingMan)
-            if (large_motor == 0 && small_motor == 0) {
-                uint8_t stop[7] = { 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-                memcpy(pkt, stop, sizeof(pkt));
-            } else {
-                uint8_t play[7] = { 0x51, 0x00, large_motor, 0x00, small_motor, 0x00, 0x00 };
-                memcpy(pkt, play, sizeof(pkt));
-            }
-        }
-        // LG_NOGET hardware quirk: sending EP0 control transfers crashes the controller.
-        // Send only via interrupt transfer if ep_out is present.
-        if (ep_out != 0 && intr_transfer) {
-            int transferred = 0;
-            intr_transfer(h, ep_out, pkt, sizeof(pkt), &transferred, 2);
         }
         return;
     }

@@ -729,19 +729,41 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
         }
     }
 
-    // Motion data - set to neutral
+    // Motion data (Report 0x30 / 0x31 includes 3 IMU samples starting at byte 13:
+    // bytes 13..24: accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z as int16_t LE)
     ds4->quat.x = 0.0f;
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
-
     ds4->vel.x = 0.0f;
     ds4->vel.y = 0.0f;
     ds4->vel.z = 0.0f;
-
     ds4->acell.x = 0.0f;
     ds4->acell.y = 0.0f;
     ds4->acell.z = 1.0f;
+
+    if (sw->report_id == 0x30 || sw->report_id == 0x31) {
+        const uint8_t* raw = (const uint8_t*)sw;
+        int16_t sw_ax = (int16_t)((uint16_t)raw[13] | ((uint16_t)raw[14] << 8));
+        int16_t sw_ay = (int16_t)((uint16_t)raw[15] | ((uint16_t)raw[16] << 8));
+        int16_t sw_az = (int16_t)((uint16_t)raw[17] | ((uint16_t)raw[18] << 8));
+        int16_t sw_gx = (int16_t)((uint16_t)raw[19] | ((uint16_t)raw[20] << 8));
+        int16_t sw_gy = (int16_t)((uint16_t)raw[21] | ((uint16_t)raw[22] << 8));
+        int16_t sw_gz = (int16_t)((uint16_t)raw[23] | ((uint16_t)raw[24] << 8));
+
+        if (sw_ax != 0 || sw_ay != 0 || sw_az != 0 || sw_gx != 0 || sw_gy != 0 || sw_gz != 0) {
+            // Switch Pro frame (+X forward, +Y left, +Z up) -> PS4 DS4 frame (+X right, +Y up, +Z backward)
+            // Accel: 4096 LSB = 1g; Gyro: 0.070 deg/s/LSB = 0.00122173048 rad/s/LSB
+            const float k_sw_accel = 1.0f / 4096.0f;
+            const float k_sw_gyro  = 0.00122173048f;
+            ds4->acell.x = (float)(-sw_ay) * k_sw_accel;
+            ds4->acell.y = (float)( sw_az) * k_sw_accel;
+            ds4->acell.z = (float)(-sw_ax) * k_sw_accel;
+            ds4->vel.x   = (float)(-sw_gy) * k_sw_gyro;
+            ds4->vel.y   = (float)( sw_gz) * k_sw_gyro;
+            ds4->vel.z   = (float)(-sw_gx) * k_sw_gyro;
+        }
+    }
 
     ds4->touch.fingers = 0;
     ds4->connected = 1;
@@ -973,19 +995,26 @@ void translator_convert_dualsense(const DualSenseReport* ps5, OrbisPadData* ds4,
     }
     ds4->touch.fingers = finger_count;
 
-    // Motion data - set to neutral (required by OrbisPadData)
+    // Motion data (gyro scaled from +/-2000 deg/s full scale to rad/s, accel scaled by 8192 LSB/g)
+    const float k_ds_gyro_scale = (2000.0f * 0.01745329252f) / 32768.0f;
     ds4->quat.x = 0.0f;
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
 
-    ds4->vel.x = 0.0f;
-    ds4->vel.y = 0.0f;
-    ds4->vel.z = 0.0f;
+    ds4->vel.x = (float)ps5->gyro[0] * k_ds_gyro_scale;
+    ds4->vel.y = (float)ps5->gyro[1] * k_ds_gyro_scale;
+    ds4->vel.z = (float)ps5->gyro[2] * k_ds_gyro_scale;
 
-    ds4->acell.x = 0.0f;
-    ds4->acell.y = 0.0f;
-    ds4->acell.z = 1.0f;  // 1g downward
+    if (ps5->accel[0] != 0 || ps5->accel[1] != 0 || ps5->accel[2] != 0) {
+        ds4->acell.x = (float)ps5->accel[0] / 8192.0f;
+        ds4->acell.y = (float)ps5->accel[1] / 8192.0f;
+        ds4->acell.z = (float)ps5->accel[2] / 8192.0f;
+    } else {
+        ds4->acell.x = 0.0f;
+        ds4->acell.y = 0.0f;
+        ds4->acell.z = 1.0f;
+    }
 
     ds4->connected = 1;
     ds4->count = 1;
@@ -1261,19 +1290,26 @@ void translator_convert_ds4(const DS4Report* rpt, OrbisPadData* ds4, const Trans
     }
     ds4->touch.fingers = finger_count;
 
-    // Motion data
+    // Motion data (gyro scaled from +/-2000 deg/s full scale to rad/s, accel scaled by 8192 LSB/g)
+    const float k_ds4_gyro_scale = (2000.0f * 0.01745329252f) / 32768.0f;
     ds4->quat.x = 0.0f;
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
 
-    ds4->vel.x = (float)rpt->gyro[0];
-    ds4->vel.y = (float)rpt->gyro[1];
-    ds4->vel.z = (float)rpt->gyro[2];
+    ds4->vel.x = (float)rpt->gyro[0] * k_ds4_gyro_scale;
+    ds4->vel.y = (float)rpt->gyro[1] * k_ds4_gyro_scale;
+    ds4->vel.z = (float)rpt->gyro[2] * k_ds4_gyro_scale;
 
-    ds4->acell.x = (float)rpt->accel[0] / 8192.0f;
-    ds4->acell.y = (float)rpt->accel[1] / 8192.0f;
-    ds4->acell.z = (float)rpt->accel[2] / 8192.0f;
+    if (rpt->accel[0] != 0 || rpt->accel[1] != 0 || rpt->accel[2] != 0) {
+        ds4->acell.x = (float)rpt->accel[0] / 8192.0f;
+        ds4->acell.y = (float)rpt->accel[1] / 8192.0f;
+        ds4->acell.z = (float)rpt->accel[2] / 8192.0f;
+    } else {
+        ds4->acell.x = 0.0f;
+        ds4->acell.y = 0.0f;
+        ds4->acell.z = 1.0f;
+    }
 
     ds4->connected = 1;
     ds4->count = 1;

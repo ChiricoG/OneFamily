@@ -25,5 +25,6 @@ void usb_driver_shutdown(void);
 bool usb_driver_is_connected(void);
 void usb_driver_poll_step(void);
 void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor);
+void usb_driver_reload_remap(void);
 
 #endif // DAEMON_USB_DRIVER_H

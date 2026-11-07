@@ -45,7 +45,7 @@ typedef struct {
     float accel_bias[3];
 } DualSenseCalibration;
 
-#define BT_INPUT_TIMEOUT_US 10000000ULL
+#define BT_INPUT_TIMEOUT_US 60000000ULL
 #define BT_PAD_GRACE_US     600000000ULL
 
 typedef struct {
@@ -257,22 +257,43 @@ static inline bool aob_is_cmp_imm(const uint8_t* p) {
 #define AOB_SAFE_SCAN_END   0x00660000UL
 
 static int aob_find_allowlist_offsets(uint64_t base, uint32_t out_offsets[12], uint32_t* out_count, uint32_t* out_lock, uint32_t* out_unlock, struct PatchRequest* req) {
+    uint32_t raw_vids[12];
     uint32_t vids[8];
     uint32_t pids[8];
-    int n_vid = 0, n_pid = 0;
+    int n_raw_vid = 0, n_vid = 0, n_pid = 0;
 
     // 1. VID Phase: Scan safe kernel window for CMP imm32 == 0x044F (Thrustmaster VID)
-    // 0x044F is exceptionally rare in the kernel and only present in bthid allowlists.
-    // In Orbis OS bthid, all valid allowlist VIDs reside within a compact ~20 KB cluster window.
     for (uint64_t a = base + AOB_SAFE_SCAN_START; a + 4 <= base + AOB_SAFE_SCAN_END; ++a) {
         if (*(const volatile uint32_t*)a == 0x0000044FUL) {
             if (aob_is_cmp_imm((const uint8_t*)a)) {
-                if (n_vid > 0 && ((a - base) - vids[0]) > 0x8000UL) {
-                    continue; // Skip out-of-cluster false positive (e.g. at +85 KB in non-BT drivers)
-                }
-                if (n_vid < 8) vids[n_vid++] = (uint32_t)(a - base);
+                if (n_raw_vid < 12) raw_vids[n_raw_vid++] = (uint32_t)(a - base);
             }
         }
+    }
+
+    // Locate the 5-VID bthid allowlist cluster (spanning ~0x4A65 bytes, <= 0x8000 bytes).
+    // On FW 12.00..13.52 an isolated 0x044F comparison exists ~85 KB earlier at 0x59xxxx;
+    // selecting the compact 5-VID cluster skips any isolated pre/post false positives.
+    int cluster_start = -1;
+    for (int s = 0; s + 4 < n_raw_vid; ++s) {
+        uint32_t span = raw_vids[s + 4] - raw_vids[s];
+        uint32_t d01  = raw_vids[s + 1] - raw_vids[s];
+        if (span <= 0x8000UL && d01 >= 0x400UL && d01 <= 0x1000UL) {
+            cluster_start = s;
+            break;
+        }
+    }
+
+    if (cluster_start >= 0) {
+        for (int i = 0; i < 5; ++i) {
+            vids[i] = raw_vids[cluster_start + i];
+        }
+        n_vid = 5;
+    } else {
+        for (int i = 0; i < n_raw_vid && i < 8; ++i) {
+            vids[i] = raw_vids[i];
+        }
+        n_vid = (n_raw_vid < 8) ? n_raw_vid : 8;
     }
 
     if (req) {
@@ -280,7 +301,7 @@ static int aob_find_allowlist_offsets(uint64_t base, uint32_t out_offsets[12], u
         for (int i = 0; i < n_vid && i < 8; ++i) req->discovered_vids[i] = vids[i];
     }
 
-    // Accept 5 or 6 VIDs (FW 12.50 has 5, FW 13.52 has 6)
+    // Accept 5 or 6 VIDs
     if (n_vid < 5 || n_vid > 6) {
         return 0x310 + n_vid; // Unexpected VID count
     }
@@ -849,10 +870,14 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
     if (!dev->connected) {
         if (dev->vpad_slot >= 0) {
             // Reconnecting within grace period!
+            uint64_t now_reconn = daemon_sys_time_us();
+            bool long_away = (dev->away_since != 0 && (now_reconn - dev->away_since) > 120000000ULL);
             dev->connected = true;
             dev->away_since = 0;
             int slot_num = vpad_get_assigned_slot_num(dev->vpad_slot);
-            daemon_notify("OneFamily: DualSense (Player %d) Reconnected", slot_num);
+            if (long_away) {
+                daemon_notify("OneFamily: DualSense (Player %d) Reconnected", slot_num);
+            }
             daemon_log(LOG_LEVEL_INFO, "controller_reconnected: DualSense BT 0x%llX (Slot %d, Player %d)",
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
             uint8_t init_color[3] = { 0, 112, 209 };

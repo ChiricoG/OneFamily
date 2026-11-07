@@ -29,7 +29,6 @@ static inline int is_native_ps4_controller(uint16_t vid, uint16_t pid) {
 
 // Known third-party controllers operating in PS4 / DualShock 4 mode
 static inline int is_ds4_compatible_controller(uint16_t vid, uint16_t pid) {
-    if (vid == 0x3537) return 1; // GameSir (all models in PS4 mode: Cyclone 2, Nova Lite, Tarantula Pro, G8+, etc.)
     if (vid == 0x0F0D) {         // Hori PS4 controllers & fightsticks
         if (pid == 0x0055 || pid == 0x0066 || pid == 0x0084 || pid == 0x00EE ||
             pid == 0x008A || pid == 0x0070 || pid == 0x008B || pid == 0x009C) return 1;

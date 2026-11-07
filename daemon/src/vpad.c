@@ -96,6 +96,8 @@ typedef struct {
     char assigned_username[64];
     uint8_t packet_counter;
     uint64_t device_key;
+    SceUserServiceUserId bound_user_id;
+    bool needs_user_picker;
 } VPadSlotState;
 
 static VPadSlotState g_slots[VPAD_MAX_SLOTS];
@@ -195,6 +197,21 @@ static void init_hid_control(void) {
     }
 }
 
+static inline bool is_valid_dev_id(int64_t id) {
+    return (id > 0 && (uint32_t)id != 0xFFFFFFFFU);
+}
+
+static bool is_our_virtual_handle(int32_t h) {
+    if (h < 0) return false;
+    if (h == g_vpad_handle) return true;
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active && g_slots[i].handle == h) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void vpad_poweroff_physical_ds4(void) {
     // Power off is active in MERGE mode unconditionally, and in AUTO mode only when
     // exactly 1 user is logged in (i.e. the USB controller will take Player 1 slot).
@@ -215,7 +232,7 @@ static void vpad_poweroff_physical_ds4(void) {
         if (p_sceUserServiceGetLoginUserIdList) p_sceUserServiceGetLoginUserIdList(&chk);
         int chk_logged = 0;
         for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
-            if (chk.userId[i] != SCE_USER_SERVICE_USER_ID_INVALID && chk.userId[i] != 0 && (uint32_t)chk.userId[i] != 0xFFFFFFFF)
+            if (chk.userId[i] != SCE_USER_SERVICE_USER_ID_INVALID && chk.userId[i] != 0 && (uint32_t)chk.userId[i] != 0xFFFFFFFFU)
                 chk_logged++;
         }
         if (chk_logged >= 2) {
@@ -241,7 +258,7 @@ static void vpad_poweroff_physical_ds4(void) {
     bool any_disconnected = false;
     for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
         SceUserServiceUserId uid = list.userId[i];
-        if (uid == SCE_USER_SERVICE_USER_ID_INVALID || uid == 0 || (uint32_t)uid == 0xFFFFFFFF) {
+        if (uid == SCE_USER_SERVICE_USER_ID_INVALID || uid == 0 || (uint32_t)uid == 0xFFFFFFFFU) {
             continue;
         }
 
@@ -257,21 +274,49 @@ static void vpad_poweroff_physical_ds4(void) {
             }
         }
 
-        if (pad_handle >= 0 && pad_handle != g_vpad_handle) {
+        if (pad_handle >= 0 && !is_our_virtual_handle(pad_handle)) {
             int64_t dev_id[4] = {0, 0, 0, 0};
             if (p_scePadGetDeviceId) {
                 int r_id = p_scePadGetDeviceId(pad_handle, dev_id);
                 daemon_log(LOG_LEVEL_INFO, "Physical DS4 [user=0x%X, handle=0x%X]: scePadGetDeviceId() = 0x%08X, dev_id=0x%llX",
                            uid, pad_handle, r_id, (unsigned long long)dev_id[0]);
             }
-            if (dev_id[0] == 0 && p_sceHidControlGetDeviceId) {
-                p_sceHidControlGetDeviceId(pad_handle, dev_id);
+            if (!is_valid_dev_id(dev_id[0]) && p_sceHidControlGetDeviceId) {
+                dev_id[0] = 0;
+                int r_hid = p_sceHidControlGetDeviceId(pad_handle, dev_id);
+                daemon_log(LOG_LEVEL_INFO, "Physical DS4 [user=0x%X, handle=0x%X]: sceHidControlGetDeviceId() = 0x%08X, dev_id=0x%llX",
+                           uid, pad_handle, r_hid, (unsigned long long)dev_id[0]);
             }
-            if (dev_id[0] == 0 && p_sceMbusResolveByHandle) {
-                p_sceMbusResolveByHandle(pad_handle, dev_id);
+            if (!is_valid_dev_id(dev_id[0]) && p_sceMbusResolveByHandle) {
+                dev_id[0] = 0;
+                int r_mbus = p_sceMbusResolveByHandle(pad_handle, dev_id);
+                daemon_log(LOG_LEVEL_INFO, "Physical DS4 [user=0x%X, handle=0x%X]: sceMbusResolveByHandle() = 0x%08X, dev_id=0x%llX",
+                           uid, pad_handle, r_mbus, (unsigned long long)dev_id[0]);
             }
 
-            if (dev_id[0] > 0 && (uint32_t)dev_id[0] != 0xFFFFFFFF) {
+            // Always attempt direct handle-based disconnect APIs first
+            if (p_scePadDisconnectPort) {
+                int r = p_scePadDisconnectPort(pad_handle);
+                daemon_log(LOG_LEVEL_INFO, "scePadDisconnectPort(handle=0x%X) = 0x%08X", pad_handle, r);
+                if (r == 0) any_disconnected = true;
+            }
+            if (p_sceHidControlDisconnectPort) {
+                int r = p_sceHidControlDisconnectPort(pad_handle);
+                daemon_log(LOG_LEVEL_INFO, "sceHidControlDisconnectPort(handle=0x%X) = 0x%08X", pad_handle, r);
+                if (r == 0) any_disconnected = true;
+            }
+            if (p_sceHidControlDisconnectHandle) {
+                int r = p_sceHidControlDisconnectHandle(pad_handle);
+                daemon_log(LOG_LEVEL_INFO, "sceHidControlDisconnectHandle(handle=0x%X) = 0x%08X", pad_handle, r);
+                if (r == 0) any_disconnected = true;
+            }
+            if (p_scePadDisconnectDevice) {
+                int r = p_scePadDisconnectDevice(pad_handle);
+                daemon_log(LOG_LEVEL_INFO, "scePadDisconnectDevice(handle=0x%X) = 0x%08X", pad_handle, r);
+                if (r == 0) any_disconnected = true;
+            }
+
+            if (is_valid_dev_id(dev_id[0])) {
                 daemon_log(LOG_LEVEL_INFO, "Powering off physical DS4 for user 0x%X (handle=0x%X, dev_id=0x%X)...",
                            uid, pad_handle, (int32_t)dev_id[0]);
                 if (p_sceMbusDisconnectDevice) {
@@ -282,14 +327,11 @@ static void vpad_poweroff_physical_ds4(void) {
                     int r = p_sceHidControlDisconnectDevice((int32_t)dev_id[0]);
                     daemon_log(LOG_LEVEL_INFO, "sceHidControlDisconnectDevice(0x%X) = 0x%08X", (int32_t)dev_id[0], r);
                 }
-                if (p_scePadDisconnectDevice) {
+                if (p_scePadDisconnectDevice && (int32_t)dev_id[0] != pad_handle) {
                     int r = p_scePadDisconnectDevice((int32_t)dev_id[0]);
                     daemon_log(LOG_LEVEL_INFO, "scePadDisconnectDevice(dev_id=0x%X) = 0x%08X", (int32_t)dev_id[0], r);
                 }
                 any_disconnected = true;
-            } else {
-                daemon_log(LOG_LEVEL_INFO, "Physical DS4 dev_id not resolved (dev_id=0x%llX) — skipping disconnect",
-                           (unsigned long long)dev_id[0]);
             }
 
             if (opened_temp && p_scePadClose) {
@@ -304,7 +346,11 @@ static void vpad_poweroff_physical_ds4(void) {
     }
 }
 
-int vpad_bind_user(ConfigMode mode, int *out_slot, char *out_username, size_t username_len) {
+static int vpad_bind_user_slot(int slot_idx, ConfigMode mode, int *out_slot, char *out_username, size_t username_len) {
+    if (slot_idx < 0 || slot_idx >= VPAD_MAX_SLOTS || !g_slots[slot_idx].active || g_slots[slot_idx].handle < 0) {
+        return -1;
+    }
+
     init_user_service();
 
     SceUserServiceLoginUserIdList list;
@@ -319,75 +365,121 @@ int vpad_bind_user(ConfigMode mode, int *out_slot, char *out_username, size_t us
                    r, list.userId[0], list.userId[1], list.userId[2], list.userId[3]);
     }
 
+    SceUserServiceUserId valid_users[SCE_USER_SERVICE_MAX_LOGIN_USERS];
     int num_logged_in = 0;
     for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
-        if (list.userId[i] != SCE_USER_SERVICE_USER_ID_INVALID && list.userId[i] != 0 && (uint32_t)list.userId[i] != 0xFFFFFFFF) {
-            num_logged_in++;
+        if (list.userId[i] != SCE_USER_SERVICE_USER_ID_INVALID &&
+            list.userId[i] != 0 &&
+            (uint32_t)list.userId[i] != 0xFFFFFFFFU) {
+            valid_users[num_logged_in++] = list.userId[i];
         }
     }
     s_last_login_count = num_logged_in;
 
     SceUserServiceUserId target_user = SCE_USER_SERVICE_USER_ID_INVALID;
-    int slot = 1;
+    int player_slot = slot_idx + 1;
+    bool open_picker = false;
 
     if (mode == CONFIG_MODE_SECONDARY) {
-        // Explicitly forced to Player 2
-        if (num_logged_in >= 2 && list.userId[1] != SCE_USER_SERVICE_USER_ID_INVALID) {
-            target_user = list.userId[1];
-            slot = 2;
-        } else if (num_logged_in >= 1) {
-            target_user = list.userId[0];
-            slot = 2; // Tagged as slot 2 for coexistence
+        // Explicitly forced to Player 2 (coexistence with physical DS4 on Player 1)
+        int user_idx = slot_idx + 1;
+        if (num_logged_in > user_idx) {
+            target_user = valid_users[user_idx];
+            player_slot = user_idx + 1;
+        } else if (num_logged_in >= 2) {
+            target_user = valid_users[1];
+            player_slot = 2;
+        } else {
+            // Only 1 user logged in: leave unbound and trigger user picker so P2 can log in
+            target_user = SCE_USER_SERVICE_USER_ID_INVALID;
+            player_slot = 2;
+            open_picker = true;
         }
     } else if (mode == CONFIG_MODE_MERGE) {
         // Explicitly forced to Player 1
         if (num_logged_in >= 1) {
-            target_user = list.userId[0];
-            slot = 1;
+            target_user = valid_users[0];
+            player_slot = 1;
         }
     } else {
-        // CONFIG_MODE_AUTO (default):
-        // If 2 or more users logged in (e.g. DS4 is on P1), virtual pad becomes P2!
-        if (num_logged_in >= 2 && list.userId[1] != SCE_USER_SERVICE_USER_ID_INVALID) {
-            target_user = list.userId[1];
-            slot = 2;
-        } else if (num_logged_in >= 1) {
-            target_user = list.userId[0];
-            slot = 1;
+        // CONFIG_MODE_AUTO (default)
+        if (slot_idx == 0) {
+            if (num_logged_in >= 2) {
+                // 2+ users logged in (e.g. physical DS4 is on Player 1): bind to Player 2
+                target_user = valid_users[1];
+                player_slot = 2;
+            } else if (num_logged_in == 1) {
+                // 1 user logged in: bind directly to Player 1
+                target_user = valid_users[0];
+                player_slot = 1;
+            }
+        } else {
+            // Secondary OneFamily controller slot (slot_idx >= 1)
+            if (num_logged_in > slot_idx) {
+                target_user = valid_users[slot_idx];
+                player_slot = slot_idx + 1;
+            } else {
+                // Need another user to log in for this controller slot
+                target_user = SCE_USER_SERVICE_USER_ID_INVALID;
+                player_slot = slot_idx + 1;
+                open_picker = true;
+            }
         }
     }
 
-    if (target_user == SCE_USER_SERVICE_USER_ID_INVALID && p_sceUserServiceGetInitialUser) {
+    if (!open_picker && target_user == SCE_USER_SERVICE_USER_ID_INVALID && p_sceUserServiceGetInitialUser) {
         p_sceUserServiceGetInitialUser(&target_user);
-        slot = 1;
+        player_slot = 1;
     }
 
-    s_assigned_slot = slot;
-    s_assigned_username[0] = '\0';
+    g_slots[slot_idx].assigned_slot = player_slot;
+    g_slots[slot_idx].bound_user_id = target_user;
+    g_slots[slot_idx].needs_user_picker = open_picker;
+    g_slots[slot_idx].assigned_username[0] = '\0';
 
     if (target_user != SCE_USER_SERVICE_USER_ID_INVALID && p_sceUserServiceGetUserName) {
-        p_sceUserServiceGetUserName(target_user, s_assigned_username, sizeof(s_assigned_username));
+        p_sceUserServiceGetUserName(target_user, g_slots[slot_idx].assigned_username, sizeof(g_slots[slot_idx].assigned_username));
     }
-    if (s_assigned_username[0] == '\0') {
-        snprintf(s_assigned_username, sizeof(s_assigned_username), "User %d", slot);
+    if (g_slots[slot_idx].assigned_username[0] == '\0') {
+        snprintf(g_slots[slot_idx].assigned_username, sizeof(g_slots[slot_idx].assigned_username), "User %d", player_slot);
     }
 
-    if (mode != CONFIG_MODE_AUTO && target_user != SCE_USER_SERVICE_USER_ID_INVALID && p_sceMbusBindDeviceWithUserId && g_vpad_handle >= 0) {
-        int r = p_sceMbusBindDeviceWithUserId(g_vpad_handle, target_user);
-        daemon_log(LOG_LEVEL_INFO, "sceMbusBindDeviceWithUserId(handle=0x%X, user=0x%08X, slot=%d, name='%s') = 0x%08X",
-                   g_vpad_handle, target_user, slot, s_assigned_username, r);
+    if (slot_idx == 0) {
+        s_assigned_slot = player_slot;
+        strncpy(s_assigned_username, g_slots[slot_idx].assigned_username, sizeof(s_assigned_username) - 1);
+        s_assigned_username[sizeof(s_assigned_username) - 1] = '\0';
+    }
+
+    if (target_user != SCE_USER_SERVICE_USER_ID_INVALID && p_sceMbusBindDeviceWithUserId) {
+        int r = p_sceMbusBindDeviceWithUserId(g_slots[slot_idx].handle, target_user);
+        daemon_log(LOG_LEVEL_INFO, "sceMbusBindDeviceWithUserId(slot=%d, handle=0x%X, user=0x%08X, player=%d, name='%s') = 0x%08X",
+                   slot_idx, g_slots[slot_idx].handle, target_user, player_slot, g_slots[slot_idx].assigned_username, r);
+        if (r < 0) {
+            daemon_log(LOG_LEVEL_WARN, "sceMbusBindDeviceWithUserId failed (0x%08X) — falling back to PS button pulse", r);
+            vpad_pulse_ps_button_slot(slot_idx);
+        }
     } else {
-        daemon_log(LOG_LEVEL_INFO, "Virtual DS4 left for native shell assignment (mode=%d, slot=%d, active User='%s', id=0x%08X)",
-                   mode, slot, s_assigned_username, target_user);
+        daemon_log(LOG_LEVEL_INFO, "Virtual DS4 slot %d awaiting user selection (mode=%d, player=%d) — triggering user picker",
+                   slot_idx, mode, player_slot);
+        vpad_pulse_ps_button_slot(slot_idx);
     }
 
-    if (out_slot) *out_slot = slot;
+    if (out_slot) *out_slot = player_slot;
     if (out_username && username_len > 0) {
-        strncpy(out_username, s_assigned_username, username_len - 1);
+        strncpy(out_username, g_slots[slot_idx].assigned_username, username_len - 1);
         out_username[username_len - 1] = '\0';
     }
 
     return 0;
+}
+
+int vpad_bind_user(ConfigMode mode, int *out_slot, char *out_username, size_t username_len) {
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active) {
+            return vpad_bind_user_slot(i, mode, out_slot, out_username, username_len);
+        }
+    }
+    return -1;
 }
 
 void vpad_pulse_ps_button_slot(int slot) {
@@ -444,16 +536,19 @@ const char* vpad_get_assigned_user(void) {
 }
 
 void vpad_check_user_rebind(ConfigMode mode) {
-    if (!g_vpad_active || g_vpad_handle < 0 || mode != CONFIG_MODE_AUTO || !p_sceUserServiceGetLoginUserIdList) {
+    if (!g_vpad_active || g_vpad_handle < 0 || !p_sceUserServiceGetLoginUserIdList) {
         return;
     }
 
     SceUserServiceLoginUserIdList list;
     memset(&list, 0, sizeof(list));
+    for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
+        list.userId[i] = SCE_USER_SERVICE_USER_ID_INVALID;
+    }
     if (p_sceUserServiceGetLoginUserIdList(&list) == 0) {
         int num_logged_in = 0;
         for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
-            if (list.userId[i] != SCE_USER_SERVICE_USER_ID_INVALID && list.userId[i] != 0 && (uint32_t)list.userId[i] != 0xFFFFFFFF) {
+            if (list.userId[i] != SCE_USER_SERVICE_USER_ID_INVALID && list.userId[i] != 0 && (uint32_t)list.userId[i] != 0xFFFFFFFFU) {
                 num_logged_in++;
             }
         }
@@ -462,7 +557,12 @@ void vpad_check_user_rebind(ConfigMode mode) {
         } else if (num_logged_in != s_last_login_count) {
             daemon_log(LOG_LEVEL_INFO, "Logged in user count changed (%d -> %d), updating virtual pad binding...",
                        s_last_login_count, num_logged_in);
-            vpad_bind_user(mode, NULL, NULL, 0);
+            s_last_login_count = num_logged_in;
+            for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+                if (g_slots[i].active) {
+                    vpad_bind_user_slot(i, mode, NULL, NULL, 0);
+                }
+            }
         }
     }
 }
@@ -606,9 +706,9 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
         daemon_log(LOG_LEVEL_INFO, "scePadSetConnection(0x%X, 1) = 0x%08X", vHandle, r);
     }
 
-    // Automatically trigger PS button pulse so SceShellCore opens the native
-    // "Who is using this controller?" user picker screen!
-    vpad_pulse_ps_button_slot(slot);
+    // Allow SceMbus 50ms to register the new virtual port before binding user or pulsing PS
+    daemon_sys_usleep(50000);
+    vpad_bind_user_slot(slot, g_daemon_config.mode, NULL, NULL, 0);
 
     if (out_slot) *out_slot = slot;
     return 0;

@@ -204,12 +204,21 @@ static int detect_switch_pro_endpoints(libusb_device* dev, DetectedController* o
     }
 
     int found = 0;
-    for (int i = 0; i < cfg->bNumInterfaces && !found; i++) {
+    uint8_t kbd_iface = 0xFF;
+    for (int i = 0; i < cfg->bNumInterfaces; i++) {
         const struct libusb_interface* intf = &cfg->interface[i];
-        for (int a = 0; a < intf->num_altsetting && !found; a++) {
+        for (int a = 0; a < intf->num_altsetting; a++) {
             const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
 
             if (alt->bInterfaceClass != USB_CLASS_HID) continue;
+            if (alt->bInterfaceSubClass == 1 && alt->bInterfaceProtocol == 1) {
+                if (kbd_iface == 0xFF) kbd_iface = alt->bInterfaceNumber;
+                continue;
+            }
+            if (alt->bInterfaceSubClass == 1 && alt->bInterfaceProtocol == 2) {
+                continue;
+            }
+            if (found) continue;
 
             uint8_t ep_in = 0;
             uint8_t ep_out = 0;
@@ -240,6 +249,9 @@ static int detect_switch_pro_endpoints(libusb_device* dev, DetectedController* o
         }
     }
 
+    if (found) {
+        out->kbd_interface_num = kbd_iface;
+    }
     usbd_free_config_descriptor(cfg);
     return found;
 }
@@ -302,16 +314,22 @@ static int detect_ds4_endpoints(libusb_device* dev, DetectedController* out) {
     }
 
     int found = 0;
-    for (int i = 0; i < cfg->bNumInterfaces && !found; i++) {
+    uint8_t kbd_iface = 0xFF;
+    for (int i = 0; i < cfg->bNumInterfaces; i++) {
         const struct libusb_interface* intf = &cfg->interface[i];
-        for (int a = 0; a < intf->num_altsetting && !found; a++) {
+        for (int a = 0; a < intf->num_altsetting; a++) {
             const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
 
             if (alt->bInterfaceClass != USB_CLASS_HID) continue;
-            // Skip boot keyboard and boot mouse
-            if (alt->bInterfaceSubClass == 1 && (alt->bInterfaceProtocol == 1 || alt->bInterfaceProtocol == 2)) {
+            // Record boot keyboard so it can be detached from Orbis OS ukbd driver
+            if (alt->bInterfaceSubClass == 1 && alt->bInterfaceProtocol == 1) {
+                if (kbd_iface == 0xFF) kbd_iface = alt->bInterfaceNumber;
                 continue;
             }
+            if (alt->bInterfaceSubClass == 1 && alt->bInterfaceProtocol == 2) {
+                continue;
+            }
+            if (found) continue;
 
             uint8_t ep_in = 0;
             uint8_t ep_out = 0;
@@ -342,6 +360,9 @@ static int detect_ds4_endpoints(libusb_device* dev, DetectedController* out) {
         }
     }
 
+    if (found) {
+        out->kbd_interface_num = kbd_iface;
+    }
     usbd_free_config_descriptor(cfg);
     return found;
 }
@@ -366,17 +387,6 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
                 out->pid = desc->idProduct;
                 return 1;
             }
-        }
-    }
-
-    // Check known third-party controllers with non-Sony VID in PS4 mode (GameSir, Hori, Nacon, Razer, etc.)
-    if (is_ds4_compatible_controller(desc->idVendor, desc->idProduct)) {
-        if (detect_ds4_endpoints(dev, out)) {
-            out->vid = desc->idVendor;
-            out->pid = desc->idProduct;
-            daemon_log(LOG_LEVEL_INFO, "Third-party PS4 mode controller claimed (VID:0x%04X PID:0x%04X) as CONTROLLER_DS4",
-                       desc->idVendor, desc->idProduct);
-            return 1;
         }
     }
 
@@ -455,9 +465,9 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         }
 
     // 3. PRIORITY CHECK: Generic Descriptor-based detection (Third-Party Xbox 360 / Xbox One GIP)
-    // CRITICAL: Executed BEFORE Switch Pro detection so that multi-mode controllers
-    // (such as Machenike, EasySMX, etc.) that expose an XInput interface
-    // are claimed immediately as Xbox controllers with native analog triggers, rumble, and no 0x80 crashes!
+    // CRITICAL: Executed BEFORE Switch Pro or DS4-compatible VID detection so that multi-mode controllers
+    // (such as GameSir Nova 2 Lite 0x3537:0x1098, Machenike, EasySMX, etc.) that expose an XInput interface
+    // are claimed immediately as Xbox controllers with native analog triggers, rumble, and composite keyboard detach!
     if (controller_detect_by_descriptor(dev, out)) {
         out->generic = 1;
         out->vid = desc->idVendor;
@@ -465,6 +475,17 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         daemon_log(LOG_LEVEL_INFO, "Device VID:0x%04X PID:0x%04X claimed via XInput descriptor (%s)",
                    desc->idVendor, desc->idProduct, (out->type == CONTROLLER_XBOXONE ? "Xbox One" : "Xbox 360"));
         return 1;
+    }
+
+    // 3b. Known third-party controllers with non-Sony VID in PS4 mode (Hori, Nacon, Razer, Brook, etc.)
+    if (is_ds4_compatible_controller(desc->idVendor, desc->idProduct)) {
+        if (detect_ds4_endpoints(dev, out)) {
+            out->vid = desc->idVendor;
+            out->pid = desc->idProduct;
+            daemon_log(LOG_LEVEL_INFO, "Third-party PS4 mode controller claimed (VID:0x%04X PID:0x%04X) as CONTROLLER_DS4",
+                       desc->idVendor, desc->idProduct);
+            return 1;
+        }
     }
 
     // 4. Nintendo Switch Pro & Official / Clone Controllers (only if no XInput interface was exposed)
