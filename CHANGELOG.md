@@ -2,6 +2,15 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta11] - Pre-release (2026-11-07)
+
+### Controller Compatibility & Gameplay Fixes
+- **User Account Selection Screen Restored**: Restored the native PlayStation 4 "Who is using this controller?" profile selection prompt whenever a USB or Bluetooth controller connects, allowing users to freely choose which account to assign the controller to.
+- **DualSense Bluetooth Connection Stability**: Resolved an issue where DualSense wireless controllers could disconnect or become unresponsive shortly after connecting on Firmware 9.00 and other firmware versions, and restored full support for connecting up to 4 DualSense controllers simultaneously.
+- **Logitech Cordless RumblePad 2 Vibration Stop Fix**: Added the dedicated stop command required by Logitech RumblePad 2 controllers so vibration stops immediately when a game ends a rumble effect.
+
+---
+
 ## [v1.2.2-beta10] - Pre-release (2026-11-07)
 
 ### Controller Compatibility & Gameplay Fixes
