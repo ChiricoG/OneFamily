@@ -2,6 +2,22 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta10] - Pre-release (2026-11-07)
+
+### Controller Compatibility & Gameplay Fixes
+- **User Account Binding & Unresponsive Input Fix**: Fixed an issue where connected controllers (including Bluetooth DualSense and USB PS3 controllers) could register on the console without responding to button presses or allowing user profile selection.
+- **Official Nintendo Switch Pro & Third-Party Clones**: Restored reliable USB wake-up for official Nintendo Switch Pro controllers (preventing charging-only mode) while keeping third-party Switch Pro / PS4 multi-mode controllers (such as GXtrust Muta 542) stable without disconnections or stuck inputs.
+- **GameSir Controllers Support (Nova 2 Lite & Cyclone 2)**: Fixed 2.4GHz wireless dongle and wired PS4 mode detection on GameSir Nova 2 Lite (preventing false keyboard detection) and resolved continuous vibration issues on GameSir Cyclone 2.
+- **Logitech RumblePad 2 Stability**: Resolved self-vibration and USB disconnections on Logitech RumblePad 2 controllers.
+- **DualSense Bluetooth Support on Firmware 12.00 - 13.50**: Improved Bluetooth controller registration across newer PlayStation 4 firmware versions and reduced repeated reconnection notifications after idle periods.
+- **Motion Sensors & Gyroscope Support**: Added full motion sensor (gyroscope and accelerometer) translation for Nintendo Switch Pro controllers and improved gyroscope accuracy for DualShock 4 and DualSense controllers.
+- **USB Headsets & Audio Dongles Coexistence**: Prevented USB audio headsets and wireless dongles (such as SteelSeries Arctis Nova Elite) from being repeatedly scanned by the controller driver.
+
+### New Features
+- **Custom Button Remapping for All Controllers**: Added support for custom button remapping via INI profiles (`/data/onefamily/controllers/VVVV_PPPP.ini`) across all supported controllers, including Xbox, Switch Pro, PlayStation, and Generic HID gamepads.
+
+---
+
 ## [v1.2.2-beta9] - Pre-release (2026-11-06)
 
 ### Bluetooth Controller Support & Pairing
