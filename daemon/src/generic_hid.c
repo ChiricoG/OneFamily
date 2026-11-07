@@ -1085,30 +1085,20 @@ void generic_hid_send_rumble(libusb_device_handle* h, uint16_t vid, uint16_t pid
         return;
     }
 
-    // 2. Logitech DirectInput (VID 0x046D — F310, F710, RumblePad 2, Dual Action) [Linux hid-lgff.c / hid-lg2ff.c]
+    // 2. Logitech DirectInput (VID 0x046D — RumblePad 2 0xC218, Cordless 0xC219, F310/F710, Dual Action) [Linux hid-lg2ff.c / hid-lgff.c]
     // Must run BEFORE custom_rumble_len template handling so `rumble = logitech` in 046D_C218.ini
     // never triggers an EP0 SET_REPORT control transfer (LG_NOGET hardware quirk) or a 2ms timeout on 10ms bInterval.
+    // Per Linux drivers/hid/hid-lg2ff.c:
+    // - When playing (large_motor > 0 || small_motor > 0): 0x51, 0x00, weak, 0x00, strong, 0x00, 0x00
+    // - When stopping (large_motor == 0 && small_motor == 0): 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     if (vid == 0x046D) {
         uint8_t pkt[7];
-        if (pid == 0xC218) {
-            // Logitech RumblePad 2 USB follows hid-lg2ff.c:
-            // Report ID 0x51 (7 bytes): 0x51, 0x00, weak/small, 0x00, strong/large, 0x00, 0x00
-            pkt[0] = 0x51;
-            pkt[1] = 0x00;
-            pkt[2] = small_motor;
-            pkt[3] = 0x00;
-            pkt[4] = large_motor;
-            pkt[5] = 0x00;
-            pkt[6] = 0x00;
+        if (large_motor == 0 && small_motor == 0) {
+            uint8_t stop[7] = { 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            memcpy(pkt, stop, sizeof(pkt));
         } else {
-            // Other Logitech DirectInput controllers (hid-lgff.c / WingMan / Cordless RumblePad 2)
-            if (large_motor == 0 && small_motor == 0) {
-                uint8_t stop[7] = { 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-                memcpy(pkt, stop, sizeof(pkt));
-            } else {
-                uint8_t play[7] = { 0x51, 0x00, small_motor, 0x00, large_motor, 0x00, 0x00 };
-                memcpy(pkt, play, sizeof(pkt));
-            }
+            uint8_t play[7] = { 0x51, 0x00, small_motor, 0x00, large_motor, 0x00, 0x00 };
+            memcpy(pkt, play, sizeof(pkt));
         }
         // LG_NOGET hardware quirk: sending EP0 control transfers crashes the controller.
         // Send only via interrupt transfer with a 16ms timeout (>= 10ms bInterval).

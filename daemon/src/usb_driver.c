@@ -1374,6 +1374,9 @@ static int scan_and_open(void) {
                         }
                     } else if (det.type == CONTROLLER_SWITCH_PRO) {
                         init_switch_pro_controller(h, &desc);
+                    } else if (det.type == CONTROLLER_GENERIC_HID) {
+                        // Send initial rumble stop (matches Linux lg2ff_init) so any latched motor state is cleared on claim
+                        usb_driver_send_rumble(0, 0);
                     }
 
                     // Check if controller is still connected and alive after wake-up/handshake

@@ -89,6 +89,9 @@ typedef struct {
     int logged_insert_packets;
     uint8_t last_rumble_lg;
     uint8_t last_rumble_sm;
+    uint8_t last_raw_rumble_lg;
+    uint8_t last_raw_rumble_sm;
+    uint64_t last_rumble_change_us;
     uint8_t last_color_r;
     uint8_t last_color_g;
     uint8_t last_color_b;
@@ -970,6 +973,24 @@ void vpad_poll_rumble(void) {
             uint8_t cb = setting[7];
             uint64_t now = daemon_sys_time_us();
 
+            // Track raw setting changes from libScePad to guard against stale non-zero rumble
+            // left in the GetRemoteSetting buffer when a game is closed or suspended via the PS button.
+            if (lg != g_slots[i].last_raw_rumble_lg || sm != g_slots[i].last_raw_rumble_sm) {
+                g_slots[i].last_raw_rumble_lg = lg;
+                g_slots[i].last_raw_rumble_sm = sm;
+                g_slots[i].last_rumble_change_us = now;
+            }
+            if (g_slots[i].last_ps_state == 1 ||
+                ((lg > 0 || sm > 0) && g_slots[i].last_rumble_change_us != 0 &&
+                 (now - g_slots[i].last_rumble_change_us >= 4000000ULL))) {
+                lg = 0;
+                sm = 0;
+            }
+
+            if (lg > 0 || sm > 0) {
+                g_slots[i].stop_retries_remaining = 0;
+            }
+
             bool rumble_changed = (lg != g_slots[i].last_rumble_lg || sm != g_slots[i].last_rumble_sm);
             bool color_changed = (g_slots[i].source == VPAD_SOURCE_BT &&
                                  (cr != g_slots[i].last_color_r || cg != g_slots[i].last_color_g || cb != g_slots[i].last_color_b));
@@ -985,7 +1006,6 @@ void vpad_poll_rumble(void) {
                     g_slots[i].stop_retries_remaining = 3;
                 } else if (now - g_slots[i].last_rumble_send_us >= 20000ULL) {
                     should_send = true;
-                    g_slots[i].stop_retries_remaining = 0;
                 }
             } else if (lg == 0 && sm == 0 && g_slots[i].stop_retries_remaining > 0) {
                 if (now - g_slots[i].last_rumble_send_us >= 50000ULL) {
@@ -998,7 +1018,6 @@ void vpad_poll_rumble(void) {
                 }
             } else if (keepalive) {
                 should_send = true;
-                g_slots[i].stop_retries_remaining = 0;
             }
 
             if (should_send) {
