@@ -35,6 +35,7 @@ void vpad_slot_close_dev(VPadSource source, uint64_t device_key);
 bool vpad_slot_is_active(int slot);
 int  vpad_send_data_slot(int slot, const OrbisPadData *data);
 void vpad_pulse_ps_button_slot(int slot);
+void vpad_reactivate_slot(int slot);
 int  vpad_get_assigned_slot_num(int slot);
 
 // Subsystem Lifecycle (initializes / unloads PRXs)

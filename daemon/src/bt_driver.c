@@ -47,13 +47,14 @@ typedef struct {
     float accel_bias[3];
 } DualSenseCalibration;
 
-#define BT_INPUT_TIMEOUT_US 60000000ULL
+#define BT_INPUT_TIMEOUT_US 10000000ULL
 #define BT_PAD_GRACE_US     600000000ULL
 
 typedef struct {
     uint64_t address;         // Bluetooth MAC address (0 = free entry)
     int      vpad_slot;       // virtual pad slot index (0..3, or -1)
     bool     connected;       // reports currently arriving
+    bool     extended_mode;   // true once 78-byte 0x31 reports are active
     uint64_t last_input_time; // timestamp of last report
     uint64_t away_since;      // timestamp when pad went silent during grace period
     uint64_t last_output_time;// timestamp of last sent output report (rumble / keep-alive)
@@ -72,6 +73,7 @@ typedef struct {
     bool     calibration_valid;
     bool     calibration_requested;
     uint64_t last_calibration_attempt;
+    OrbisPadData last_pad_data;
 } BtDevice;
 
 static BtDevice s_devices[BT_MAX_DEVICES];
@@ -87,6 +89,12 @@ static void bt_device_init_entry(BtDevice *dev) {
     dev->last_color[0] = 0;
     dev->last_color[1] = 112;
     dev->last_color[2] = 209; // Default PlayStation Blue
+    dev->last_pad_data.leftStick.x = 128;
+    dev->last_pad_data.leftStick.y = 128;
+    dev->last_pad_data.rightStick.x = 128;
+    dev->last_pad_data.rightStick.y = 128;
+    dev->last_pad_data.quat.w = 1.0f;
+    dev->last_pad_data.connected = 1;
     for (int a = 0; a < 3; ++a) {
         dev->calibration.gyro_scale[a] = (2000.0f * 0.01745329252f) / 32768.0f;
         dev->calibration.accel_scale[a] = 1.0f / 8192.0f;
@@ -844,6 +852,7 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
         simple[8] = report[6];       // Bumpers, triggers, options, L3, R3
         simple[9] = report[7] & 3;   // PS and touchpad buttons
         data = simple;
+        dev->extended_mode = false;
     } else if (length == 78 && report[0] == 0x31) {
         // Extended 78-byte Bluetooth report with CRC32
         uint32_t expected_crc = (uint32_t)report[74] |
@@ -856,6 +865,11 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             return; // CRC mismatch: corrupted Bluetooth packet
         }
         data = report + 2; // Data payload begins at offset 2
+        if (!dev->extended_mode) {
+            dev->extended_mode = true;
+            uint8_t init_color[3] = { 0, 112, 209 };
+            bt_send_rumble_dev(dev, 0, 0, init_color);
+        }
     } else {
         dev->decode_drops++;
         return;
@@ -882,8 +896,8 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             }
             daemon_log(LOG_LEVEL_INFO, "controller_reconnected: DualSense BT 0x%llX (Slot %d, Player %d)",
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
-            uint8_t init_color[3] = { 0, 112, 209 };
-            bt_send_rumble_dev(dev, 0, 0, init_color);
+            vpad_reactivate_slot(dev->vpad_slot);
+            dev->last_calibration_attempt = daemon_sys_time_us() - 500000ULL;
         } else {
             // New device connection
             if (vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot) != 0 || dev->vpad_slot < 0) {
@@ -894,12 +908,11 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             }
             dev->connected = true;
             dev->away_since = 0;
+            dev->last_calibration_attempt = daemon_sys_time_us() - 500000ULL;
             int slot_num = vpad_get_assigned_slot_num(dev->vpad_slot);
             daemon_notify("OneFamily: DualSense Wireless (Player %d)", slot_num);
             daemon_log(LOG_LEVEL_INFO, "controller_connected: DualSense BT 0x%llX (Slot %d, Player %d)",
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
-            uint8_t init_color[3] = { 0, 112, 209 };
-            bt_send_rumble_dev(dev, 0, 0, init_color);
         }
         usb_driver_load_remap_for_bt();
         bt_write_status_file();
@@ -1041,6 +1054,8 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
         ds4.quat.w = 1.0f;
     }
 
+    dev->last_pad_data = ds4;
+
     // Send translated controller packet to Virtual DualShock 4
     if (dev->vpad_slot >= 0) {
         vpad_send_data_slot(dev->vpad_slot, &ds4);
@@ -1098,11 +1113,11 @@ void bt_driver_poll_step(void) {
 
     bt_check_timeouts();
 
-    // Feature Report 0x05 request for factory IMU calibration
+    // Feature Report 0x05 request for factory IMU calibration and switching 0x01 -> 0x31 extended mode
     uint64_t now_us = daemon_sys_time_us();
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->address && !dev->calibration_requested &&
+        if (dev->connected && dev->address && (!dev->calibration_requested || !dev->extended_mode) &&
             (now_us - dev->last_calibration_attempt > 1000000ULL)) {
             dev->last_calibration_attempt = now_us;
             struct { uint64_t address; uint8_t report_id; uint8_t reserved[7]; } feature = { dev->address, 5, {0} };
@@ -1116,11 +1131,36 @@ void bt_driver_poll_step(void) {
     }
 
     // Periodic Bluetooth output report keep-alive heartbeat (every 2.5 seconds)
-    // Prevents DualSense internal hardware auto-sleep watchdog from turning off controller during idle cutscenes
+    // Only sent once extended 0x31 report mode is active to avoid stalling initial 0x01 handshake
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->address && (now_us - dev->last_output_time >= 2500000ULL)) {
+        if (dev->connected && dev->extended_mode && dev->address && (now_us - dev->last_output_time >= 2500000ULL)) {
             bt_send_rumble_dev(dev, 0, 0, dev->last_color);
+        }
+    }
+
+    // Continuous Virtual DS4 keep-alive feed while connected (matches Diram1x native.c & USB driver):
+    // When DualSense is in 0x01 mode or momentarily idle without new BT interrupt packets,
+    // keep feeding vpad_send_data_slot (rate-limited to 60 Hz when neutral) so SceMbus never drops the port.
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        BtDevice *dev = &s_devices[i];
+        if (dev->connected && dev->vpad_slot >= 0) {
+            if (now_us - dev->last_input_time > 500000ULL) {
+                dev->last_pad_data.buttons = 0;
+                dev->last_pad_data.leftStick.x = 128;
+                dev->last_pad_data.leftStick.y = 128;
+                dev->last_pad_data.rightStick.x = 128;
+                dev->last_pad_data.rightStick.y = 128;
+                dev->last_pad_data.analogButtons.l2 = 0;
+                dev->last_pad_data.analogButtons.r2 = 0;
+                memset(&dev->last_pad_data.touch, 0, sizeof(dev->last_pad_data.touch));
+                dev->last_pad_data.vel.x = 0.0f;
+                dev->last_pad_data.vel.y = 0.0f;
+                dev->last_pad_data.vel.z = 0.0f;
+            }
+            dev->last_pad_data.connected = 1;
+            dev->last_pad_data.timestamp = now_us;
+            vpad_send_data_slot(dev->vpad_slot, &dev->last_pad_data);
         }
     }
 
@@ -1153,17 +1193,27 @@ void bt_driver_poll_step(void) {
                 address |= ((uint64_t)buffer[pos + 8 + i]) << (8 * i);
             }
 
-            uint8_t report[80];
-            memset(report, 0, sizeof(report));
-            struct {
-                uint64_t address;
-                void*    buffer;
-                uint64_t capacity;
-                uint64_t reserved;
-            } req = { address, report, sizeof(report), 0 };
+            if (ev_type == 0x18 || ev_type == 0x19) {
+                BtDevice *existing = bt_dev_find(address);
+                if (existing) {
+                    existing->calibration_requested = false;
+                    existing->extended_mode = false;
+                }
+            }
 
-            long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
-            if (result > 0) {
+            for (int drain = 0; drain < 16; ++drain) {
+                uint8_t report[80];
+                memset(report, 0, sizeof(report));
+                struct {
+                    uint64_t address;
+                    void*    buffer;
+                    uint64_t capacity;
+                    uint64_t reserved;
+                } req = { address, report, sizeof(report), 0 };
+
+                long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
+                if (result <= 0) break;
+
                 BtDevice* dev = bt_dev_acquire(address);
                 if (dev) {
                     if (result == 43 && report[0] == 41 && report[2] == 5) {
@@ -1379,7 +1429,7 @@ int bt_driver_connected_count(void) {
 }
 
 static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, const uint8_t color[3]) {
-    if (!dev || !dev->connected || s_bt_fd < 0 || !dev->address) return;
+    if (!dev || !dev->connected || !dev->extended_mode || s_bt_fd < 0 || !dev->address) return;
 
     dev->last_output_time = daemon_sys_time_us();
     if (color && (color[0] || color[1] || color[2])) {

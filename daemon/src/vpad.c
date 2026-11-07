@@ -396,6 +396,27 @@ static int vpad_bind_user_slot(int slot_idx, ConfigMode mode, int *out_slot, cha
     }
     s_last_login_count = num_logged_in;
 
+    // In AUTO mode, never force sceMbusBindDeviceWithUserId:
+    // always let the user choose the profile via the native Orbis OS "Who is using this controller?" screen.
+    if (mode == CONFIG_MODE_AUTO) {
+        int player_slot = slot_idx + 1;
+        g_slots[slot_idx].assigned_slot = player_slot;
+        if (g_slots[slot_idx].assigned_username[0] == '\0') {
+            snprintf(g_slots[slot_idx].assigned_username, sizeof(g_slots[slot_idx].assigned_username), "User %d", player_slot);
+        }
+        if (slot_idx == 0) {
+            s_assigned_slot = player_slot;
+            strncpy(s_assigned_username, g_slots[slot_idx].assigned_username, sizeof(s_assigned_username) - 1);
+            s_assigned_username[sizeof(s_assigned_username) - 1] = '\0';
+        }
+        if (out_slot) *out_slot = player_slot;
+        if (out_username && username_len > 0) {
+            strncpy(out_username, g_slots[slot_idx].assigned_username, username_len - 1);
+            out_username[username_len - 1] = '\0';
+        }
+        return 0;
+    }
+
     SceUserServiceUserId target_user = SCE_USER_SERVICE_USER_ID_INVALID;
     int player_slot = slot_idx + 1;
     bool open_picker = false;
@@ -420,30 +441,6 @@ static int vpad_bind_user_slot(int slot_idx, ConfigMode mode, int *out_slot, cha
         if (num_logged_in >= 1) {
             target_user = valid_users[0];
             player_slot = 1;
-        }
-    } else {
-        // CONFIG_MODE_AUTO (default)
-        if (slot_idx == 0) {
-            if (num_logged_in >= 2) {
-                // 2+ users logged in (e.g. physical DS4 is on Player 1): bind to Player 2
-                target_user = valid_users[1];
-                player_slot = 2;
-            } else if (num_logged_in == 1) {
-                // 1 user logged in: bind directly to Player 1
-                target_user = valid_users[0];
-                player_slot = 1;
-            }
-        } else {
-            // Secondary OneFamily controller slot (slot_idx >= 1)
-            if (num_logged_in > slot_idx) {
-                target_user = valid_users[slot_idx];
-                player_slot = slot_idx + 1;
-            } else {
-                // Need another user to log in for this controller slot
-                target_user = SCE_USER_SERVICE_USER_ID_INVALID;
-                player_slot = slot_idx + 1;
-                open_picker = true;
-            }
         }
     }
 
@@ -547,6 +544,19 @@ void vpad_pulse_ps_button(void) {
     }
 }
 
+void vpad_reactivate_slot(int slot) {
+    if (slot < 0 || slot >= VPAD_MAX_SLOTS || !g_slots[slot].active || g_slots[slot].handle < 0) {
+        return;
+    }
+    if (p_scePadSetConnection) {
+        int r = p_scePadSetConnection(g_slots[slot].handle, 1);
+        daemon_log(LOG_LEVEL_INFO, "vpad_reactivate_slot(%d): scePadSetConnection(0x%X, 1) = 0x%08X",
+                   slot, g_slots[slot].handle, r);
+    }
+    daemon_sys_usleep(50000);
+    vpad_pulse_ps_button_slot(slot);
+}
+
 int vpad_get_assigned_slot(void) {
     return s_assigned_slot;
 }
@@ -575,12 +585,18 @@ void vpad_check_user_rebind(ConfigMode mode) {
         if (s_last_login_count == -1) {
             s_last_login_count = num_logged_in;
         } else if (num_logged_in != s_last_login_count) {
-            daemon_log(LOG_LEVEL_INFO, "Logged in user count changed (%d -> %d), updating virtual pad binding...",
-                       s_last_login_count, num_logged_in);
+            int prev_count = s_last_login_count;
+            daemon_log(LOG_LEVEL_INFO, "Logged in user count changed (%d -> %d), updating virtual pad state...",
+                       prev_count, num_logged_in);
             s_last_login_count = num_logged_in;
             for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
-                if (g_slots[i].active) {
-                    vpad_bind_user_slot(i, mode, NULL, NULL, 0);
+                if (g_slots[i].active && g_slots[i].handle >= 0) {
+                    if (p_scePadSetConnection) {
+                        p_scePadSetConnection(g_slots[i].handle, 1);
+                    }
+                    if (mode != CONFIG_MODE_AUTO) {
+                        vpad_bind_user_slot(i, mode, NULL, NULL, 0);
+                    }
                 }
             }
         }
@@ -728,9 +744,12 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
         daemon_log(LOG_LEVEL_INFO, "scePadSetConnection(0x%X, 1) = 0x%08X", vHandle, r);
     }
 
-    // Allow SceMbus 50ms to register the new virtual port before binding user or pulsing PS
+    // Allow SceMbus 50ms to register the new virtual port before pulsing PS to open the native user picker
     daemon_sys_usleep(50000);
-    vpad_bind_user_slot(slot, g_daemon_config.mode, NULL, NULL, 0);
+    vpad_pulse_ps_button_slot(slot);
+    if (g_daemon_config.mode != CONFIG_MODE_AUTO) {
+        vpad_bind_user_slot(slot, g_daemon_config.mode, NULL, NULL, 0);
+    }
 
     if (out_slot) *out_slot = slot;
     return 0;
