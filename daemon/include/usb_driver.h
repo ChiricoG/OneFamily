@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "controller_detect.h"
+#include "ds4.h"
 
 typedef struct {
     bool connected;
@@ -26,5 +27,7 @@ bool usb_driver_is_connected(void);
 void usb_driver_poll_step(void);
 void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor);
 void usb_driver_reload_remap(void);
+void usb_driver_load_remap_for_bt(void);
+void usb_driver_apply_bt_remap(OrbisPadData* ds4);
 
 #endif // DAEMON_USB_DRIVER_H

@@ -35,6 +35,8 @@ typedef int (*scePadVirtualDeviceGetRemoteSetting_t)(int handle, void *out_setti
 typedef int32_t (*scePadGetHandle_t)(int32_t userId, uint32_t type, uint32_t index);
 typedef int32_t (*scePadOpen_t)(int32_t userId, int32_t type, int32_t index, void *param);
 typedef int32_t (*scePadClose_t)(int32_t handle);
+typedef int32_t (*scePadReadState_t)(int32_t handle, void *pData);
+typedef int32_t (*scePadGetControllerInformation_t)(int32_t handle, void *pInfo);
 typedef int32_t (*scePadGetDeviceId_t)(int32_t handle, int64_t *outDeviceId);
 typedef int32_t (*scePadDisconnectPort_t)(int32_t handle);
 typedef int32_t (*scePadDisconnectDevice_t)(int32_t handle_or_devId);
@@ -113,6 +115,8 @@ static scePadVirtualDeviceGetRemoteSetting_t p_scePadVirtualDeviceGetRemoteSetti
 static scePadGetHandle_t                     p_scePadGetHandle = NULL;
 static scePadOpen_t                          p_scePadOpen = NULL;
 static scePadClose_t                         p_scePadClose = NULL;
+static scePadReadState_t                     p_scePadReadState = NULL;
+static scePadGetControllerInformation_t      p_scePadGetControllerInformation = NULL;
 static scePadGetDeviceId_t                   p_scePadGetDeviceId = NULL;
 static scePadDisconnectPort_t                p_scePadDisconnectPort = NULL;
 static scePadDisconnectDevice_t              p_scePadDisconnectDevice = NULL;
@@ -275,9 +279,25 @@ static void vpad_poweroff_physical_ds4(void) {
         }
 
         if (pad_handle >= 0 && !is_our_virtual_handle(pad_handle)) {
+            uint8_t dummy_state[256];
+            if (p_scePadReadState) {
+                memset(dummy_state, 0, sizeof(dummy_state));
+                p_scePadReadState(pad_handle, dummy_state);
+            }
+            if (p_scePadGetControllerInformation) {
+                memset(dummy_state, 0, sizeof(dummy_state));
+                p_scePadGetControllerInformation(pad_handle, dummy_state);
+            }
+
             int64_t dev_id[4] = {0, 0, 0, 0};
             if (p_scePadGetDeviceId) {
                 int r_id = p_scePadGetDeviceId(pad_handle, dev_id);
+                if (!is_valid_dev_id(dev_id[0]) && p_scePadReadState) {
+                    daemon_sys_usleep(10000);
+                    memset(dummy_state, 0, sizeof(dummy_state));
+                    p_scePadReadState(pad_handle, dummy_state);
+                    r_id = p_scePadGetDeviceId(pad_handle, dev_id);
+                }
                 daemon_log(LOG_LEVEL_INFO, "Physical DS4 [user=0x%X, handle=0x%X]: scePadGetDeviceId() = 0x%08X, dev_id=0x%llX",
                            uid, pad_handle, r_id, (unsigned long long)dev_id[0]);
             }
@@ -605,6 +625,8 @@ static int vpad_ensure_subsystem(void) {
         daemon_sys_dlsym(g_hPad, "scePadGetHandle", (void**)&p_scePadGetHandle);
         daemon_sys_dlsym(g_hPad, "scePadOpen", (void**)&p_scePadOpen);
         daemon_sys_dlsym(g_hPad, "scePadClose", (void**)&p_scePadClose);
+        daemon_sys_dlsym(g_hPad, "scePadReadState", (void**)&p_scePadReadState);
+        daemon_sys_dlsym(g_hPad, "scePadGetControllerInformation", (void**)&p_scePadGetControllerInformation);
         daemon_sys_dlsym(g_hPad, "scePadGetDeviceId", (void**)&p_scePadGetDeviceId);
         daemon_sys_dlsym(g_hPad, "scePadDisconnectPort", (void**)&p_scePadDisconnectPort);
         daemon_sys_dlsym(g_hPad, "scePadDisconnectDevice", (void**)&p_scePadDisconnectDevice);

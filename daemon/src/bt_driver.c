@@ -7,6 +7,8 @@
  */
 
 #include "bt_driver.h"
+#include "usb_driver.h"
+#include "translator.h"
 #include "daemon_syscalls.h"
 #include "vpad.h"
 #include "log.h"
@@ -899,6 +901,7 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             uint8_t init_color[3] = { 0, 112, 209 };
             bt_send_rumble_dev(dev, 0, 0, init_color);
         }
+        usb_driver_load_remap_for_bt();
         bt_write_status_file();
     }
 
@@ -908,14 +911,29 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
     memset(&ds4, 0, sizeof(ds4));
 
     // Analog Sticks
-    ds4.leftStick.x  = data[0];
-    ds4.leftStick.y  = data[1];
-    ds4.rightStick.x = data[2];
-    ds4.rightStick.y = data[3];
+    uint8_t lx = data[0];
+    uint8_t ly = data[1];
+    uint8_t rx = data[2];
+    uint8_t ry = data[3];
+    if (g_daemon_config.stick_deadzone > 0) {
+        lx = translator_apply_deadzone(lx, g_daemon_config.stick_deadzone);
+        ly = translator_apply_deadzone(ly, g_daemon_config.stick_deadzone);
+        rx = translator_apply_deadzone(rx, g_daemon_config.stick_deadzone);
+        ry = translator_apply_deadzone(ry, g_daemon_config.stick_deadzone);
+    }
+    ds4.leftStick.x  = lx;
+    ds4.leftStick.y  = ly;
+    ds4.rightStick.x = rx;
+    ds4.rightStick.y = ry;
 
     // Analog Triggers
-    ds4.analogButtons.l2 = data[4];
-    ds4.analogButtons.r2 = data[5];
+    if (g_daemon_config.swap_triggers_bumpers) {
+        ds4.analogButtons.l2 = (data[8] & 0x01) ? 255 : 0;
+        ds4.analogButtons.r2 = (data[8] & 0x02) ? 255 : 0;
+    } else {
+        ds4.analogButtons.l2 = data[4];
+        ds4.analogButtons.r2 = data[5];
+    }
 
     // D-Pad
     ds4.buttons = dpad_map[direction];
@@ -927,10 +945,17 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
     if (data[7] & 0x80) ds4.buttons |= DS4_BUTTON_TRIANGLE;
 
     // Bumpers, Triggers & Stick Clicks
-    if (data[8] & 0x01) ds4.buttons |= DS4_BUTTON_L1;
-    if (data[8] & 0x02) ds4.buttons |= DS4_BUTTON_R1;
-    if (data[8] & 0x04) ds4.buttons |= DS4_BUTTON_L2;
-    if (data[8] & 0x08) ds4.buttons |= DS4_BUTTON_R2;
+    if (g_daemon_config.swap_triggers_bumpers) {
+        if (data[8] & 0x01) ds4.buttons |= DS4_BUTTON_L2;
+        if (data[8] & 0x02) ds4.buttons |= DS4_BUTTON_R2;
+        if ((data[8] & 0x04) || data[4] >= g_daemon_config.trigger_threshold) ds4.buttons |= DS4_BUTTON_L1;
+        if ((data[8] & 0x08) || data[5] >= g_daemon_config.trigger_threshold) ds4.buttons |= DS4_BUTTON_R1;
+    } else {
+        if (data[8] & 0x01) ds4.buttons |= DS4_BUTTON_L1;
+        if (data[8] & 0x02) ds4.buttons |= DS4_BUTTON_R1;
+        if ((data[8] & 0x04) || data[4] >= g_daemon_config.trigger_threshold) ds4.buttons |= DS4_BUTTON_L2;
+        if ((data[8] & 0x08) || data[5] >= g_daemon_config.trigger_threshold) ds4.buttons |= DS4_BUTTON_R2;
+    }
     if (data[8] & 0x10) ds4.buttons |= DS4_BUTTON_SHARE;   // Create
     if (data[8] & 0x20) ds4.buttons |= DS4_BUTTON_OPTIONS; // Options
     if (data[8] & 0x40) ds4.buttons |= DS4_BUTTON_L3;
@@ -944,6 +969,9 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
     if (g_daemon_config.dualsense_mute_action == 1 && (data[9] & 0x04)) {
         ds4.buttons |= DS4_BUTTON_TOUCHPAD;
     }
+
+    // Apply per-controller custom button remap rules (054C_0CE6.ini / 054C_0DF2.ini)
+    usb_driver_apply_bt_remap(&ds4);
 
     // Universal Shortcuts & De-ghosting for DualSense BT
     bool share_down = (ds4.buttons & DS4_BUTTON_SHARE) != 0;
@@ -1507,6 +1535,7 @@ void bt_driver_send_rumble(uint8_t large, uint8_t small, const uint8_t color[3])
 }
 
 void bt_driver_refresh_settings(void) {
+    usb_driver_load_remap_for_bt();
     uint8_t default_color[3] = { 0, 112, 209 };
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         if (s_devices[i].connected) {

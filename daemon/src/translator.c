@@ -583,6 +583,27 @@ void switch_to_ds4(const SwitchInputOnlyReport* sw, OrbisPadData* ds4) {
     translator_convert_switch(sw, ds4, NULL);
 }
 
+static bool is_valid_imu_sample(int16_t ax, int16_t ay, int16_t az, int16_t gx, int16_t gy, int16_t gz) {
+    // A physical accelerometer always measures gravity (~1g) on at least one axis.
+    // Clones without an IMU either leave accel all-zero or fill the 12 bytes with a constant dummy word.
+    if (ax == 0 && ay == 0 && az == 0) {
+        return false;
+    }
+    if (ax == ay && ay == az) {
+        uint16_t u = (uint16_t)ax;
+        if (u == 0xFFFFU || u == 0x8000U || u == 0x8080U || u == 0x7FFFU || (gx == ax && gy == ax && gz == ax)) {
+            return false;
+        }
+    }
+    if (gx == gy && gy == gz) {
+        uint16_t ug = (uint16_t)gx;
+        if (ug == 0xFFFFU || ug == 0x8000U || ug == 0x8080U || ug == 0x7FFFU) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /*
  * Switch Pro Controller full report translation function (Reports 0x30, 0x21, 0x31)
  */
@@ -751,7 +772,7 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
         int16_t sw_gy = (int16_t)((uint16_t)raw[21] | ((uint16_t)raw[22] << 8));
         int16_t sw_gz = (int16_t)((uint16_t)raw[23] | ((uint16_t)raw[24] << 8));
 
-        if (sw_ax != 0 || sw_ay != 0 || sw_az != 0 || sw_gx != 0 || sw_gy != 0 || sw_gz != 0) {
+        if (is_valid_imu_sample(sw_ax, sw_ay, sw_az, sw_gx, sw_gy, sw_gz)) {
             // Switch Pro frame (+X forward, +Y left, +Z up) -> PS4 DS4 frame (+X right, +Y up, +Z backward)
             // Accel: 4096 LSB = 1g; Gyro: 0.070 deg/s/LSB = 0.00122173048 rad/s/LSB
             const float k_sw_accel = 1.0f / 4096.0f;
@@ -1271,22 +1292,33 @@ void translator_convert_ds4(const DS4Report* rpt, OrbisPadData* ds4, const Trans
     ds4->buttons = ds4_buttons;
 
     // Capacitive Touchpad (up to 2 points)
+    // Guard against zero-filled touchpad bytes on third-party clones where contact==0x00 would falsely mean active touch
     uint8_t finger_count = 0;
-    if ((rpt->touch_reports[0].points[0].contact & 0x80) == 0) {
-        ds4->touch.touch[0].finger = 0;
-        ds4->touch.touch[0].x = (uint16_t)rpt->touch_reports[0].points[0].x_lo |
-                               (((uint16_t)(rpt->touch_reports[0].points[0].x_hi_y_lo & 0x0F)) << 8);
-        ds4->touch.touch[0].y = (uint16_t)(rpt->touch_reports[0].points[0].x_hi_y_lo >> 4) |
-                               (((uint16_t)rpt->touch_reports[0].points[0].y_hi) << 4);
-        finger_count++;
-    }
-    if ((rpt->touch_reports[0].points[1].contact & 0x80) == 0) {
-        ds4->touch.touch[1].finger = 1;
-        ds4->touch.touch[1].x = (uint16_t)rpt->touch_reports[0].points[1].x_lo |
-                               (((uint16_t)(rpt->touch_reports[0].points[1].x_hi_y_lo & 0x0F)) << 8);
-        ds4->touch.touch[1].y = (uint16_t)(rpt->touch_reports[0].points[1].x_hi_y_lo >> 4) |
-                               (((uint16_t)rpt->touch_reports[0].points[1].y_hi) << 4);
-        finger_count++;
+    if (rpt->num_touch_reports > 0) {
+        if ((rpt->touch_reports[0].points[0].contact & 0x80) == 0 &&
+            (rpt->touch_reports[0].points[0].contact != 0 ||
+             rpt->touch_reports[0].points[0].x_lo != 0 ||
+             rpt->touch_reports[0].points[0].x_hi_y_lo != 0 ||
+             rpt->touch_reports[0].points[0].y_hi != 0)) {
+            ds4->touch.touch[0].finger = 0;
+            ds4->touch.touch[0].x = (uint16_t)rpt->touch_reports[0].points[0].x_lo |
+                                   (((uint16_t)(rpt->touch_reports[0].points[0].x_hi_y_lo & 0x0F)) << 8);
+            ds4->touch.touch[0].y = (uint16_t)(rpt->touch_reports[0].points[0].x_hi_y_lo >> 4) |
+                                   (((uint16_t)rpt->touch_reports[0].points[0].y_hi) << 4);
+            finger_count++;
+        }
+        if ((rpt->touch_reports[0].points[1].contact & 0x80) == 0 &&
+            (rpt->touch_reports[0].points[1].contact != 0 ||
+             rpt->touch_reports[0].points[1].x_lo != 0 ||
+             rpt->touch_reports[0].points[1].x_hi_y_lo != 0 ||
+             rpt->touch_reports[0].points[1].y_hi != 0)) {
+            ds4->touch.touch[1].finger = 1;
+            ds4->touch.touch[1].x = (uint16_t)rpt->touch_reports[0].points[1].x_lo |
+                                   (((uint16_t)(rpt->touch_reports[0].points[1].x_hi_y_lo & 0x0F)) << 8);
+            ds4->touch.touch[1].y = (uint16_t)(rpt->touch_reports[0].points[1].x_hi_y_lo >> 4) |
+                                   (((uint16_t)rpt->touch_reports[0].points[1].y_hi) << 4);
+            finger_count++;
+        }
     }
     ds4->touch.fingers = finger_count;
 
@@ -1297,15 +1329,18 @@ void translator_convert_ds4(const DS4Report* rpt, OrbisPadData* ds4, const Trans
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
 
-    ds4->vel.x = (float)rpt->gyro[0] * k_ds4_gyro_scale;
-    ds4->vel.y = (float)rpt->gyro[1] * k_ds4_gyro_scale;
-    ds4->vel.z = (float)rpt->gyro[2] * k_ds4_gyro_scale;
-
-    if (rpt->accel[0] != 0 || rpt->accel[1] != 0 || rpt->accel[2] != 0) {
+    if (is_valid_imu_sample(rpt->accel[0], rpt->accel[1], rpt->accel[2],
+                            rpt->gyro[0], rpt->gyro[1], rpt->gyro[2])) {
+        ds4->vel.x = (float)rpt->gyro[0] * k_ds4_gyro_scale;
+        ds4->vel.y = (float)rpt->gyro[1] * k_ds4_gyro_scale;
+        ds4->vel.z = (float)rpt->gyro[2] * k_ds4_gyro_scale;
         ds4->acell.x = (float)rpt->accel[0] / 8192.0f;
         ds4->acell.y = (float)rpt->accel[1] / 8192.0f;
         ds4->acell.z = (float)rpt->accel[2] / 8192.0f;
     } else {
+        ds4->vel.x = 0.0f;
+        ds4->vel.y = 0.0f;
+        ds4->vel.z = 0.0f;
         ds4->acell.x = 0.0f;
         ds4->acell.y = 0.0f;
         ds4->acell.z = 1.0f;

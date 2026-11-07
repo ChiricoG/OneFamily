@@ -55,6 +55,7 @@ typedef struct __attribute__((packed)) {
     uint8_t left_stick[3];      // 12-bit X, 12-bit Y
     uint8_t right_stick[3];     // 12-bit X, 12-bit Y
     uint8_t vibrator;           // Vibrator report
+    uint8_t imu_data[36];       // 3 IMU samples (12 bytes each: accel_x/y/z, gyro_x/y/z) or subcommand reply
 } SwitchFullReport;
 
 /*

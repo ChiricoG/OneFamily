@@ -367,6 +367,58 @@ static int detect_ds4_endpoints(libusb_device* dev, DetectedController* out) {
     return found;
 }
 
+static int detect_ds3_endpoints(libusb_device* dev, DetectedController* out) {
+    if (!dev || !out) return 0;
+
+    struct libusb_config_descriptor* cfg = NULL;
+    if (usbd_get_active_config_descriptor(dev, &cfg) != 0 || !cfg) {
+        return 0;
+    }
+
+    int found = 0;
+    for (int i = 0; i < cfg->bNumInterfaces && !found; i++) {
+        const struct libusb_interface* intf = &cfg->interface[i];
+        for (int a = 0; a < intf->num_altsetting && !found; a++) {
+            const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
+
+            if (alt->bInterfaceClass != USB_CLASS_HID) continue;
+            if (alt->bInterfaceSubClass == 1 && (alt->bInterfaceProtocol == 1 || alt->bInterfaceProtocol == 2)) {
+                continue;
+            }
+
+            uint8_t ep_in = 0;
+            uint8_t ep_out = 0;
+            uint8_t interval = 0;
+            for (int k = 0; k < alt->bNumEndpoints; k++) {
+                const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
+                if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
+                    if (ep->bEndpointAddress & EP_DIR_IN) {
+                        if (ep_in == 0) {
+                            ep_in = ep->bEndpointAddress;
+                            interval = ep->bInterval;
+                        }
+                    } else {
+                        if (ep_out == 0) ep_out = ep->bEndpointAddress;
+                    }
+                }
+            }
+
+            if (ep_in != 0) {
+                out->type          = CONTROLLER_DS3;
+                out->interface_num = alt->bInterfaceNumber;
+                out->alt_setting   = alt->bAlternateSetting;
+                out->ep_in         = ep_in;
+                out->ep_out        = ep_out ? ep_out : 0x02;
+                out->bInterval     = interval ? interval : 10;
+                found = 1;
+            }
+        }
+    }
+
+    usbd_free_config_descriptor(cfg);
+    return found;
+}
+
 int controller_identify(libusb_device* dev, const struct libusb_device_descriptor* desc, DetectedController* out) {
     if (!dev || !desc || !out) return 0;
     memset(out, 0, sizeof(*out));
@@ -393,13 +445,16 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
     // 1. Sony DualShock 3 & DualSense
     if (desc->idVendor == SONY_VID) {
         if (desc->idProduct == SONY_DS3_PID) {
+            if (!detect_ds3_endpoints(dev, out)) {
+                out->type = CONTROLLER_DS3;
+                out->interface_num = 0;
+                out->ep_in = 0x81;
+                out->ep_out = 0x02;
+                out->bInterval = 10;
+            }
             out->type = CONTROLLER_DS3;
             out->vid = desc->idVendor;
             out->pid = desc->idProduct;
-            out->interface_num = 0;
-            out->ep_in = 0x81;
-            out->ep_out = 0x02;
-            out->bInterval = 1;
             out->kbd_interface_num = 0xFF;
             return 1;
         } else if (desc->idProduct == SONY_DUALSENSE_PID || desc->idProduct == SONY_DUALSENSE_EDGE_PID) {

@@ -188,7 +188,9 @@ static bool     s_usb_is_reenum_ds4 = false; // true when DS4 third-party claime
 // Track multi-mode Switch Pro / DS4 clones cycling on the USB bus (e.g. GXtrust Muta 542)
 static uint64_t s_last_switch_clone_seen_us = 0;
 static uint64_t s_last_unclaimed_ds4_disconnect_us = 0;
+static int      s_unclaimed_ds4_cycle_count = 0;
 static bool     s_force_claim_cycling_ds4 = false;
+static bool     s_switch_pro_full_mode = false;
 static uint16_t s_cached_sony_vid = 0;
 static uint16_t s_cached_sony_pid = 0;
 static int      s_cached_sony_result = -1;
@@ -260,6 +262,8 @@ typedef struct {
 #define MAX_REMAP_RULES 16
 static ButtonRemapRule s_remap_rules[MAX_REMAP_RULES];
 static int s_remap_rule_count = 0;
+static ButtonRemapRule s_bt_remap_rules[MAX_REMAP_RULES];
+static int s_bt_remap_rule_count = 0;
 
 static bool remap_str_eq(const char* a, const char* b) {
     if (!a || !b) return false;
@@ -289,8 +293,8 @@ static bool parse_remap_btn_name(const char* name, uint32_t* out_bit) {
     return false;
 }
 
-static void load_controller_remap_ini(uint16_t vid, uint16_t pid) {
-    s_remap_rule_count = 0;
+static void load_controller_remap_ini_into(uint16_t vid, uint16_t pid, ButtonRemapRule* out_rules, int* out_count) {
+    *out_count = 0;
     if (vid == 0 && pid == 0) return;
 
     char path[128];
@@ -320,7 +324,7 @@ static void load_controller_remap_ini(uint16_t vid, uint16_t pid) {
         }
 
         char* eq = strchr(line, '=');
-        if (eq && s_remap_rule_count < MAX_REMAP_RULES) {
+        if (eq && *out_count < MAX_REMAP_RULES) {
             *eq = '\0';
             char* key = line;
             char* val = eq + 1;
@@ -335,23 +339,55 @@ static void load_controller_remap_ini(uint16_t vid, uint16_t pid) {
             }
             uint32_t src_bit = 0, dst_bit = 0;
             if (parse_remap_btn_name(key, &src_bit) && src_bit != 0 && parse_remap_btn_name(val, &dst_bit)) {
-                s_remap_rules[s_remap_rule_count].src_bit = src_bit;
-                s_remap_rules[s_remap_rule_count].dst_bit = dst_bit;
-                s_remap_rule_count++;
+                out_rules[*out_count].src_bit = src_bit;
+                out_rules[*out_count].dst_bit = dst_bit;
+                (*out_count)++;
             }
         }
         line = next;
     }
 
-    if (s_remap_rule_count > 0) {
-        daemon_log(LOG_LEVEL_INFO, "Loaded %d custom button remap rule(s) from %s", s_remap_rule_count, path);
+    if (*out_count > 0) {
+        daemon_log(LOG_LEVEL_INFO, "Loaded %d custom button remap rule(s) from %s", *out_count, path);
     }
+}
+
+static void load_controller_remap_ini(uint16_t vid, uint16_t pid) {
+    load_controller_remap_ini_into(vid, pid, s_remap_rules, &s_remap_rule_count);
+}
+
+void usb_driver_load_remap_for_bt(void) {
+    load_controller_remap_ini_into(0x054C, 0x0CE6, s_bt_remap_rules, &s_bt_remap_rule_count);
+    if (s_bt_remap_rule_count == 0) {
+        load_controller_remap_ini_into(0x054C, 0x0DF2, s_bt_remap_rules, &s_bt_remap_rule_count);
+    }
+}
+
+void usb_driver_apply_bt_remap(OrbisPadData* ds4) {
+    if (!ds4 || s_bt_remap_rule_count <= 0) return;
+    uint32_t orig_btns = ds4->buttons;
+    uint32_t new_btns  = orig_btns;
+    for (int i = 0; i < s_bt_remap_rule_count; i++) {
+        new_btns &= ~s_bt_remap_rules[i].src_bit;
+    }
+    for (int i = 0; i < s_bt_remap_rule_count; i++) {
+        if (orig_btns & s_bt_remap_rules[i].src_bit) {
+            new_btns |= s_bt_remap_rules[i].dst_bit;
+            if (s_bt_remap_rules[i].dst_bit == DS4_BUTTON_L2 && ds4->analogButtons.l2 == 0) {
+                ds4->analogButtons.l2 = 255;
+            } else if (s_bt_remap_rules[i].dst_bit == DS4_BUTTON_R2 && ds4->analogButtons.r2 == 0) {
+                ds4->analogButtons.r2 = 255;
+            }
+        }
+    }
+    ds4->buttons = new_btns;
 }
 
 void usb_driver_reload_remap(void) {
     if (g_usb_state.connected) {
         load_controller_remap_ini(g_usb_state.vid, g_usb_state.pid);
     }
+    usb_driver_load_remap_for_bt();
 }
 
 static void close_controller(void) {
@@ -407,6 +443,7 @@ static void close_controller(void) {
     s_ds4_ep_out_stalls = 0;
     s_x360_wireless_present = -1;
     s_share_combo_active = false;
+    s_switch_pro_full_mode = false;
     s_remap_rule_count = 0;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
     s_last_ds4.leftStick.x = 128;
@@ -558,9 +595,6 @@ static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expec
             if (rx[0] == 0x81 && (expected_ack == 0xFF || rx[1] == expected_ack)) {
                 return 0; // Matched expected proprietary ACK
             }
-            if (rx[0] == 0x21 || rx[0] == 0x30) {
-                return 0; // Already in subcommand reply or full report mode!
-            }
         }
         daemon_sys_usleep(2000);
     }
@@ -570,7 +604,10 @@ static int switch_pro_send_and_wait(const uint8_t* tx, int tx_len, uint8_t expec
 
 static bool is_official_nintendo_switch_pro(libusb_device_handle* h, const struct libusb_device_descriptor* desc) {
     if (!h || !p_sceUsbdControlTransfer || !desc) return false;
-    if (desc->idVendor != SWITCH_PRO_VID || desc->idProduct != SWITCH_PRO_PID) return false;
+    if (desc->idVendor != SWITCH_PRO_VID ||
+        (desc->idProduct != SWITCH_PRO_PID && desc->idProduct != SWITCH_JOYCON_GRIP_PID)) {
+        return false;
+    }
 
     int any_string_read = 0;
 
@@ -635,13 +672,16 @@ static bool is_official_nintendo_switch_pro(libusb_device_handle* h, const struc
         return true;
     }
 
-    s_last_switch_clone_seen_us = daemon_sys_time_us();
+    if (desc->idVendor == SWITCH_PRO_VID && desc->idProduct == SWITCH_PRO_PID) {
+        s_last_switch_clone_seen_us = daemon_sys_time_us();
+    }
     daemon_log(LOG_LEVEL_INFO, "Device is a Switch Pro Clone (non-Nintendo descriptor) - passive mode enforced");
     return false;
 }
 
 static void init_switch_pro_controller(libusb_device_handle* h, const struct libusb_device_descriptor* desc) {
     daemon_log(LOG_LEVEL_INFO, "Starting Switch Pro / Clone wake-up sequence...");
+    s_switch_pro_full_mode = false;
 
     // 1. Distinguish official Nintendo from third-party clones:
     // Third-party Switch Pro clones (like Trust GXT Muta, Nyko, PowerA, Shanwan)
@@ -676,6 +716,8 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
         return;
     }
 
+    s_switch_pro_full_mode = true;
+
     // 2. Official Switch Pro USB Handshake (0x80 commands):
     // The 0x80 command packet is strictly 2 BYTES (u8 buf[2] = { 0x80, cmd }),
     // matching Linux kernel hid-nintendo (joycon_send_usb).
@@ -704,6 +746,7 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
 
     // Standard Switch Subcommands (AnyPad / Linux hid-nintendo model):
     // Step 1: Subcommand 0x03 (Set Input Report Mode to 0x30 Full Mode)
+    // Note: Never send HID SET_REPORT (0x21, 0x09) on EP0 to Switch Pro controllers as EP0 stalls on output reports.
     for (int attempt = 1; attempt <= 3; attempt++) {
         memset(pkt, 0, sizeof(pkt));
         pkt[0] = 0x01; // Output report ID
@@ -714,9 +757,6 @@ static void init_switch_pro_controller(libusb_device_handle* h, const struct lib
         pkt[11] = 0x30; // 0x30 = Standard full report mode
         int r = switch_pro_send_and_wait(pkt, sizeof(pkt), 0, 100);
         daemon_log(LOG_LEVEL_INFO, "Switch Pro SetInputMode 0x30 attempt %d ret=%d", attempt, r);
-        if (r != 0 && p_sceUsbdControlTransfer && g_dev_handle) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0201, g_claimed_interface, pkt, sizeof(pkt), 50);
-        }
         if (r == 0) break;
         daemon_sys_usleep(10000);
     }
@@ -836,17 +876,44 @@ static bool str_contains_nocase(const char* haystack, const char* needle) {
     return false;
 }
 
+#define USB_MAX_SNAPSHOT_DEVICES 16
+
+typedef struct {
+    uint16_t vid;
+    uint16_t pid;
+    uint8_t  bDeviceClass;
+} UsbDeviceSnapshot;
+
+static UsbDeviceSnapshot s_last_bus_devices[USB_MAX_SNAPSHOT_DEVICES];
+static int s_last_bus_device_count = -1; // -1 = first scan pending
+
+static const uint8_t s_ds3_output_template[49] = {
+    0x01, /* Report ID 0x01 */
+    0x00, /* padding */
+    0xFF, 0x00, /* right (small) motor duration, on/off (0 or 1) */
+    0xFF, 0x00, /* left (large) motor duration, force (0..255) */
+    0x00, 0x00, 0x00, 0x00,
+    0x02, /* LED_1 = 0x02 */
+    0xFF, 0x27, 0x10, 0x00, 0x32, /* LED 4 */
+    0xFF, 0x27, 0x10, 0x00, 0x32, /* LED 3 */
+    0xFF, 0x27, 0x10, 0x00, 0x32, /* LED 2 */
+    0xFF, 0x27, 0x10, 0x00, 0x32, /* LED 1 */
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
 int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descriptor* desc) {
     if (!dev || !desc || desc->idVendor != SONY_VID) return 0;
 
     uint64_t now_us = daemon_sys_time_us();
 
     // 1. If a multi-mode clone (e.g. GXtrust Muta 542) recently enumerated as a Switch Pro clone
-    // or cycled its 0x054C:0x05C4 USB connection due to watchdog timeout, claim it immediately!
+    // or cycled its 0x054C:0x05C4 USB connection >= 2 times due to watchdog timeout, claim it immediately!
     if (desc->idProduct == SONY_DS4_V1_PID) {
         if (s_force_claim_cycling_ds4 ||
-            (s_last_switch_clone_seen_us != 0 && (now_us - s_last_switch_clone_seen_us) < 20000000ULL) ||
-            (s_last_unclaimed_ds4_disconnect_us != 0 && (now_us - s_last_unclaimed_ds4_disconnect_us) < 15000000ULL)) {
+            (s_last_switch_clone_seen_us != 0 && (now_us - s_last_switch_clone_seen_us) < 25000000ULL) ||
+            (s_unclaimed_ds4_cycle_count >= 2 && s_last_unclaimed_ds4_disconnect_us != 0 && (now_us - s_last_unclaimed_ds4_disconnect_us) < 15000000ULL)) {
             s_force_claim_cycling_ds4 = true;
             daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X detected as cycling/multi-mode DS4 clone — claiming as CONTROLLER_DS4",
                        desc->idVendor, desc->idProduct);
@@ -855,7 +922,15 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
     }
 
     // 2. Return cached result if the USB bus topology has not changed since the last check
-    if (s_cached_sony_result >= 0 && s_cached_sony_vid == desc->idVendor && s_cached_sony_pid == desc->idProduct) {
+    // and at most 1 device on the bus shares this VID:PID
+    int same_vid_pid_count = 0;
+    for (int i = 0; i < s_last_bus_device_count && i < USB_MAX_SNAPSHOT_DEVICES; i++) {
+        if (s_last_bus_devices[i].vid == desc->idVendor && s_last_bus_devices[i].pid == desc->idProduct) {
+            same_vid_pid_count++;
+        }
+    }
+    if (same_vid_pid_count <= 1 && s_cached_sony_result >= 0 &&
+        s_cached_sony_vid == desc->idVendor && s_cached_sony_pid == desc->idProduct) {
         return s_cached_sony_result;
     }
 
@@ -920,22 +995,18 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
                        desc->idVendor, desc->idProduct, r, r2);
             s_force_claim_cycling_ds4 = true;
             return 0; // Persistent truncation = multi-mode clone cycling personality
+        } else if (desc->idProduct == SONY_DS4_V1_PID && desc->iManufacturer != 0) {
+            // String read failed completely (< 0) on 0x054C:0x05C4
+            if (s_last_unclaimed_ds4_disconnect_us != 0 && (now_us - s_last_unclaimed_ds4_disconnect_us) < 15000000ULL) {
+                daemon_log(LOG_LEVEL_INFO, "Device 0x054C:0x05C4 string read failed after disconnect cycle — claiming as third-party DS4");
+                s_force_claim_cycling_ds4 = true;
+                return 0;
+            }
         }
     }
     // If opening or descriptor read failed, default to treating Sony VID as genuine Sony to be safe
     return 1;
 }
-
-#define USB_MAX_SNAPSHOT_DEVICES 16
-
-typedef struct {
-    uint16_t vid;
-    uint16_t pid;
-    uint8_t  bDeviceClass;
-} UsbDeviceSnapshot;
-
-static UsbDeviceSnapshot s_last_bus_devices[USB_MAX_SNAPSHOT_DEVICES];
-static int s_last_bus_device_count = -1; // -1 = first scan pending
 
 static bool probe_microsoft_os_descriptor(libusb_device_handle* h) {
     if (!p_sceUsbdControlTransfer || !h) return false;
@@ -993,12 +1064,18 @@ static int scan_and_open(void) {
     if (count <= 0 || !list) {
         if (s_last_bus_device_count != 0) {
             // Check if an unclaimed 0x054C:0x05C4 just dropped off the bus (watchdog reset of a multi-mode clone like Muta 542)
+            uint64_t disc_now_us = daemon_sys_time_us();
             for (int i = 0; i < s_last_bus_device_count && i < USB_MAX_SNAPSHOT_DEVICES; i++) {
                 if (s_last_bus_devices[i].vid == SONY_VID && s_last_bus_devices[i].pid == SONY_DS4_V1_PID) {
-                    s_last_unclaimed_ds4_disconnect_us = daemon_sys_time_us();
+                    if (s_last_unclaimed_ds4_disconnect_us != 0 && (disc_now_us - s_last_unclaimed_ds4_disconnect_us) < 15000000ULL) {
+                        s_unclaimed_ds4_cycle_count++;
+                    } else {
+                        s_unclaimed_ds4_cycle_count = 1;
+                    }
+                    s_last_unclaimed_ds4_disconnect_us = disc_now_us;
                 }
                 if (s_last_bus_devices[i].vid == SWITCH_PRO_VID && s_last_bus_devices[i].pid == SWITCH_PRO_PID) {
-                    s_last_switch_clone_seen_us = daemon_sys_time_us();
+                    s_last_switch_clone_seen_us = disc_now_us;
                 }
             }
             daemon_log(LOG_LEVEL_INFO, "USB Bus: 0 devices detected (bus empty)");
@@ -1010,6 +1087,7 @@ static int scan_and_open(void) {
         if (s_force_claim_cycling_ds4 && s_last_unclaimed_ds4_disconnect_us != 0 &&
             (daemon_sys_time_us() - s_last_unclaimed_ds4_disconnect_us) > 20000000ULL) {
             s_force_claim_cycling_ds4 = false;
+            s_unclaimed_ds4_cycle_count = 0;
         }
         if (s_failed_cooldown_vid != 0) {
             s_failed_cooldown_vid = 0;
@@ -1061,10 +1139,16 @@ static int scan_and_open(void) {
                     }
                 }
                 if (!still_here) {
+                    uint64_t disc_now_us = daemon_sys_time_us();
                     if (old_vid == SONY_VID && old_pid == SONY_DS4_V1_PID) {
-                        s_last_unclaimed_ds4_disconnect_us = daemon_sys_time_us();
+                        if (s_last_unclaimed_ds4_disconnect_us != 0 && (disc_now_us - s_last_unclaimed_ds4_disconnect_us) < 15000000ULL) {
+                            s_unclaimed_ds4_cycle_count++;
+                        } else {
+                            s_unclaimed_ds4_cycle_count = 1;
+                        }
+                        s_last_unclaimed_ds4_disconnect_us = disc_now_us;
                     } else if (old_vid == SWITCH_PRO_VID && old_pid == SWITCH_PRO_PID) {
-                        s_last_switch_clone_seen_us = daemon_sys_time_us();
+                        s_last_switch_clone_seen_us = disc_now_us;
                     }
                 }
             }
@@ -1250,7 +1334,9 @@ static int scan_and_open(void) {
                             int r_f2 = p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F2, det.interface_num, op_buf, sizeof(op_buf), 100);
                             daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational mode query 0xF2 sent (ret=%d)", r_f2);
 
-                            // 2. SET_REPORT Feature 0xF4 magic packet (wake-up command)
+                            // 2. SET_REPORT Feature 0xF4 magic packet (wake-up command: both 0x0C and 0x03 variants)
+                            uint8_t magic_c[4] = { 0x42, 0x0C, 0x00, 0x00 };
+                            p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic_c, sizeof(magic_c), 500);
                             uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
                             int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 1000);
                             daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational handshake sent (ret=%d)", cret);
@@ -1258,6 +1344,33 @@ static int scan_and_open(void) {
                             // 3. Shanwan / Gasia DS3 clone wake-up: query Feature Report 0xF5 via GET_REPORT
                             uint8_t dummy[64];
                             p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F5, det.interface_num, dummy, 8, 100);
+                        }
+                        // 4. Send initial 49-byte LED 1 output report to unlock input streaming on clones
+                        uint8_t ds3_led[49];
+                        memcpy(ds3_led, s_ds3_output_template, sizeof(ds3_led));
+                        int transferred_led = 0;
+                        int led_sent = 0;
+                        if (det.ep_out && p_sceUsbdInterruptTransfer) {
+                            if (p_sceUsbdInterruptTransfer(h, det.ep_out, ds3_led, sizeof(ds3_led), &transferred_led, 100) == 0) {
+                                led_sent = 1;
+                            }
+                        }
+                        if (!led_sent && p_sceUsbdControlTransfer) {
+                            p_sceUsbdControlTransfer(h, 0x21, 0x09, 0x0201, det.interface_num, ds3_led, sizeof(ds3_led), 100);
+                        }
+                    } else if (det.type == CONTROLLER_DS4) {
+                        if (h && p_sceUsbdClearHalt && g_usb_state.endpoint_in) {
+                            p_sceUsbdClearHalt(h, g_usb_state.endpoint_in);
+                            daemon_sys_usleep(5000);
+                        }
+                        if (det.ep_out && p_sceUsbdInterruptTransfer) {
+                            DS4OutputReport init_out;
+                            memset(&init_out, 0, sizeof(init_out));
+                            init_out.report_id = 0x05;
+                            init_out.valid_flag0 = 0x07;
+                            init_out.lightbar_blue = 255;
+                            int transferred_out = 0;
+                            p_sceUsbdInterruptTransfer(h, det.ep_out, (uint8_t*)&init_out, sizeof(init_out), &transferred_out, 50);
                         }
                     } else if (det.type == CONTROLLER_SWITCH_PRO) {
                         init_switch_pro_controller(h, &desc);
@@ -1426,9 +1539,25 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
             s_xone_ep_out_stalls = 0;
         }
     } else if (g_usb_state.type == CONTROLLER_DS3) {
-        uint8_t pkt[8] = { 0x00, 0xFF, 0x00, (small_motor > 0) ? 1 : 0, large_motor, 0x00, 0x00, 0x00 };
-        p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
-    } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO || g_usb_state.type == CONTROLLER_SWITCH) {
+        uint8_t pkt[49];
+        memcpy(pkt, s_ds3_output_template, sizeof(pkt));
+        pkt[2] = (small_motor > 0) ? 0xFE : 0x00;
+        pkt[3] = (small_motor > 0) ? 0x01 : 0x00;
+        pkt[4] = (large_motor > 0) ? 0xFE : 0x00;
+        pkt[5] = large_motor;
+        int sent = 0;
+        if (ep != 0) {
+            if (p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms) == 0) {
+                sent = 1;
+            }
+        }
+        if (!sent && p_sceUsbdControlTransfer) {
+            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0201, g_claimed_interface, pkt, sizeof(pkt), 15);
+        }
+    } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
+        if (!s_switch_pro_full_mode || ep == 0) {
+            return;
+        }
         uint8_t pkt[10];
         static uint8_t s_switch_rumble_cnt = 0;
         memset(pkt, 0, sizeof(pkt));
@@ -1437,10 +1566,7 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         encode_switch_rumble(&pkt[2], large_motor, small_motor); // Left motor
         encode_switch_rumble(&pkt[6], large_motor, small_motor); // Right motor
 
-        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
-        if (ret != 0 && p_sceUsbdControlTransfer) {
-            p_sceUsbdControlTransfer(g_dev_handle, 0x21, 0x09, 0x0210, g_claimed_interface, pkt, sizeof(pkt), 10);
-        }
+        p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
     } else if (g_usb_state.type == CONTROLLER_STADIA) {
         // Stadia Rumble Output Report (Report ID 0x05, 5 bytes)
         // [0] = 0x05
@@ -1638,9 +1764,11 @@ void usb_driver_poll_step(void) {
     int read_len = sizeof(rx);
     if (g_usb_state.type == CONTROLLER_DUALSENSE ||
         g_usb_state.type == CONTROLLER_DS4 ||
+        g_usb_state.type == CONTROLLER_DS3 ||
+        g_usb_state.type == CONTROLLER_STADIA ||
         g_usb_state.type == CONTROLLER_SWITCH_PRO ||
         g_usb_state.type == CONTROLLER_SWITCH) {
-        read_len = 64; // DualSense, DS4, and Switch Pro endpoints have wMaxPacketSize = 64 bytes
+        read_len = 64; // DualSense, DS4, DS3, Stadia, and Switch Pro endpoints have wMaxPacketSize = 64 bytes
     } else if (g_usb_state.type == CONTROLLER_GENERIC_HID) {
         if (g_usb_state.wMaxPacketSize > 0 && g_usb_state.wMaxPacketSize <= 64) {
             read_len = g_usb_state.wMaxPacketSize;
@@ -1901,7 +2029,17 @@ void usb_driver_poll_step(void) {
 
             if (rx[0] == 0x30 || rx[0] == 0x21 || rx[0] == 0x31) {
                 if (transferred >= 12) {
-                    translator_convert_switch_pro((const SwitchFullReport*)rx, &ds4, &s_trans_cfg);
+                    SwitchFullReport sw_pkt;
+                    const SwitchFullReport* sw_ptr = (const SwitchFullReport*)rx;
+                    if (transferred < (int)sizeof(SwitchFullReport) || rx[0] == 0x21) {
+                        memset(&sw_pkt, 0, sizeof(sw_pkt));
+                        memcpy(&sw_pkt, rx, transferred < (int)sizeof(sw_pkt) ? transferred : sizeof(sw_pkt));
+                        if (transferred < 25 || rx[0] == 0x21) {
+                            memset(sw_pkt.imu_data, 0, sizeof(sw_pkt.imu_data));
+                        }
+                        sw_ptr = &sw_pkt;
+                    }
+                    translator_convert_switch_pro(sw_ptr, &ds4, &s_trans_cfg);
 
                     static uint32_t s_last_sw_btn = 0;
                     if (ds4.buttons != s_last_sw_btn) {
@@ -1936,9 +2074,24 @@ void usb_driver_poll_step(void) {
                 }
                 handle_pad_input_and_send(&ds4);
             }
-        } else if (g_usb_state.type == CONTROLLER_DS3 && transferred >= sizeof(DS3Report)) {
-            translator_convert_ds3((const DS3Report*)rx, &ds4, &s_trans_cfg);
-            handle_pad_input_and_send(&ds4);
+        } else if (g_usb_state.type == CONTROLLER_DS3 && transferred >= 10) {
+            DS3Report ds3_pkt;
+            const DS3Report* ds3_report = NULL;
+            if (rx[0] == 0x01 && transferred >= (int)sizeof(DS3Report)) {
+                ds3_report = (const DS3Report*)rx;
+            } else if (rx[0] == 0x01) {
+                memset(&ds3_pkt, 0, sizeof(ds3_pkt));
+                memcpy(&ds3_pkt, rx, transferred < (int)sizeof(ds3_pkt) ? transferred : sizeof(ds3_pkt));
+                if (transferred < 20) {
+                    if (ds3_pkt.buttons2 & (1 << 0)) ds3_pkt.pressure_l2 = 0xFF;
+                    if (ds3_pkt.buttons2 & (1 << 1)) ds3_pkt.pressure_r2 = 0xFF;
+                }
+                ds3_report = &ds3_pkt;
+            }
+            if (ds3_report) {
+                translator_convert_ds3(ds3_report, &ds4, &s_trans_cfg);
+                handle_pad_input_and_send(&ds4);
+            }
         } else if (g_usb_state.type == CONTROLLER_STADIA && transferred >= 9) {
             static int s_logged_stadia_report = 0;
             if (s_logged_stadia_report < 10) {
@@ -2061,12 +2214,34 @@ void usb_driver_poll_step(void) {
                     p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
                     daemon_sys_usleep(10000);
                 }
-            } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO) {
-                daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
-                           ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+            } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO || g_usb_state.type == CONTROLLER_SWITCH) {
+                static int s_logged_sw_err = 0;
+                if (s_logged_sw_err < 10) {
+                    daemon_log(LOG_LEVEL_WARN, "Switch Pro interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
+                               ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+                    s_logged_sw_err++;
+                }
+                int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors == 1 || s_consecutive_transfer_errors % 25 == 0)) {
+                    daemon_log(LOG_LEVEL_WARN, "Switch Pro EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
+                               ret, s_consecutive_transfer_errors);
+                    p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(10000);
+                }
             } else if (g_usb_state.type == CONTROLLER_STADIA) {
-                daemon_log(LOG_LEVEL_WARN, "Stadia interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
-                           ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+                static int s_logged_st_err = 0;
+                if (s_logged_st_err < 10) {
+                    daemon_log(LOG_LEVEL_WARN, "Stadia interrupt transfer returned 0x%08X (ep=0x%02X, count=%d)",
+                               ret, g_usb_state.endpoint_in, s_consecutive_transfer_errors);
+                    s_logged_st_err++;
+                }
+                int is_ep_error = (ret == 0x80240009 || ret == 0x802400FF);
+                if (is_ep_error && p_sceUsbdClearHalt && (s_consecutive_transfer_errors == 1 || s_consecutive_transfer_errors % 25 == 0)) {
+                    daemon_log(LOG_LEVEL_WARN, "Stadia EP_IN error 0x%08X — attempting ClearHalt recovery (count=%d)",
+                               ret, s_consecutive_transfer_errors);
+                    p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_in);
+                    daemon_sys_usleep(10000);
+                }
             } else if (g_usb_state.type == CONTROLLER_DS4) {
                 static int s_logged_ds4_err = 0;
                 if (s_logged_ds4_err < 10) {
