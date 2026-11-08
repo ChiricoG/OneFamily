@@ -2,6 +2,20 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta13] - Pre-release (2026-11-08)
+
+### Motion Sensors & Gyroscope Fixes (Issue #53)
+- **Corrected IMU Sensor Mapping to PS4 ABI**: Fixed a fundamental field inversion in the Orbis OS `ScePadData` layout where angular velocity (gyroscope in rad/s) was being written into the accelerometer field and linear acceleration (in g) was being written into the angular velocity field.
+- **Eliminated Uncontrollable Camera Spin / Gyroscope Drift**: Fixed the constant 57.3 deg/s (1.0 rad/s) rotational spin in games that read gyroscope rates, caused by games reading the static 1.0g gravity vector as angular velocity.
+- **Neutral Motion Detection in Virtual Pad**: Updated `vpad.c` neutral detection to monitor angular velocity instead of linear acceleration, allowing the virtual pad to properly transition to 60 Hz idle state when resting.
+
+### DualSense Bluetooth Robustness & Diagnostics (Issue #62)
+- **Retrocompatible Bluetooth Packet Acceptance**: Enabled processing of Bluetooth DualSense reports when `report[1] == 0x1F` or when Report ID `0x01` / `0x31` is presented directly in `report[2]`, restoring compatibility across different Orbis kernel bluetooth stack states.
+- **Support for 9-byte & 10-byte Simple Reports**: Added fallback handling for both 9-byte and 10-byte simple input reports with digital trigger mapping for L2/R2.
+- **Rate-Limited Diagnostic Logging**: Added throttling for dropped packets and CRC mismatch diagnostics to facilitate debugging without flooding the daemon log.
+
+---
+
 ## [v1.2.2-beta12] - Pre-release (2026-11-08)
 
 ### Motion Sensors & Controller Accuracy Fixes (Issue #53)
