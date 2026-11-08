@@ -202,19 +202,19 @@ void translator_convert(const Xbox360Report* xbox, OrbisPadData* ds4, const Tran
         ds4->timestamp = sceKernelGetProcessTime();
     }
 
-    // Motion data - set to neutral
+    // Motion data - set to neutral (offset 0x20 'vel' is acceleration in g; offset 0x2C 'acell' is angularVelocity)
     ds4->quat.x = 0.0f;
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
 
-    ds4->vel.x = 0.0f;
-    ds4->vel.y = 0.0f;
-    ds4->vel.z = 0.0f;
-
     ds4->acell.x = 0.0f;
     ds4->acell.y = 0.0f;
-    ds4->acell.z = 1.0f;  // 1g downward
+    ds4->acell.z = 0.0f;
+
+    ds4->vel.x = 0.0f;
+    ds4->vel.y = 0.0f;
+    ds4->vel.z = 1.0f;  // 1g downward
 
     // Touchpad - no touches
     ds4->touch.fingers = 0;
@@ -360,19 +360,19 @@ void translator_convert_xboxone(const XboxOneReport* xbox, OrbisPadData* ds4, co
         ds4->timestamp = sceKernelGetProcessTime();
     }
 
-    // Motion data - set to neutral
+    // Motion data - set to neutral (offset 0x20 'vel' is acceleration in g; offset 0x2C 'acell' is angularVelocity)
     ds4->quat.x = 0.0f;
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
 
-    ds4->vel.x = 0.0f;
-    ds4->vel.y = 0.0f;
-    ds4->vel.z = 0.0f;
-
     ds4->acell.x = 0.0f;
     ds4->acell.y = 0.0f;
-    ds4->acell.z = 1.0f;  // 1g downward
+    ds4->acell.z = 0.0f;
+
+    ds4->vel.x = 0.0f;
+    ds4->vel.y = 0.0f;
+    ds4->vel.z = 1.0f;  // 1g downward
 
     // Touchpad - no touches
     ds4->touch.fingers = 0;
@@ -559,19 +559,19 @@ void translator_convert_switch(const SwitchInputOnlyReport* sw, OrbisPadData* ds
         ds4->timestamp = sceKernelGetProcessTime();
     }
 
-    // Motion data - set to neutral
+    // Motion data - set to neutral (offset 0x20 'vel' is acceleration in g; offset 0x2C 'acell' is angularVelocity)
     ds4->quat.x = 0.0f;
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
 
-    ds4->vel.x = 0.0f;
-    ds4->vel.y = 0.0f;
-    ds4->vel.z = 0.0f;
-
     ds4->acell.x = 0.0f;
     ds4->acell.y = 0.0f;
-    ds4->acell.z = 1.0f;  // 1g downward
+    ds4->acell.z = 0.0f;
+
+    ds4->vel.x = 0.0f;
+    ds4->vel.y = 0.0f;
+    ds4->vel.z = 1.0f;  // 1g downward
 
     // Touchpad - no touches
     ds4->touch.fingers = 0;
@@ -765,12 +765,12 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
-    ds4->vel.x = 0.0f;
-    ds4->vel.y = 0.0f;
-    ds4->vel.z = 0.0f;
     ds4->acell.x = 0.0f;
     ds4->acell.y = 0.0f;
-    ds4->acell.z = 1.0f;
+    ds4->acell.z = 0.0f;
+    ds4->vel.x = 0.0f;
+    ds4->vel.y = 0.0f;
+    ds4->vel.z = 1.0f;
 
     static MotionFusionState s_sw_fusion;
     static bool  s_sw_fusion_ready = false;
@@ -835,12 +835,12 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
     }
 
     if (sw_have_motion) {
-        ds4->vel.x   = sw_gyro[0];
-        ds4->vel.y   = sw_gyro[1];
-        ds4->vel.z   = sw_gyro[2];
-        ds4->acell.x = sw_accel[0];
-        ds4->acell.y = sw_accel[1];
-        ds4->acell.z = sw_accel[2];
+        ds4->acell.x = sw_gyro[0];
+        ds4->acell.y = sw_gyro[1];
+        ds4->acell.z = sw_gyro[2];
+        ds4->vel.x   = sw_accel[0];
+        ds4->vel.y   = sw_accel[1];
+        ds4->vel.z   = sw_accel[2];
         motion_fusion_update(&s_sw_fusion, sw_gyro, sw_accel, sceKernelGetProcessTime());
         ds4->quat.x = s_sw_fusion.q[0];
         ds4->quat.y = s_sw_fusion.q[1];
@@ -1083,24 +1083,27 @@ void translator_convert_dualsense(const DualSenseReport* ps5, OrbisPadData* ds4,
     ds4->touch.fingers = finger_count;
 
     // Motion data (gyro scaled from +/-2000 deg/s full scale to rad/s, accel scaled by 8192 LSB/g)
+    // In Sony ScePadData layout:
+    // - offset 0x20 ('vel')   = acceleration in g (accelerometer)
+    // - offset 0x2C ('acell') = angularVelocity in rad/s (gyroscope)
     const float k_ds_gyro_scale = (2000.0f * 0.01745329252f) / 32768.0f;
     ds4->quat.x = 0.0f;
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
 
-    ds4->vel.x = (float)ps5->gyro[0] * k_ds_gyro_scale;
-    ds4->vel.y = (float)ps5->gyro[1] * k_ds_gyro_scale;
-    ds4->vel.z = (float)ps5->gyro[2] * k_ds_gyro_scale;
+    ds4->acell.x = (float)ps5->gyro[0] * k_ds_gyro_scale;
+    ds4->acell.y = (float)ps5->gyro[1] * k_ds_gyro_scale;
+    ds4->acell.z = (float)ps5->gyro[2] * k_ds_gyro_scale;
 
     if (ps5->accel[0] != 0 || ps5->accel[1] != 0 || ps5->accel[2] != 0) {
-        ds4->acell.x = (float)ps5->accel[0] / 8192.0f;
-        ds4->acell.y = (float)ps5->accel[1] / 8192.0f;
-        ds4->acell.z = (float)ps5->accel[2] / 8192.0f;
+        ds4->vel.x = (float)ps5->accel[0] / 8192.0f;
+        ds4->vel.y = (float)ps5->accel[1] / 8192.0f;
+        ds4->vel.z = (float)ps5->accel[2] / 8192.0f;
     } else {
-        ds4->acell.x = 0.0f;
-        ds4->acell.y = 0.0f;
-        ds4->acell.z = 1.0f;
+        ds4->vel.x = 0.0f;
+        ds4->vel.y = 0.0f;
+        ds4->vel.z = 1.0f;
     }
 
     ds4->connected = 1;
@@ -1236,13 +1239,13 @@ void translator_convert_stadia(const StadiaInputReport* stadia, OrbisPadData* ds
     ds4->quat.z = 0.0f;
     ds4->quat.w = 1.0f;
 
-    ds4->vel.x = 0.0f;
-    ds4->vel.y = 0.0f;
-    ds4->vel.z = 0.0f;
-
     ds4->acell.x = 0.0f;
     ds4->acell.y = 0.0f;
-    ds4->acell.z = 1.0f;  // 1g downward
+    ds4->acell.z = 0.0f;
+
+    ds4->vel.x = 0.0f;
+    ds4->vel.y = 0.0f;
+    ds4->vel.z = 1.0f;  // 1g downward
 
     ds4->connected = 1;
     ds4->count = 1;
@@ -1403,15 +1406,16 @@ void translator_convert_ds4(const DS4Report* rpt, OrbisPadData* ds4, const Trans
 
     if (is_valid_imu_sample(rpt->accel[0], rpt->accel[1], rpt->accel[2],
                             rpt->gyro[0], rpt->gyro[1], rpt->gyro[2])) {
-        ds4->vel.x = (float)rpt->gyro[0] * k_ds4_gyro_scale;
-        ds4->vel.y = (float)rpt->gyro[1] * k_ds4_gyro_scale;
-        ds4->vel.z = (float)rpt->gyro[2] * k_ds4_gyro_scale;
-        ds4->acell.x = (float)rpt->accel[0] / 8192.0f;
-        ds4->acell.y = (float)rpt->accel[1] / 8192.0f;
-        ds4->acell.z = (float)rpt->accel[2] / 8192.0f;
+        // In Sony ScePadData: offset 0x20 'vel' is acceleration, offset 0x2C 'acell' is angularVelocity
+        ds4->acell.x = (float)rpt->gyro[0] * k_ds4_gyro_scale;
+        ds4->acell.y = (float)rpt->gyro[1] * k_ds4_gyro_scale;
+        ds4->acell.z = (float)rpt->gyro[2] * k_ds4_gyro_scale;
+        ds4->vel.x = (float)rpt->accel[0] / 8192.0f;
+        ds4->vel.y = (float)rpt->accel[1] / 8192.0f;
+        ds4->vel.z = (float)rpt->accel[2] / 8192.0f;
 
-        float ds4_gyro[3]  = { ds4->vel.x, ds4->vel.y, ds4->vel.z };
-        float ds4_accel[3] = { ds4->acell.x, ds4->acell.y, ds4->acell.z };
+        float ds4_gyro[3]  = { ds4->acell.x, ds4->acell.y, ds4->acell.z };
+        float ds4_accel[3] = { ds4->vel.x, ds4->vel.y, ds4->vel.z };
         motion_fusion_update(&s_ds4_fusion, ds4_gyro, ds4_accel, sceKernelGetProcessTime());
         ds4->quat.x = s_ds4_fusion.q[0];
         ds4->quat.y = s_ds4_fusion.q[1];
@@ -1419,12 +1423,12 @@ void translator_convert_ds4(const DS4Report* rpt, OrbisPadData* ds4, const Trans
         ds4->quat.w = s_ds4_fusion.q[3];
     } else {
         motion_fusion_reset(&s_ds4_fusion);
-        ds4->vel.x = 0.0f;
-        ds4->vel.y = 0.0f;
-        ds4->vel.z = 0.0f;
         ds4->acell.x = 0.0f;
         ds4->acell.y = 0.0f;
-        ds4->acell.z = 1.0f;
+        ds4->acell.z = 0.0f;
+        ds4->vel.x = 0.0f;
+        ds4->vel.y = 0.0f;
+        ds4->vel.z = 1.0f;
     }
 
     ds4->connected = 1;

@@ -854,11 +854,11 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
     VPadSlotState *s = &g_slots[slot];
     uint64_t now = daemon_sys_time_us();
 
-    // Check for active touch or motion inputs
+    // Check for active touch or motion inputs (angular velocity in ScePadData offset 0x2C / OpenOrbis 'acell')
     bool has_touch = (data->touch.fingers > 0) || ((data->buttons & DS4_BUTTON_TOUCHPAD) != 0);
-    bool has_motion = (data->vel.x > 0.05f || data->vel.x < -0.05f ||
-                       data->vel.y > 0.05f || data->vel.y < -0.05f ||
-                       data->vel.z > 0.05f || data->vel.z < -0.05f);
+    bool has_motion = (data->acell.x > 0.05f || data->acell.x < -0.05f ||
+                       data->acell.y > 0.05f || data->acell.y < -0.05f ||
+                       data->acell.z > 0.05f || data->acell.z < -0.05f);
 
     // Determine if pad is in neutral / resting state
     bool is_neutral = (data->buttons == 0 &&

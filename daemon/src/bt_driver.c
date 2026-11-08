@@ -102,6 +102,13 @@ static void bt_device_init_entry(BtDevice *dev) {
     dev->last_pad_data.rightStick.x = 128;
     dev->last_pad_data.rightStick.y = 128;
     dev->last_pad_data.quat.w = 1.0f;
+    // In Sony ScePadData: offset 0x20 ('vel') = acceleration, offset 0x2C ('acell') = angularVelocity
+    dev->last_pad_data.vel.x = 0.0f;
+    dev->last_pad_data.vel.y = 0.0f;
+    dev->last_pad_data.vel.z = 1.0f;
+    dev->last_pad_data.acell.x = 0.0f;
+    dev->last_pad_data.acell.y = 0.0f;
+    dev->last_pad_data.acell.z = 0.0f;
     dev->last_pad_data.connected = 1;
     for (int a = 0; a < 3; ++a) {
         dev->calibration.gyro_scale[a] = (2000.0f * 0.01745329252f) / 32768.0f;
@@ -863,18 +870,20 @@ static void extended_sample(BtDevice* dev, OrbisPadData* ds4, const uint8_t* rep
     }
 
     float omega[3];
-    // Angular velocity in rad/s
-    ds4->vel.x = (float)raw_gyro[0] * dev->calibration.gyro_scale[0];
-    ds4->vel.y = (float)raw_gyro[1] * dev->calibration.gyro_scale[1];
-    ds4->vel.z = (float)raw_gyro[2] * dev->calibration.gyro_scale[2];
-    omega[0] = ds4->vel.x;
-    omega[1] = ds4->vel.y;
-    omega[2] = ds4->vel.z;
+    // In Sony ScePadData layout:
+    // - offset 0x20 ('vel')   = acceleration in g (accelerometer)
+    // - offset 0x2C ('acell') = angularVelocity in rad/s (gyroscope)
+    ds4->acell.x = (float)raw_gyro[0] * dev->calibration.gyro_scale[0];
+    ds4->acell.y = (float)raw_gyro[1] * dev->calibration.gyro_scale[1];
+    ds4->acell.z = (float)raw_gyro[2] * dev->calibration.gyro_scale[2];
+    omega[0] = ds4->acell.x;
+    omega[1] = ds4->acell.y;
+    omega[2] = ds4->acell.z;
 
-    // Acceleration in g
-    ds4->acell.x = ((float)raw_accel[0] - dev->calibration.accel_bias[0]) * dev->calibration.accel_scale[0];
-    ds4->acell.y = ((float)raw_accel[1] - dev->calibration.accel_bias[1]) * dev->calibration.accel_scale[1];
-    ds4->acell.z = ((float)raw_accel[2] - dev->calibration.accel_bias[2]) * dev->calibration.accel_scale[2];
+    // Acceleration in g (Sony offset 0x20, OpenOrbis 'vel')
+    ds4->vel.x = ((float)raw_accel[0] - dev->calibration.accel_bias[0]) * dev->calibration.accel_scale[0];
+    ds4->vel.y = ((float)raw_accel[1] - dev->calibration.accel_bias[1]) * dev->calibration.accel_scale[1];
+    ds4->vel.z = ((float)raw_accel[2] - dev->calibration.accel_bias[2]) * dev->calibration.accel_scale[2];
 
     // 3. 3D Orientation Quaternion Integration (Diram1x complementary filter)
     if (dt > 0.0f && dt <= 0.1f) {
@@ -883,13 +892,13 @@ static void extended_sample(BtDevice* dev, OrbisPadData* ds4, const uint8_t* rep
         float z = dev->orientation[2];
         float w = dev->orientation[3];
 
-        float magnitude = root_positive(ds4->acell.x * ds4->acell.x +
-                                        ds4->acell.y * ds4->acell.y +
-                                        ds4->acell.z * ds4->acell.z);
+        float magnitude = root_positive(ds4->vel.x * ds4->vel.x +
+                                        ds4->vel.y * ds4->vel.y +
+                                        ds4->vel.z * ds4->vel.z);
         if (magnitude > 0.8f && magnitude < 1.2f) {
-            float ax = ds4->acell.x / magnitude;
-            float ay = ds4->acell.y / magnitude;
-            float az = ds4->acell.z / magnitude;
+            float ax = ds4->vel.x / magnitude;
+            float ay = ds4->vel.y / magnitude;
+            float az = ds4->vel.z / magnitude;
             float gx = 2.0f * (x * y + w * z);
             float gy = 1.0f - 2.0f * (x * x + z * z);
             float gz = 2.0f * (y * z - w * x);
@@ -948,11 +957,16 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
     dev->last_drop_len = (uint8_t)(length > 255 ? 255 : length);
     dev->last_drop_id = report[0];
 
-    if (length == 10 && report[0] == 0x01) {
-        // Remap 10-byte simple report to match 78-byte payload indices (Diram1x logic)
+    if ((length == 10 || length == 9) && report[0] == 0x01) {
+        // Remap simple report to match 78-byte payload indices (Diram1x logic)
         for (unsigned i = 0; i < 4; ++i) simple[i] = report[i + 1];
-        simple[4] = report[8];       // L2 trigger
-        simple[5] = report[9];       // R2 trigger
+        if (length == 10) {
+            simple[4] = report[8];       // L2 analog trigger
+            simple[5] = report[9];       // R2 analog trigger
+        } else {
+            simple[4] = (report[6] & 0x04) ? 255 : 0; // L2 digital trigger fallback
+            simple[5] = (report[6] & 0x08) ? 255 : 0; // R2 digital trigger fallback
+        }
         simple[7] = report[5];       // D-Pad + Face buttons
         simple[8] = report[6];       // Bumpers, triggers, options, L3, R3
         simple[9] = report[7] & 3;   // PS and touchpad buttons
@@ -966,6 +980,10 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
                                 ((uint32_t)report[77] << 24);
         uint32_t computed_crc = bt_calc_crc32(0xA1, report, 74);
         if (computed_crc != expected_crc) {
+            if (dev->decode_drops < 5 || (dev->decode_drops % 250 == 0)) {
+                daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): CRC mismatch on 0x31 (calc=0x%08X, exp=0x%08X, drops=%u)",
+                           (unsigned long long)dev->address, computed_crc, expected_crc, dev->decode_drops);
+            }
             dev->decode_drops++;
             return; // CRC mismatch: corrupted Bluetooth packet
         }
@@ -974,6 +992,10 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             dev->extended_mode = true;
         }
     } else {
+        if (dev->decode_drops < 5 || (dev->decode_drops % 250 == 0)) {
+            daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): unexpected packet (len=%zu, id=0x%02X, drops=%u)",
+                       (unsigned long long)dev->address, length, report[0], dev->decode_drops);
+        }
         dev->decode_drops++;
         return;
     }
@@ -982,6 +1004,10 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
 
     unsigned direction = data[7] & 0x0F;
     if (direction > 8) {
+        if (dev->decode_drops < 5 || (dev->decode_drops % 250 == 0)) {
+            daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): invalid dpad direction=%u (drops=%u)",
+                       (unsigned long long)dev->address, direction, dev->decode_drops);
+        }
         dev->decode_drops++;
         return;
     }
@@ -1260,9 +1286,12 @@ void bt_driver_poll_step(void) {
                 dev->last_pad_data.analogButtons.l2 = 0;
                 dev->last_pad_data.analogButtons.r2 = 0;
                 memset(&dev->last_pad_data.touch, 0, sizeof(dev->last_pad_data.touch));
+                dev->last_pad_data.acell.x = 0.0f;
+                dev->last_pad_data.acell.y = 0.0f;
+                dev->last_pad_data.acell.z = 0.0f;
                 dev->last_pad_data.vel.x = 0.0f;
                 dev->last_pad_data.vel.y = 0.0f;
-                dev->last_pad_data.vel.z = 0.0f;
+                dev->last_pad_data.vel.z = 1.0f;
             }
             dev->last_pad_data.connected = 1;
             dev->last_pad_data.timestamp = now_us;
@@ -1316,9 +1345,17 @@ void bt_driver_poll_step(void) {
                             daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): calibration decode failed (rc=%d)",
                                        (unsigned long long)dev->address, rc);
                         }
-                    } else if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
+                    } else if (result >= 2 && result <= 80 && report[0] + 2 == result &&
+                               (report[1] == 0x1F || report[2] == 0x01 || report[2] == 0x31)) {
                         dev->reports_seen++;
                         decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
+                    } else {
+                        static uint32_t s_fallback_drop_cnt = 0;
+                        if (s_fallback_drop_cnt < 5 || (s_fallback_drop_cnt % 500 == 0)) {
+                            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): fallback packet skipped (res=%ld, rep[0]=%u, rep[1]=0x%02X, rep[2]=0x%02X)",
+                                       (unsigned long long)dev->address, result, (unsigned)report[0], report[1], report[2]);
+                        }
+                        s_fallback_drop_cnt++;
                     }
                 }
             }
@@ -1383,9 +1420,17 @@ void bt_driver_poll_step(void) {
                         daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): calibration decode failed (rc=%d)",
                                    (unsigned long long)address, rc);
                     }
-                } else if (result >= 2 && result <= 80 && report[0] + 2 == result && report[1] == 0x1F) {
+                } else if (result >= 2 && result <= 80 && report[0] + 2 == result &&
+                           (report[1] == 0x1F || report[2] == 0x01 || report[2] == 0x31)) {
                     dev->reports_seen++;
                     decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
+                } else {
+                    static uint32_t s_kevent_drop_cnt = 0;
+                    if (s_kevent_drop_cnt < 5 || (s_kevent_drop_cnt % 500 == 0)) {
+                        daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kevent packet skipped (res=%ld, rep[0]=%u, rep[1]=0x%02X, rep[2]=0x%02X)",
+                                   (unsigned long long)address, result, (unsigned)report[0], report[1], report[2]);
+                    }
+                    s_kevent_drop_cnt++;
                 }
             }
         }
