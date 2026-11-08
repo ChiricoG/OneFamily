@@ -2,6 +2,15 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta12] - (2026-11-08)
+
+### Motion Sensors & Controller Accuracy Fixes (Issue #53)
+- **Orientation Quaternion for USB DS4 & Switch Pro**: Implemented real-time complementary orientation filter (`motion_fusion.h`) on USB DualShock 4 and Nintendo Switch Pro controllers, enabling full 3D tilt tracking in games that query the quaternion orientation (e.g. Gravity Rush).
+- **Nintendo Switch Pro Multi-Sample IMU Averaging**: Decoded and averaged all valid motion samples in Switch Pro report `0x30` packets, and carried over previous motion samples during `0x21` subcommand replies to eliminate jitter and packet drops.
+- **DualSense USB Touchpad Coordinate Scaling**: Aligned vertical capacitive touchpad coordinates from DualSense native resolution (`1920x1080`) to DualShock 4 range (`1920x942`), preventing out-of-bounds Y inputs.
+
+---
+
 ## [v1.2.2-beta11] - Pre-release (2026-11-07)
 
 ### Controller Compatibility & Gameplay Fixes
