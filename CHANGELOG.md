@@ -2,6 +2,16 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta15] - Pre-release (2026-11-08)
+
+### DualSense Bluetooth Input Freeze Resolution (Issues #60, #62)
+- **Eliminated Feature Report 0x05 Stalling in Orbis Kernel `bthid`**: Removed the synchronous `ioctl(s_bt_fd, 0x8010622FUL)` Feature Report 0x05 query from `bt_driver_poll_step()`. On Orbis OS FW 13.x, requesting Feature Report 0x05 over the L2CAP control channel stalled the interrupt IN endpoint queue in `bthid`, preventing any subsequent input reports (Report `0x01` or `0x31`) from reaching the daemon and leaving the controller completely unresponsive on the "Who is using this controller?" user selection screen.
+- **Native Extended Report Switch via Output Report 0x31**: Alligned switching to extended 78-byte Report `0x31` with the proven AnyPad-PS4 reference architecture. The DualSense autonomously switches to Report `0x31` upon receiving the first Output Report `0x31` (`out[41] = 0x02`, `out[44] = 0x02`), eliminating any need for control channel feature report transactions.
+- **Pre-Calibrated Nominal IMU Scales**: Standardized motion sensor processing to utilize the nominal DualSense IMU scales pre-initialized in the driver (`gyro_scale = 2000 / 32768 * deg2rad`, `accel_scale = 1 / 8192`), ensuring immediate, drift-free gyroscope and accelerometer responsiveness with zero silicon delay.
+- **Input Packet Telemetry**: Added diagnostic logging for the first 5 input reports received per device to track report ID and length, ensuring complete visibility into the Bluetooth stream.
+
+---
+
 ## [v1.2.2-beta14] - Pre-release (2026-11-08)
 
 ### DualSense Bluetooth Universal Capacity & Safe-Gate (Issues #60, #62)

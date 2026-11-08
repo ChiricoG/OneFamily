@@ -1326,24 +1326,7 @@ void bt_driver_poll_step(void) {
 
     bt_check_timeouts();
 
-    // Feature Report 0x05 request for factory IMU calibration and switching 0x01 -> 0x31 extended mode
-    // STRICT INVARIANT: Only request Feature Report 0x05 if kernel link capacity was successfully patched to 78 bytes!
-    // Without 78-byte capacity, bthid drops all 78-byte reports, freezing the controller.
     uint64_t now_us = daemon_sys_time_us();
-    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
-        BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->address && dev->capacity_patched && !dev->calibration_requested &&
-            (now_us - dev->last_calibration_attempt > 1000000ULL)) {
-            dev->last_calibration_attempt = now_us;
-            struct { uint64_t address; uint8_t report_id; uint8_t reserved[7]; } feature = { dev->address, 5, {0} };
-            long rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8010622FUL, (long)&feature);
-            if (rc == 0) {
-                dev->calibration_requested = true;
-                daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): requested IMU factory calibration",
-                           (unsigned long long)dev->address);
-            }
-        }
-    }
 
     // Periodic Bluetooth output report keep-alive heartbeat (every 2.5s, or immediately on initial connection)
     // Strictly gated on devices where controller_capacity (78-byte output report size) is active.
@@ -1434,6 +1417,10 @@ void bt_driver_poll_step(void) {
                     } else if (result >= 2 && result <= 80 && report[0] + 2 == result &&
                                (report[1] == 0x1F || report[2] == 0x01 || report[2] == 0x31)) {
                         dev->reports_seen++;
+                        if (dev->reports_seen <= 5) {
+                            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): input packet #%u (res=%ld, id=0x%02X, len=%zu)",
+                                       (unsigned long long)dev->address, dev->reports_seen, result, (report + 2)[0], (size_t)(result - 2));
+                        }
                         decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
                     } else {
                         static uint32_t s_fallback_drop_cnt = 0;
@@ -1509,6 +1496,10 @@ void bt_driver_poll_step(void) {
                 } else if (result >= 2 && result <= 80 && report[0] + 2 == result &&
                            (report[1] == 0x1F || report[2] == 0x01 || report[2] == 0x31)) {
                     dev->reports_seen++;
+                    if (dev->reports_seen <= 5) {
+                        daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): input packet #%u (res=%ld, id=0x%02X, len=%zu)",
+                                   (unsigned long long)address, dev->reports_seen, result, (report + 2)[0], (size_t)(result - 2));
+                    }
                     decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
                 } else {
                     static uint32_t s_kevent_drop_cnt = 0;
