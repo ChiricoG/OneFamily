@@ -1731,24 +1731,24 @@ static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, cons
         out[5] = small;             // Weak motor
         out[6] = large;             // Strong motor
 
-        // 1. Adaptive Trigger Effects
+        // 1. Adaptive Trigger Effects (calibrated physical presets for DualSense Simple Modes)
         int trig = g_daemon_config.dualsense_trigger_mode;
         if (trig == 1) {
-            // Hair Trigger (rigid snap click at ~10% travel)
-            out[13] = 0x02; out[14] = 0x01; out[15] = 0x02; out[16] = 0x08;
-            out[24] = 0x02; out[25] = 0x01; out[26] = 0x02; out[27] = 0x08;
+            // Hair Trigger: firm snap click between ~12% (0x20) and ~31% (0x50) of travel at full strength (0xFF)
+            out[13] = 0x02; out[14] = 0x20; out[15] = 0x50; out[16] = 0xFF;
+            out[24] = 0x02; out[25] = 0x20; out[26] = 0x50; out[27] = 0xFF;
         } else if (trig == 2) {
-            // Continuous Resistance
-            out[13] = 0x01; out[14] = 0x00; out[15] = 0x06;
-            out[24] = 0x01; out[25] = 0x00; out[26] = 0x06;
+            // Continuous Resistance: medium resistance (100/255 = 0x64) over the full travel
+            out[13] = 0x01; out[14] = 0x00; out[15] = 0x64;
+            out[24] = 0x01; out[25] = 0x00; out[26] = 0x64;
         } else if (trig == 3) {
-            // Vibration / Pulsation
-            out[13] = 0x06; out[14] = 0x01; out[15] = 0x04; out[16] = 0x20;
-            out[24] = 0x06; out[25] = 0x01; out[26] = 0x04; out[27] = 0x20;
+            // Vibration / Pulsation: 12 Hz (0x0C) frequency, amplitude 200/255 (0xC8)
+            out[13] = 0x06; out[14] = 0x0C; out[15] = 0xC8; out[16] = 0x00;
+            out[24] = 0x06; out[25] = 0x0C; out[26] = 0xC8; out[27] = 0x00;
         } else {
-            // Standard / Off
-            out[13] = 0x00;
-            out[24] = 0x00;
+            // Standard / Off: mode 0x05 actively releases the motor and resets gears
+            out[13] = 0x05;
+            out[24] = 0x05;
         }
 
         // 2. LED Brightness

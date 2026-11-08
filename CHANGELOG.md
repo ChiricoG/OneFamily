@@ -2,6 +2,23 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta16] - Pre-release (2026-11-08)
+
+### DualSense Adaptive Trigger Force Calibration (Issue #64)
+- **Calibrated Motor Force for Simple Effect Modes**: Corrected trigger parameter encoding in `bt_driver.c` for Feedback (`0x01`), Weapon/Hair Trigger (`0x02`), and Vibration (`0x06`). Previously, preset values used zone indices (1-8) resulting in ~2-3% motor exertion.
+- **Hair Trigger Preset (`0x02`)**: Calibrated start position (`0x20`), end position (`0x50`), and full motor force (`0xFF` / 100%) for an immediate, tactile break point.
+- **Continuous Resistance Preset (`0x01`)**: Set start position (`0x00`) with medium force (`0x64` / 40%) for smooth resistance across the entire pull.
+- **Trigger Vibration Preset (`0x06`)**: Configured frequency (`0x0C` / 12 Hz) and high amplitude (`0xC8` / 78%) for robust haptic feedback.
+- **Active Motor Release on Trigger Off**: Changed Off command from `0x00` to `0x05`, actively releasing the trigger motor gearing to neutral.
+
+### Companion App Performance & Input Responsiveness (Issue #65)
+- **O2 Optimization**: Enabled `-O2` optimization in `build_app.ps1` for release builds of the Companion app.
+- **RAM Backbuffer & Single VRAM Blit**: Re-architected `Scene2D` rendering to perform all pixel drawing, shape rendering, and alpha blending in cached heap system RAM (`ramBackBuffer`). Replaced per-pixel reads from uncached Write-Combined Direct Memory (Type 3) with a single sequential `memcpy` during `SubmitFlip()`, eliminating CPU pipeline stalls and boosting frame rates from 4-5 FPS to a solid 30-60 FPS.
+- **FreeType Glyph Cache & Instant Text Measurement**: Implemented per-face character glyph rasterization caching (`CachedGlyph`) in `Scene2D`. Character bitmaps and metrics are cached upon first encounter, reducing subsequent character draws to lightweight memory blits and eliminating redundant FreeType rasterization. Centered text layout now uses `Scene2D::GetTextWidth()` without reloading glyphs each frame.
+- **Hardware Input Batching (`scePadRead`)**: Replaced single-state polling (`scePadReadState`) with multi-sample batch reading (`scePadRead` up to 16 samples) in the main interaction loop and setup wizard. All buffered button events are accumulated across the frame interval, ensuring fast button taps (<80 ms) are never dropped.
+
+---
+
 ## [v1.2.2-beta15] - Pre-release (2026-11-08)
 
 ### DualSense Bluetooth Input Freeze Resolution (Issues #60, #62)

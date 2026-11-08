@@ -140,10 +140,19 @@ int main() {
             uint32_t anyWizardButtons = 0;
             for (int i = 0; i < 4; i++) {
                 if (padHandles[i] >= 0) {
-                    OrbisPadData d;
-                    memset(&d, 0, sizeof(d));
-                    if (scePadReadState(padHandles[i], &d) == 0 && d.connected) {
-                        anyWizardButtons |= d.buttons;
+                    OrbisPadData samples[16];
+                    memset(samples, 0, sizeof(samples));
+                    int n = scePadRead(padHandles[i], samples, 16);
+                    if (n > 0) {
+                        for (int s = 0; s < n; s++) {
+                            if (samples[s].connected) anyWizardButtons |= samples[s].buttons;
+                        }
+                    } else {
+                        OrbisPadData d;
+                        memset(&d, 0, sizeof(d));
+                        if (scePadReadState(padHandles[i], &d) == 0 && d.connected) {
+                            anyWizardButtons |= d.buttons;
+                        }
                     }
                 }
             }
@@ -208,7 +217,18 @@ int main() {
         for (int i = 0; i < 4; i++) {
             memset(&padDataSlots[i], 0, sizeof(padDataSlots[i]));
             if (padHandles[i] >= 0) {
-                if (scePadReadState(padHandles[i], &padDataSlots[i]) == 0 && padDataSlots[i].connected) {
+                OrbisPadData samples[16];
+                memset(samples, 0, sizeof(samples));
+                int n = scePadRead(padHandles[i], samples, 16);
+                if (n > 0) {
+                    for (int s = 0; s < n; s++) {
+                        if (samples[s].connected) {
+                            anyButtons |= samples[s].buttons;
+                        }
+                    }
+                    padDataSlots[i] = samples[n - 1];
+                    tester.slotConnected[i] = samples[n - 1].connected;
+                } else if (scePadReadState(padHandles[i], &padDataSlots[i]) == 0 && padDataSlots[i].connected) {
                     anyButtons |= padDataSlots[i].buttons;
                     tester.slotConnected[i] = true;
                 } else {

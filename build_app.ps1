@@ -40,6 +40,7 @@ $CXXFLAGS = @(
     "-fno-rtti",
     "-c",
     "-Wall",
+    "-O2",
     "-DGRAPHICS_USES_FONT",
     "-isysroot", $TOOLCHAIN,
     "-isystem", "$TOOLCHAIN/include",

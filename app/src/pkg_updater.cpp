@@ -23,7 +23,7 @@ extern "C" {
 }
 
 #define GITHUB_API_LATEST_RELEASE "https://api.github.com/repos/ChiricoG/OneFamily/releases/latest"
-#define HTTP_USER_AGENT "OneFamily-Companion/1.2.2-beta15 PS4"
+#define HTTP_USER_AGENT "OneFamily-Companion/1.2.2-beta16 PS4"
 
 #define ONEFAMILY_NET_POOLSIZE    (256 * 1024)
 #define ONEFAMILY_HTTP_POOLSIZE   (1024 * 1024)
@@ -94,7 +94,7 @@ PkgUpdater& PkgUpdater::instance() {
 PkgUpdater::PkgUpdater()
     : m_threadRunning(false),
       m_state(UPDATER_IDLE),
-      m_currentVersion("v1.2.2-beta15"),
+      m_currentVersion("v1.2.2-beta16"),
       m_expectedPkgSize(0),
       m_targetPkgPath("/data/pkg/onefamily_companion.pkg"),
       m_actionDownloadTriggered(false) {

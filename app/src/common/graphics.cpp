@@ -4,6 +4,8 @@
 #include <errno.h>
 
 #include <string>
+#include <vector>
+#include <map>
 
 #include "graphics.h"
 #include "log.h"
@@ -15,10 +17,16 @@ Scene2D::Scene2D(int w, int h, int pixelDepth)
 	this->depth = pixelDepth;
 	
 	this->frameBufferSize = this->width * this->height * this->depth;
+	this->ramBackBuffer = NULL;
 }
 
 Scene2D::~Scene2D()
 {
+	if (this->ramBackBuffer)
+	{
+		free(this->ramBackBuffer);
+		this->ramBackBuffer = NULL;
+	}
 	deallocateVideoMem();
 }
 
@@ -71,6 +79,12 @@ bool Scene2D::Init(size_t memSize, int numFrameBuffers)
 	{
 		DEBUGLOG << "Failed to allocate frame buffers: " << std::string(strerror(errno));
 		return false;
+	}
+
+	this->ramBackBuffer = (uint32_t*)malloc(this->frameBufferSize);
+	if (this->ramBackBuffer)
+	{
+		memset(this->ramBackBuffer, 0, this->frameBufferSize);
 	}
 	
 	sceVideoOutSetFlipRate(this->video, 0);
@@ -170,6 +184,10 @@ void Scene2D::SetActiveFrameBuffer(int index)
 
 void Scene2D::SubmitFlip(int frameID)
 {
+	if (this->ramBackBuffer && this->frameBuffers && this->frameBuffers[this->activeFrameBufferIdx])
+	{
+		memcpy(this->frameBuffers[this->activeFrameBufferIdx], this->ramBackBuffer, this->frameBufferSize);
+	}
 	sceVideoOutSubmitFlip(this->video, this->activeFrameBufferIdx, ORBIS_VIDEO_OUT_FLIP_VSYNC, frameID);
 }
 
@@ -237,21 +255,25 @@ void Scene2D::FrameBufferFill(Color color)
 
 void Scene2D::DrawPixel(int x, int y, Color color)
 {
-	// Get pixel location based on pitch
+	if (x < 0 || x >= this->width || y < 0 || y >= this->height) return;
 	int pixel = (y * this->width) + x;
-	
-	// Encode to 24-bit color
-	uint32_t encodedColor = 0x80000000 + (color.r << 16) + (color.g << 8) + color.b;
-	
-	// Draw to the frame buffer
-	((uint32_t *)this->frameBuffers[this->activeFrameBufferIdx])[pixel] = encodedColor;
+	uint32_t encodedColor = 0x80000000 | (color.r << 16) | (color.g << 8) | color.b;
+	if (this->ramBackBuffer)
+	{
+		this->ramBackBuffer[pixel] = encodedColor;
+	}
+	else if (this->frameBuffers && this->frameBuffers[this->activeFrameBufferIdx])
+	{
+		((uint32_t *)this->frameBuffers[this->activeFrameBufferIdx])[pixel] = encodedColor;
+	}
 }
 
 void Scene2D::DrawPixelBlend(int x, int y, Color color, uint8_t alpha)
 {
 	if (x < 0 || x >= this->width || y < 0 || y >= this->height || alpha == 0) return;
 	int pixel = (y * this->width) + x;
-	uint32_t* fb = (uint32_t*)this->frameBuffers[this->activeFrameBufferIdx];
+	uint32_t* fb = this->ramBackBuffer ? this->ramBackBuffer : (this->frameBuffers ? (uint32_t*)this->frameBuffers[this->activeFrameBufferIdx] : NULL);
+	if (!fb) return;
 	if (alpha >= 255) {
 		fb[pixel] = 0x80000000 | (color.r << 16) | (color.g << 8) | color.b;
 		return;
@@ -271,85 +293,156 @@ void Scene2D::DrawPixelBlend(int x, int y, Color color, uint8_t alpha)
 
 void Scene2D::DrawRectangle(int x, int y, int w, int h, Color color)
 {
-	int xPos, yPos;
-	
-	// Draw row-by-row, column-by-column
-	for(yPos = y; yPos < y + h; yPos++)
+	if (w <= 0 || h <= 0) return;
+	int x1 = x < 0 ? 0 : x;
+	int y1 = y < 0 ? 0 : y;
+	int x2 = (x + w) > this->width ? this->width : (x + w);
+	int y2 = (y + h) > this->height ? this->height : (y + h);
+	if (x1 >= x2 || y1 >= y2) return;
+
+	uint32_t encodedColor = 0x80000000 | (color.r << 16) | (color.g << 8) | color.b;
+	uint32_t* fb = this->ramBackBuffer ? this->ramBackBuffer : (this->frameBuffers ? (uint32_t*)this->frameBuffers[this->activeFrameBufferIdx] : NULL);
+	if (!fb) return;
+
+	int span = x2 - x1;
+	for (int yPos = y1; yPos < y2; yPos++)
 	{
-		for(xPos = x; xPos < x + w; xPos++)
+		uint32_t* row = fb + (yPos * this->width + x1);
+		for (int xPos = 0; xPos < span; xPos++)
 		{
-			DrawPixel(xPos, yPos, color);
+			row[xPos] = encodedColor;
 		}
 	}
 }
 
 void Scene2D::CopyToActiveBuffer(const uint32_t* srcPixels)
 {
-	if(this->frameBuffers && this->frameBuffers[this->activeFrameBufferIdx] && srcPixels)
+	if (!srcPixels) return;
+	if (this->ramBackBuffer)
 	{
-		memcpy(this->frameBuffers[this->activeFrameBufferIdx], srcPixels, this->width * this->height * this->depth);
+		memcpy(this->ramBackBuffer, srcPixels, this->frameBufferSize);
+	}
+	else if (this->frameBuffers && this->frameBuffers[this->activeFrameBufferIdx])
+	{
+		memcpy(this->frameBuffers[this->activeFrameBufferIdx], srcPixels, this->frameBufferSize);
 	}
 }
 
 #ifdef GRAPHICS_USES_FONT
+struct CachedGlyph {
+	int width;
+	int rows;
+	int left;
+	int top;
+	int advanceX;
+	std::vector<uint8_t> buffer;
+	bool loaded;
+
+	CachedGlyph() : width(0), rows(0), left(0), top(0), advanceX(0), loaded(false) {}
+};
+
+static std::map<FT_Face, std::vector<CachedGlyph> > s_glyphCache;
+
+static const CachedGlyph* get_cached_glyph(FT_Face face, unsigned char ch)
+{
+	std::vector<CachedGlyph>& faceCache = s_glyphCache[face];
+	if (faceCache.empty())
+	{
+		faceCache.resize(256);
+	}
+	CachedGlyph& cg = faceCache[ch];
+	if (!cg.loaded)
+	{
+		FT_UInt glyph_index = FT_Get_Char_Index(face, ch);
+		if (FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT) == 0)
+		{
+			FT_GlyphSlot slot = face->glyph;
+			if (FT_Render_Glyph(slot, ft_render_mode_normal) == 0)
+			{
+				cg.width = slot->bitmap.width;
+				cg.rows = slot->bitmap.rows;
+				cg.left = slot->bitmap_left;
+				cg.top = slot->bitmap_top;
+				cg.advanceX = slot->advance.x >> 6;
+				int bufSize = cg.width * cg.rows;
+				if (bufSize > 0 && slot->bitmap.buffer)
+				{
+					cg.buffer.assign(slot->bitmap.buffer, slot->bitmap.buffer + bufSize);
+				}
+			}
+			else
+			{
+				cg.advanceX = slot->advance.x >> 6;
+			}
+		}
+		cg.loaded = true;
+	}
+	return &cg;
+}
+
+int Scene2D::GetTextWidth(const char *txt, FT_Face face)
+{
+	if (!txt || !face) return 0;
+	int totalWidth = 0;
+	int lineWidth = 0;
+	for (size_t i = 0; txt[i] != '\0'; i++)
+	{
+		if (txt[i] == '\n')
+		{
+			if (lineWidth > totalWidth) totalWidth = lineWidth;
+			lineWidth = 0;
+			continue;
+		}
+		const CachedGlyph* cg = get_cached_glyph(face, (unsigned char)txt[i]);
+		if (cg)
+		{
+			lineWidth += cg->advanceX;
+		}
+	}
+	if (lineWidth > totalWidth) totalWidth = lineWidth;
+	return totalWidth;
+}
+
 void Scene2D::DrawText(char *txt, FT_Face face, int startX, int startY, Color bgColor, Color fgColor)
 {
-	int rc;
+	if (!txt || !face) return;
 	int xOffset = 0;
 	int yOffset = 0;
-	
-	// Get the glyph slot for bitmap and font metrics
-	FT_GlyphSlot slot = face->glyph;
-	
-	// Iterate each character of the text to write to the screen
-	for(int n = 0; n < strlen(txt); n++)
+	size_t len = strlen(txt);
+
+	for (size_t n = 0; n < len; n++)
 	{
-		FT_UInt glyph_index;
+		if (txt[n] == '\n')
+		{
+			xOffset = 0;
+			yOffset += (face->size ? (face->size->metrics.height >> 6) : 24);
+			continue;
+		}
 
-        // Get the glyph for the ASCII code
-        glyph_index = FT_Get_Char_Index(face, txt[n]);
+		const CachedGlyph* cg = get_cached_glyph(face, (unsigned char)txt[n]);
+		if (!cg || !cg->loaded) continue;
 
-        // Load and render in 8-bit color
-        rc = FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
+		if (cg->width > 0 && cg->rows > 0 && !cg->buffer.empty())
+		{
+			const uint8_t* bmp = cg->buffer.data();
+			for (int yPos = 0; yPos < cg->rows; yPos++)
+			{
+				int py = startY + yPos + yOffset - cg->top;
+				if (py < 0 || py >= this->height) continue;
+				for (int xPos = 0; xPos < cg->width; xPos++)
+				{
+					uint8_t pixel = bmp[(yPos * cg->width) + xPos];
+					if (pixel != 0)
+					{
+						int px = startX + xPos + xOffset + cg->left;
+						this->DrawPixelBlend(px, py, fgColor, pixel);
+					}
+				}
+			}
+		}
 
-        if (rc)
-            continue;
-
-        rc = FT_Render_Glyph(slot, ft_render_mode_normal);
-
-        if (rc)
-            continue;
-
-        // If we get a newline, increment the y offset, reset the x offset, and skip to the next character
-        if (txt[n] == '\n')
-        {
-            xOffset = 0;
-            yOffset += slot->bitmap.width * 2;
-
-            continue;
-        }
-
-        // Parse and write the bitmap to the frame buffer
-        for (int yPos = 0; yPos < slot->bitmap.rows; yPos++)
-        {
-            for (int xPos = 0; xPos < slot->bitmap.width; xPos++)
-            {
-                // Decode the 8-bit bitmap
-                char pixel = slot->bitmap.buffer[(yPos * slot->bitmap.width) + xPos];
-
-                // Get new pixel coordinates to account for the character position and baseline, as well as newlines
-                int x = startX + xPos + xOffset + slot->bitmap_left;
-                int y = startY + yPos + yOffset - slot->bitmap_top;
-
-                // True Alpha Blending for FreeType 8-bit coverage
-                if((uint8_t)pixel != 0x00)
-                    this->DrawPixelBlend(x, y, fgColor, (uint8_t)pixel);
-            }
-        }
-
-        // Increment x offset for the next character
-        xOffset += slot->advance.x >> 6;
-    }
+		xOffset += cg->advanceX;
+	}
 }
 #endif
 

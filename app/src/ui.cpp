@@ -296,13 +296,7 @@ void UI::draw_text(Scene2D* scene, const std::string& text, FT_Face face, int st
 
 void UI::draw_text_centered(Scene2D* scene, const std::string& text, FT_Face face, int centerX, int baselineY, Color color) {
     if (!scene || !face) return;
-    int totalWidth = 0;
-    for (size_t i = 0; i < text.length(); i++) {
-        FT_UInt glyph_idx = FT_Get_Char_Index(face, text[i]);
-        if (FT_Load_Glyph(face, glyph_idx, FT_LOAD_DEFAULT) == 0) {
-            totalWidth += (face->glyph->advance.x >> 6);
-        }
-    }
+    int totalWidth = scene->GetTextWidth(text.c_str(), face);
     int startX = centerX - (totalWidth / 2);
     Color dummyBg = { 0, 0, 0 };
     scene->DrawText((char*)text.c_str(), face, startX, baselineY, dummyBg, color);
@@ -520,7 +514,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
         draw_rounded_outline(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BORDER, 1);
         draw_image(scene, iconInfo, CARD_X + 24, 298);
         draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 312, COLOR_WHITE);
-        draw_text(scene, "Version: v1.2.2-beta15 (Multi-DualSense & Multi-Controller Engine)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Version: v1.2.2-beta16 (Multi-DualSense & Multi-Controller Engine)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
         draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 372, COLOR_TEXT_DIM);
         draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 400, COLOR_TEXT_DIM);
 
@@ -575,7 +569,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
             draw_text(scene, "Open PS4 Settings -> GoldHEN -> Package Installer and press (X) to install!", fontCardDesc, CARD_X + 90, 526, Color{ 0, 255, 150 });
         } else if (upState == UPDATER_UP_TO_DATE) {
             draw_text(scene, "OneFamily Companion is Up to Date", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);
-            draw_text(scene, "You are running the latest version (v1.2.2-beta15). Checked online.", fontCardDesc, CARD_X + 90, 498, COLOR_BLUE_BRIGHT);
+            draw_text(scene, "You are running the latest version (v1.2.2-beta16). Checked online.", fontCardDesc, CARD_X + 90, 498, COLOR_BLUE_BRIGHT);
             draw_text(scene, "GitHub Releases: https://github.com/ChiricoG/OneFamily/releases", fontCardDesc, CARD_X + 90, 526, COLOR_TEXT_DIM);
         } else if (upState == UPDATER_CHECKING) {
             draw_text(scene, "Checking for Updates...", fontCardTitle, CARD_X + 90, 468, COLOR_WHITE);

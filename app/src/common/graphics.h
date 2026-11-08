@@ -43,6 +43,7 @@ class Scene2D
 	int frameBufferCount;
 	
 	int activeFrameBufferIdx;
+	uint32_t *ramBackBuffer;
 
 	bool initFlipQueue();
 	bool allocateFrameBuffers(int num);
@@ -70,9 +71,11 @@ public:
 	void CopyToActiveBuffer(const uint32_t* srcPixels);
 	
 	uint32_t* GetActiveFrameBuffer() const {
+		if (this->ramBackBuffer) return this->ramBackBuffer;
 		if (!this->frameBuffers) return 0;
 		return (uint32_t*)this->frameBuffers[this->activeFrameBufferIdx];
 	}
+	uint32_t* GetBackBuffer() const { return this->ramBackBuffer; }
 	int GetWidth() const { return this->width; }
 	int GetHeight() const { return this->height; }
 	
@@ -80,6 +83,7 @@ public:
 	bool InitFont(FT_Face *face, const char *fontPath, int fontSize);
 	void DrawText(char *txt, FT_Face face, int startX, int startY, Color bgColor, Color fgColor);
 	void DrawTextContainer(char *txt, FT_Face face, int startX, int startY, int maxW, int maxH, Color bgColor, Color fgColor);
+	int  GetTextWidth(const char *txt, FT_Face face);
 #endif
 };
 
