@@ -5,6 +5,7 @@
 
 #include "translator.h"
 #include "ini_parser.h"
+#include "motion_fusion.h"
 #include <string.h>
 #include <orbis/libkernel.h>
 
@@ -605,6 +606,14 @@ static bool is_valid_imu_sample(int16_t ax, int16_t ay, int16_t az, int16_t gx, 
 }
 
 /*
+ * DualSense touchpad is 1920x1080, DualShock 4 is 1920x942 (Y 0..941).
+ */
+static uint16_t ds_touch_y_to_ds4(uint16_t raw_y) {
+    if (raw_y >= 1080) return 941;
+    return (uint16_t)(((uint32_t)raw_y * 942U) / 1080U);
+}
+
+/*
  * Switch Pro Controller full report translation function (Reports 0x30, 0x21, 0x31)
  */
 void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4, const TranslatorConfig* config) {
@@ -763,27 +772,84 @@ void translator_convert_switch_pro(const SwitchFullReport* sw, OrbisPadData* ds4
     ds4->acell.y = 0.0f;
     ds4->acell.z = 1.0f;
 
+    static MotionFusionState s_sw_fusion;
+    static bool  s_sw_fusion_ready = false;
+    static bool  s_sw_have_last = false;
+    static float s_sw_last_gyro[3];
+    static float s_sw_last_accel[3];
+    if (!s_sw_fusion_ready) {
+        motion_fusion_reset(&s_sw_fusion);
+        s_sw_fusion_ready = true;
+    }
+
+    bool sw_have_motion = false;
+    float sw_gyro[3]  = { 0.0f, 0.0f, 0.0f };
+    float sw_accel[3] = { 0.0f, 0.0f, 0.0f };
+
     if (sw->report_id == 0x30 || sw->report_id == 0x31) {
         const uint8_t* raw = (const uint8_t*)sw;
-        int16_t sw_ax = (int16_t)((uint16_t)raw[13] | ((uint16_t)raw[14] << 8));
-        int16_t sw_ay = (int16_t)((uint16_t)raw[15] | ((uint16_t)raw[16] << 8));
-        int16_t sw_az = (int16_t)((uint16_t)raw[17] | ((uint16_t)raw[18] << 8));
-        int16_t sw_gx = (int16_t)((uint16_t)raw[19] | ((uint16_t)raw[20] << 8));
-        int16_t sw_gy = (int16_t)((uint16_t)raw[21] | ((uint16_t)raw[22] << 8));
-        int16_t sw_gz = (int16_t)((uint16_t)raw[23] | ((uint16_t)raw[24] << 8));
+        // Switch Pro frame (+X forward, +Y left, +Z up) -> PS4 DS4 frame (+X right, +Y up, +Z backward)
+        // Accel: 4096 LSB = 1g; Gyro: 0.070 deg/s/LSB = 0.00122173048 rad/s/LSB
+        const float k_sw_accel = 1.0f / 4096.0f;
+        const float k_sw_gyro  = 0.00122173048f;
+        int valid_samples = 0;
 
-        if (is_valid_imu_sample(sw_ax, sw_ay, sw_az, sw_gx, sw_gy, sw_gz)) {
-            // Switch Pro frame (+X forward, +Y left, +Z up) -> PS4 DS4 frame (+X right, +Y up, +Z backward)
-            // Accel: 4096 LSB = 1g; Gyro: 0.070 deg/s/LSB = 0.00122173048 rad/s/LSB
-            const float k_sw_accel = 1.0f / 4096.0f;
-            const float k_sw_gyro  = 0.00122173048f;
-            ds4->acell.x = (float)(-sw_ay) * k_sw_accel;
-            ds4->acell.y = (float)( sw_az) * k_sw_accel;
-            ds4->acell.z = (float)(-sw_ax) * k_sw_accel;
-            ds4->vel.x   = (float)(-sw_gy) * k_sw_gyro;
-            ds4->vel.y   = (float)( sw_gz) * k_sw_gyro;
-            ds4->vel.z   = (float)(-sw_gx) * k_sw_gyro;
+        // The report carries 3 IMU samples (12 bytes each) starting at byte 13: average the valid ones.
+        for (int k = 0; k < 3; k++) {
+            const uint8_t* s = raw + 13 + (k * 12);
+            int16_t sw_ax = (int16_t)((uint16_t)s[0]  | ((uint16_t)s[1]  << 8));
+            int16_t sw_ay = (int16_t)((uint16_t)s[2]  | ((uint16_t)s[3]  << 8));
+            int16_t sw_az = (int16_t)((uint16_t)s[4]  | ((uint16_t)s[5]  << 8));
+            int16_t sw_gx = (int16_t)((uint16_t)s[6]  | ((uint16_t)s[7]  << 8));
+            int16_t sw_gy = (int16_t)((uint16_t)s[8]  | ((uint16_t)s[9]  << 8));
+            int16_t sw_gz = (int16_t)((uint16_t)s[10] | ((uint16_t)s[11] << 8));
+
+            if (is_valid_imu_sample(sw_ax, sw_ay, sw_az, sw_gx, sw_gy, sw_gz)) {
+                sw_accel[0] += (float)(-sw_ay) * k_sw_accel;
+                sw_accel[1] += (float)( sw_az) * k_sw_accel;
+                sw_accel[2] += (float)(-sw_ax) * k_sw_accel;
+                sw_gyro[0]  += (float)(-sw_gy) * k_sw_gyro;
+                sw_gyro[1]  += (float)( sw_gz) * k_sw_gyro;
+                sw_gyro[2]  += (float)(-sw_gx) * k_sw_gyro;
+                valid_samples++;
+            }
         }
+        if (valid_samples > 0) {
+            float inv = 1.0f / (float)valid_samples;
+            for (int i = 0; i < 3; i++) {
+                sw_gyro[i]  *= inv;
+                sw_accel[i] *= inv;
+                s_sw_last_gyro[i]  = sw_gyro[i];
+                s_sw_last_accel[i] = sw_accel[i];
+            }
+            s_sw_have_last = true;
+            sw_have_motion = true;
+        }
+    } else if (sw->report_id == 0x21 && s_sw_have_last) {
+        // Subcommand replies carry no IMU data: reuse the last valid sample.
+        for (int i = 0; i < 3; i++) {
+            sw_gyro[i]  = s_sw_last_gyro[i];
+            sw_accel[i] = s_sw_last_accel[i];
+        }
+        sw_have_motion = true;
+    }
+
+    if (sw_have_motion) {
+        ds4->vel.x   = sw_gyro[0];
+        ds4->vel.y   = sw_gyro[1];
+        ds4->vel.z   = sw_gyro[2];
+        ds4->acell.x = sw_accel[0];
+        ds4->acell.y = sw_accel[1];
+        ds4->acell.z = sw_accel[2];
+        motion_fusion_update(&s_sw_fusion, sw_gyro, sw_accel, sceKernelGetProcessTime());
+        ds4->quat.x = s_sw_fusion.q[0];
+        ds4->quat.y = s_sw_fusion.q[1];
+        ds4->quat.z = s_sw_fusion.q[2];
+        ds4->quat.w = s_sw_fusion.q[3];
+    } else {
+        // No usable IMU (clone without sensors, or no data yet): rest pose, restart the fusion.
+        motion_fusion_reset(&s_sw_fusion);
+        s_sw_have_last = false;
     }
 
     ds4->touch.fingers = 0;
@@ -1005,13 +1071,13 @@ void translator_convert_dualsense(const DualSenseReport* ps5, OrbisPadData* ds4,
     if ((ps5->touch_points[0].contact & 0x80) == 0) {
         ds4->touch.touch[0].finger = 0;
         ds4->touch.touch[0].x = (uint16_t)ps5->touch_points[0].x_lo | (((uint16_t)(ps5->touch_points[0].x_hi_y_lo & 0x0F)) << 8);
-        ds4->touch.touch[0].y = (uint16_t)(ps5->touch_points[0].x_hi_y_lo >> 4) | (((uint16_t)ps5->touch_points[0].y_hi) << 4);
+        ds4->touch.touch[0].y = ds_touch_y_to_ds4((uint16_t)(ps5->touch_points[0].x_hi_y_lo >> 4) | (((uint16_t)ps5->touch_points[0].y_hi) << 4));
         finger_count++;
     }
     if ((ps5->touch_points[1].contact & 0x80) == 0) {
         ds4->touch.touch[1].finger = 1;
         ds4->touch.touch[1].x = (uint16_t)ps5->touch_points[1].x_lo | (((uint16_t)(ps5->touch_points[1].x_hi_y_lo & 0x0F)) << 8);
-        ds4->touch.touch[1].y = (uint16_t)(ps5->touch_points[1].x_hi_y_lo >> 4) | (((uint16_t)ps5->touch_points[1].y_hi) << 4);
+        ds4->touch.touch[1].y = ds_touch_y_to_ds4((uint16_t)(ps5->touch_points[1].x_hi_y_lo >> 4) | (((uint16_t)ps5->touch_points[1].y_hi) << 4));
         finger_count++;
     }
     ds4->touch.fingers = finger_count;
@@ -1324,6 +1390,12 @@ void translator_convert_ds4(const DS4Report* rpt, OrbisPadData* ds4, const Trans
 
     // Motion data (gyro scaled from +/-2000 deg/s full scale to rad/s, accel scaled by 8192 LSB/g)
     const float k_ds4_gyro_scale = (2000.0f * 0.01745329252f) / 32768.0f;
+    static MotionFusionState s_ds4_fusion;
+    static bool s_ds4_fusion_ready = false;
+    if (!s_ds4_fusion_ready) {
+        motion_fusion_reset(&s_ds4_fusion);
+        s_ds4_fusion_ready = true;
+    }
     ds4->quat.x = 0.0f;
     ds4->quat.y = 0.0f;
     ds4->quat.z = 0.0f;
@@ -1337,7 +1409,16 @@ void translator_convert_ds4(const DS4Report* rpt, OrbisPadData* ds4, const Trans
         ds4->acell.x = (float)rpt->accel[0] / 8192.0f;
         ds4->acell.y = (float)rpt->accel[1] / 8192.0f;
         ds4->acell.z = (float)rpt->accel[2] / 8192.0f;
+
+        float ds4_gyro[3]  = { ds4->vel.x, ds4->vel.y, ds4->vel.z };
+        float ds4_accel[3] = { ds4->acell.x, ds4->acell.y, ds4->acell.z };
+        motion_fusion_update(&s_ds4_fusion, ds4_gyro, ds4_accel, sceKernelGetProcessTime());
+        ds4->quat.x = s_ds4_fusion.q[0];
+        ds4->quat.y = s_ds4_fusion.q[1];
+        ds4->quat.z = s_ds4_fusion.q[2];
+        ds4->quat.w = s_ds4_fusion.q[3];
     } else {
+        motion_fusion_reset(&s_ds4_fusion);
         ds4->vel.x = 0.0f;
         ds4->vel.y = 0.0f;
         ds4->vel.z = 0.0f;
