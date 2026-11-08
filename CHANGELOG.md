@@ -2,7 +2,7 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
-## [v1.2.2-beta12] - (2026-11-08)
+## [v1.2.2-beta12] - Pre-release (2026-11-08)
 
 ### Motion Sensors & Controller Accuracy Fixes (Issue #53)
 - **Orientation Quaternion for USB DS4 & Switch Pro**: Implemented real-time complementary orientation filter (`motion_fusion.h`) on USB DualShock 4 and Nintendo Switch Pro controllers, enabling full 3D tilt tracking in games that query the quaternion orientation (e.g. Gravity Rush).
