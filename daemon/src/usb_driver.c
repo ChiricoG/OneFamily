@@ -259,7 +259,7 @@ typedef struct {
     uint32_t dst_bit;
 } ButtonRemapRule;
 
-#define MAX_REMAP_RULES 16
+#define MAX_REMAP_RULES 32
 static ButtonRemapRule s_remap_rules[MAX_REMAP_RULES];
 static int s_remap_rule_count = 0;
 static ButtonRemapRule s_bt_remap_rules[MAX_REMAP_RULES];
@@ -339,6 +339,8 @@ static void load_controller_remap_ini_into(uint16_t vid, uint16_t pid, ButtonRem
             }
             uint32_t src_bit = 0, dst_bit = 0;
             if (parse_remap_btn_name(key, &src_bit) && src_bit != 0 && parse_remap_btn_name(val, &dst_bit)) {
+                daemon_log(LOG_LEVEL_INFO, "  Remap rule [%d]: %s (0x%08X) -> %s (0x%08X)",
+                           *out_count, key, src_bit, val, dst_bit);
                 out_rules[*out_count].src_bit = src_bit;
                 out_rules[*out_count].dst_bit = dst_bit;
                 (*out_count)++;

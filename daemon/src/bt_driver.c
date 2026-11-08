@@ -39,6 +39,8 @@ static int s_bt_reg_count = 0;
 static int s_bt_edge_reg_count = 0;
 static bool s_bt_supported = false;
 static uint32_t s_current_fw_bcd = 0x1250;
+static uint32_t s_discovered_lock = 0;
+static uint32_t s_discovered_unlock = 0;
 
 // DualSense IMU Calibration & 3D Motion Orientation State
 typedef struct {
@@ -645,6 +647,11 @@ static int apply_kernel_allowlist_patch(int restore, uint32_t fw_version) {
         }
     }
 
+    if (ret == 0 && !restore) {
+        s_discovered_lock = req.discovered_lock;
+        s_discovered_unlock = req.discovered_unlock;
+    }
+
     if (ret == 0 && req.is_dynamic && !restore) {
         daemon_log(LOG_LEVEL_INFO, "[FW 0x%04X] Successfully paired and patched %u Pairs (%u Offsets) for DualSense Wireless Pairing:",
                    fw_version, req.pair_count, req.pair_count * 2);
@@ -659,17 +666,20 @@ static int apply_kernel_allowlist_patch(int restore, uint32_t fw_version) {
 }
 
 // -------------------------------------------------------------
-// Output Report Capacity Patch (FW 12.50 Verified Offsets)
+// Output Report Capacity Patch (Universal Link Capacity)
 // -------------------------------------------------------------
 // In Orbis OS bthid, the Thrustmaster 044F:1000 allowlist entry initializes the per-link
-// output report capacity (link + 0x1574) to 22 bytes. Sending a 78-byte 0x31 output report
-// via ioctl 0x80206232UL without raising *capacity to 78 truncates the packet and causes
-// the DualSense to drop the Bluetooth connection.
+// output and input report capacity (link + 0x1574) to 22 bytes.
+// Raising *capacity to 78 bytes allows extended 78-byte 0x31 input and output reports.
+// If capacity cannot be patched on unmapped firmwares, the controller remains safely
+// in 10-byte 0x01 report mode where it operates cleanly without exceeding 22 bytes.
 
 struct CapacityRequest {
     uint64_t address;
     uint32_t restore;
     uint32_t original;
+    uint32_t lock_off;
+    uint32_t unlock_off;
 };
 
 struct CapacityArgs {
@@ -686,32 +696,43 @@ static int controller_capacity(void* thread, struct CapacityArgs* args) {
 
     struct CapacityRequest* r = args->request;
     if (!r->address || (r->address >> 48) || r->restore > 1) return 22;
-    if (*(volatile uint64_t*)(base + 0x5B6D00) != 0x56415741E5894855UL) return 22;
 
-    int (*lock)(void) = (void*)(base + 0x5A6B80);
-    int (*unlock)(int) = (void*)(base + 0x5A6C00);
-    int (*copyout)(const void*, void*, uint64_t) = (void*)(base + 0x36C6A0);
+    int (*lock)(void) = r->lock_off ? (void*)(base + r->lock_off) : NULL;
+    int (*unlock)(int) = r->unlock_off ? (void*)(base + r->unlock_off) : NULL;
 
-    int rc = lock();
-    if (rc) return rc;
+    uint64_t flags = 0;
+    if (lock) {
+        int rc = lock();
+        if (rc) return rc;
+    } else {
+        __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    }
 
+    int rc = 2; // Link not found
+    uint8_t* found_link = NULL;
+
+    // 1. Primary check: verified context offset 0x2612550 (FW 12.50, 13.02, 13.52)
     uint8_t* context = *(void**)(base + 0x2612550);
-    rc = 2;
     if (context && ((uint64_t)context >> 48) == 0xFFFF) {
         for (uint32_t offset = 0x42A8; offset < 0x185A0; offset += 0x1588) {
             uint8_t* link = context + offset;
             if (*(volatile uint64_t*)(link + 0x30) != r->address) continue;
+
             uint8_t* device = *(void**)(link + 0x638);
             if (!device || ((uint64_t)device >> 48) != 0xFFFF ||
                 *(volatile uint16_t*)(device + 0x28) != 0x054C ||
-                *(volatile uint16_t*)(device + 0x2A) != 0x0CE6) {
+                (*(volatile uint16_t*)(device + 0x2A) != 0x0CE6 &&
+                 *(volatile uint16_t*)(device + 0x2A) != 0x0DF2)) {
                 break;
             }
+
             uint32_t* capacity = (void*)(link + 0x1574);
             if (*capacity != 22 && *capacity != 49 && *capacity != 78) {
                 rc = 22;
                 break;
             }
+
+            found_link = link;
             if (r->restore) {
                 if (r->original != 22 && r->original != 49 && r->original != 78) {
                     rc = 22;
@@ -720,23 +741,74 @@ static int controller_capacity(void* thread, struct CapacityArgs* args) {
                 *capacity = r->original;
                 rc = 0;
             } else {
-                uint32_t previous = *capacity;
-                rc = copyout(&previous, &r->original, sizeof(previous));
-                if (!rc) *capacity = 78;
+                r->original = *capacity;
+                *capacity = 78;
+                rc = 0;
             }
             break;
         }
     }
-    unlock(0);
+
+    // 2. Secondary scan: nearby range [0x2612000 .. 0x2613000] if not found at 0x2612550
+    if (!found_link) {
+        for (uint32_t cand = 0x2612000; cand <= 0x2613000; cand += 8) {
+            if (cand == 0x2612550) continue;
+            uint8_t* ctx = *(void**)(base + cand);
+            if (!ctx || ((uint64_t)ctx >> 48) != 0xFFFF) continue;
+
+            for (uint32_t offset = 0x42A8; offset < 0x185A0; offset += 0x1588) {
+                uint8_t* link = ctx + offset;
+                if (*(volatile uint64_t*)(link + 0x30) != r->address) continue;
+
+                uint8_t* device = *(void**)(link + 0x638);
+                if (!device || ((uint64_t)device >> 48) != 0xFFFF ||
+                    *(volatile uint16_t*)(device + 0x28) != 0x054C ||
+                    (*(volatile uint16_t*)(device + 0x2A) != 0x0CE6 &&
+                     *(volatile uint16_t*)(device + 0x2A) != 0x0DF2)) {
+                    break;
+                }
+
+                uint32_t* capacity = (void*)(link + 0x1574);
+                if (*capacity != 22 && *capacity != 49 && *capacity != 78) {
+                    rc = 22;
+                    break;
+                }
+
+                found_link = link;
+                if (r->restore) {
+                    if (r->original != 22 && r->original != 49 && r->original != 78) {
+                        rc = 22;
+                        break;
+                    }
+                    *capacity = r->original;
+                    rc = 0;
+                } else {
+                    r->original = *capacity;
+                    *capacity = 78;
+                    rc = 0;
+                }
+                break;
+            }
+            if (found_link) break;
+        }
+    }
+
+    if (unlock) {
+        unlock(0);
+    } else {
+        __asm__ volatile("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
+    }
     return rc;
 }
 
 static int apply_controller_capacity(BtDevice* dev, int restore) {
-    if (!dev || !dev->address || s_current_fw_bcd != 0x1250) return -1;
+    if (!dev || !dev->address) return -1;
     struct CapacityRequest req = {
         .address = dev->address,
         .restore = restore ? 1U : 0U,
-        .original = restore ? dev->original_capacity : 0U
+        .original = restore ? dev->original_capacity : 0U,
+        .lock_off = s_discovered_lock,
+        .unlock_off = s_discovered_unlock
     };
     long rc = daemon_syscall(SYS_KEXEC, (long)controller_capacity, (long)&req, 0);
     if (rc == 0) {
@@ -1027,6 +1099,9 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
             vpad_reactivate_slot(dev->vpad_slot);
             dev->last_calibration_attempt = daemon_sys_time_us();
+            if (!dev->capacity_patched) {
+                apply_controller_capacity(dev, 0);
+            }
         } else {
             // New device connection
             if (vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot) != 0 || dev->vpad_slot < 0) {
@@ -1042,6 +1117,15 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             daemon_notify("OneFamily: DualSense Wireless (Player %d)", slot_num);
             daemon_log(LOG_LEVEL_INFO, "controller_connected: DualSense BT 0x%llX (Slot %d, Player %d)",
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
+
+            int cap_rc = apply_controller_capacity(dev, 0);
+            if (cap_rc == 0) {
+                daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patched to 78 bytes (orig=%u)",
+                           (unsigned long long)dev->address, dev->original_capacity);
+            } else {
+                daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patch unavailable (rc=%d), operating in safe 10-byte report mode",
+                           (unsigned long long)dev->address, cap_rc);
+            }
         }
         usb_driver_load_remap_for_bt();
         bt_write_status_file();
@@ -1243,10 +1327,12 @@ void bt_driver_poll_step(void) {
     bt_check_timeouts();
 
     // Feature Report 0x05 request for factory IMU calibration and switching 0x01 -> 0x31 extended mode
+    // STRICT INVARIANT: Only request Feature Report 0x05 if kernel link capacity was successfully patched to 78 bytes!
+    // Without 78-byte capacity, bthid drops all 78-byte reports, freezing the controller.
     uint64_t now_us = daemon_sys_time_us();
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->address && !dev->calibration_requested &&
+        if (dev->connected && dev->address && dev->capacity_patched && !dev->calibration_requested &&
             (now_us - dev->last_calibration_attempt > 1000000ULL)) {
             dev->last_calibration_attempt = now_us;
             struct { uint64_t address; uint8_t report_id; uint8_t reserved[7]; } feature = { dev->address, 5, {0} };
@@ -1259,11 +1345,11 @@ void bt_driver_poll_step(void) {
         }
     }
 
-    // Periodic Bluetooth output report keep-alive heartbeat (every 2.5s, or immediately on initial extended_mode)
-    // Strictly gated on firmwares where controller_capacity (78-byte output report size) is supported.
+    // Periodic Bluetooth output report keep-alive heartbeat (every 2.5s, or immediately on initial connection)
+    // Strictly gated on devices where controller_capacity (78-byte output report size) is active.
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->extended_mode && dev->address && !dev->output_unsupported && s_current_fw_bcd == 0x1250) {
+        if (dev->connected && dev->address && dev->capacity_patched && !dev->output_unsupported) {
             uint64_t interval = dev->initialized_output ? 2500000ULL : 20000ULL;
             if (now_us - dev->last_output_time >= interval) {
                 bt_send_rumble_dev(dev, 0, 0, dev->last_color);
@@ -1626,18 +1712,8 @@ int bt_driver_connected_count(void) {
 }
 
 static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, const uint8_t color[3]) {
-    if (!dev || !dev->connected || !dev->extended_mode || s_bt_fd < 0 || !dev->address) return;
-    if (dev->output_unsupported || s_current_fw_bcd != 0x1250) return;
-
-    // Ensure kernel bthid output report capacity is patched to 78 bytes before sending Report 0x31
-    if (apply_controller_capacity(dev, 0) != 0) {
-        if (++dev->output_errors == 1) {
-            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): output capacity patch unavailable on FW 0x%04X, skipping BT output reports",
-                       (unsigned long long)dev->address, s_current_fw_bcd);
-        }
-        dev->output_unsupported = true;
-        return;
-    }
+    if (!dev || !dev->connected || s_bt_fd < 0 || !dev->address) return;
+    if (dev->output_unsupported || !dev->capacity_patched) return;
 
     dev->last_output_time = daemon_sys_time_us();
     if (color && (color[0] || color[1] || color[2])) {

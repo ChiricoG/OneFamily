@@ -2,6 +2,20 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2-beta14] - Pre-release (2026-11-08)
+
+### DualSense Bluetooth Universal Capacity & Safe-Gate (Issues #60, #62)
+- **Universal Kernel Link Capacity**: Expanded `controller_capacity` support beyond FW 12.50 to FW 13.02 and FW 13.52, removing the hardcoded FW 12.50 signature check and dynamically discovering kernel `lock` and `unlock` offsets (`s_discovered_lock` / `s_discovered_unlock`).
+- **Eliminated DualSense Login Screen Freeze**: Fixed an issue where DualSense controllers on FW 13.02/13.52 would connect and launch the user profile selection screen but stop responding to button inputs, caused by `bthid` dropping 78-byte reports when link capacity was left at 22 bytes.
+- **Safe-Gate Invariant for Unmapped Firmwares**: On firmware versions where kernel link capacity cannot be dynamically patched (such as FW 9.00, 9.60, or 11.00), OneFamily strictly suppresses Feature Report 5 and 78-byte output reports. The DualSense operates stably in standard 10-byte Report `0x01` mode, ensuring all buttons, sticks, D-Pad, and PS button remain responsive without Bluetooth L2CAP packet drops.
+- **Immediate Pairing Handshake & Output Heartbeat**: Applied link capacity patch immediately upon connection and reconnection, enabling initial handshake reports (`out[41] = 0x02`, `out[44] = 0x02`) to cleanly finish the blue pairing animation across all supported firmwares.
+
+### Controller Remapping Engine Expansion (Issue #63)
+- **Raised Maximum Remap Rules to 32**: Doubled `MAX_REMAP_RULES` from 16 to 32 per controller profile in `usb_driver.c`, allowing complex custom controller remapping configurations without truncating rules.
+- **Per-Rule Diagnostic Logging**: Added detailed log output for each successfully applied button remap rule loaded from `/data/onefamily/controllers/<VID>_<PID>.ini`.
+
+---
+
 ## [v1.2.2-beta13] - Pre-release (2026-11-08)
 
 ### Motion Sensors & Gyroscope Fixes (Issue #53)
