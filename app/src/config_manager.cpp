@@ -182,6 +182,11 @@ bool ConfigManager::load() {
                 } else if (strcasecmp(key.c_str(), "dualsense_mute_action") == 0 || strcasecmp(key.c_str(), "mute_action") == 0) {
                     int v = atoi(val.c_str());
                     if (v >= 0 && v < (int)DS_MUTE_OPTIONS.size()) config.ds_mute_action = v;
+                } else if (strcasecmp(key.c_str(), "dualsense_speaker_volume") == 0 || strcasecmp(key.c_str(), "speaker_volume") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v < 0) v = 0;
+                    if (v > 100) v = 100;
+                    config.ds_speaker_volume = v;
                 }
             }
         }
@@ -227,7 +232,8 @@ bool ConfigManager::save() {
         "dualsense_brightness = %d\n"
         "dualsense_trigger_mode = %d\n"
         "dualsense_player_leds = %d\n"
-        "dualsense_mute_action = %d\n",
+        "dualsense_mute_action = %d\n"
+        "dualsense_speaker_volume = %d\n",
         deadzone_val,
         trigger_val,
         rumble_val,
@@ -238,7 +244,8 @@ bool ConfigManager::save() {
         config.ds_brightness,
         config.ds_trigger_mode,
         config.ds_player_leds,
-        config.ds_mute_action
+        config.ds_mute_action,
+        config.ds_speaker_volume
     );
 
     bool w1 = false, w2 = false;

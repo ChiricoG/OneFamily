@@ -25,6 +25,7 @@ struct AppConfig {
     int ds_trigger_mode;    // 0=Standard / Off, 1=Hair Trigger, 2=Resistance, 3=Vibration
     int ds_player_leds;     // 0=Player Slot, 1=All On, 2=Off
     int ds_mute_action;     // 0=Default, 1=Touchpad Click
+    int ds_speaker_volume;  // 0..100 (Default: 80)
 
     AppConfig() {
         set_defaults();
@@ -42,6 +43,7 @@ struct AppConfig {
         ds_trigger_mode = 0;
         ds_player_leds = 0;
         ds_mute_action = 0;
+        ds_speaker_volume = 80;
     }
 };
 

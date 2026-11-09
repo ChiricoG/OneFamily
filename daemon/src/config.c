@@ -41,6 +41,7 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
     cfg->dualsense_trigger_mode = 0;
     cfg->dualsense_player_leds = 0;
     cfg->dualsense_mute_action = 0;
+    cfg->dualsense_speaker_volume = 80;
 }
 
 void config_init_defaults(PluginConfig *cfg) {
@@ -200,6 +201,11 @@ void daemon_config_load(DaemonConfig *cfg) {
                 cfg->dualsense_player_leds = parse_int(val, 0);
             } else if (str_case_eq(key, "dualsense_mute_action") || str_case_eq(key, "mute_action")) {
                 cfg->dualsense_mute_action = parse_int(val, 0);
+            } else if (str_case_eq(key, "dualsense_speaker_volume") || str_case_eq(key, "speaker_volume")) {
+                int vol = parse_int(val, 80);
+                if (vol < 0) vol = 0;
+                if (vol > 100) vol = 100;
+                cfg->dualsense_speaker_volume = vol;
             }
         }
 
@@ -220,7 +226,8 @@ bool daemon_config_check_reload(DaemonConfig *cfg) {
         old.dualsense_lightbar_color != cfg->dualsense_lightbar_color ||
         old.dualsense_brightness != cfg->dualsense_brightness ||
         old.dualsense_trigger_mode != cfg->dualsense_trigger_mode ||
-        old.dualsense_player_leds != cfg->dualsense_player_leds
+        old.dualsense_player_leds != cfg->dualsense_player_leds ||
+        old.dualsense_speaker_volume != cfg->dualsense_speaker_volume
     );
 
     if (ds_changed) {

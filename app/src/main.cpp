@@ -560,7 +560,7 @@ int main() {
             }
         } else if (currentTabId == TAB_DUALSENSE && hasDualSense) {
             // --- DUALSENSE MANAGEMENT TAB ---
-            const int TOTAL_DS_CARDS = 6;
+            const int TOTAL_DS_CARDS = 7;
             if (justPressed & ORBIS_PAD_BUTTON_UP) {
                 dsSelectedCard = (dsSelectedCard + TOTAL_DS_CARDS - 1) % TOTAL_DS_CARDS;
             }
@@ -582,6 +582,13 @@ int main() {
                 } else if (dsSelectedCard == 4) {
                     if (cfg.ds_player_leds > 0) { cfg.ds_player_leds--; dsChanged = true; }
                 } else if (dsSelectedCard == 5) {
+                    if (cfg.ds_speaker_volume >= 5) {
+                        cfg.ds_speaker_volume -= 5;
+                    } else {
+                        cfg.ds_speaker_volume = 0;
+                    }
+                    dsChanged = true;
+                } else if (dsSelectedCard == 6) {
                     cfg.ds_mute_action ^= 1; dsChanged = true;
                 }
                 if (dsChanged) {
@@ -614,12 +621,30 @@ int main() {
                         cfg.ds_player_leds++; dsChanged = true;
                     }
                 } else if (dsSelectedCard == 5) {
+                    if (cfg.ds_speaker_volume <= 95) {
+                        cfg.ds_speaker_volume += 5;
+                    } else {
+                        cfg.ds_speaker_volume = 100;
+                    }
+                    dsChanged = true;
+                } else if (dsSelectedCard == 6) {
                     cfg.ds_mute_action ^= 1; dsChanged = true;
                 }
                 if (dsChanged) {
                     configMgr.save();
                     notify_daemon_reload();
                 }
+            }
+
+            // Toggle Mute on SQUARE when on Speaker Volume card
+            if ((justPressed & ORBIS_PAD_BUTTON_SQUARE) && dsSelectedCard == 5) {
+                if (cfg.ds_speaker_volume > 0) {
+                    cfg.ds_speaker_volume = 0;
+                } else {
+                    cfg.ds_speaker_volume = 80;
+                }
+                configMgr.save();
+                notify_daemon_reload();
             }
 
             // Save on CROSS (X)

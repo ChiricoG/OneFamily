@@ -514,7 +514,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
         draw_rounded_outline(scene, CARD_X, 280, CARD_W, 140, 12, COLOR_CARD_BORDER, 1);
         draw_image(scene, iconInfo, CARD_X + 24, 298);
         draw_text(scene, "OneFamily Companion", fontCardTitle, CARD_X + 90, 312, COLOR_WHITE);
-        draw_text(scene, "Version: v1.2.2-beta16 (Multi-DualSense & Multi-Controller Engine)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
+        draw_text(scene, "Version: v1.2.2-beta17 (DualSense Speaker Audio & Multi-Controller)", fontCardDesc, CARD_X + 90, 342, COLOR_BLUE_BRIGHT);
         draw_text(scene, "Configuration File: /data/onefamily/onefamily.ini", fontCardDesc, CARD_X + 90, 372, COLOR_TEXT_DIM);
         draw_text(scene, "Developer: ChiricoG - OneFamily Project", fontCardDesc, CARD_X + 90, 400, COLOR_TEXT_DIM);
 
@@ -1317,7 +1317,7 @@ void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile&
 }
 
 void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard, const HidStatus& status) {
-    const int TOTAL_CARDS = 6;
+    const int TOTAL_CARDS = 7;
     const int VISIBLE_CARDS = 5;
 
     int scrollOffset = 0;
@@ -1334,6 +1334,7 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         "LED Brightness",
         "Adaptive Triggers",
         "Player Indicator LEDs",
+        "Internal Speaker Volume",
         "Mute Button Remap"
     };
 
@@ -1343,6 +1344,7 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         "Overall brightness intensity for lightbar and player LEDs.",
         "Hardware adaptive trigger motor resistance for L2 and R2.",
         "White LEDs below the touchpad indicating assigned player slot.",
+        "In-game audio volume for the DualSense internal speaker (0% - 100%).",
         "Remap the physical microphone mute button to Touchpad Click."
     };
 
@@ -1352,6 +1354,7 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         &iconGear,
         &iconSwap,
         &iconMode,
+        &iconRumble,
         &iconRemap
     };
 
@@ -1376,9 +1379,17 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         cardValues[4] = ConfigManager::DS_PLAYER_LEDS_OPTIONS[cfg.ds_player_leds];
     } else cardValues[4] = "Player Slot";
 
+    char volStr[32];
+    if (cfg.ds_speaker_volume <= 0) {
+        snprintf(volStr, sizeof(volStr), "0%% (Muted)");
+    } else {
+        snprintf(volStr, sizeof(volStr), "%d%%", cfg.ds_speaker_volume);
+    }
+    cardValues[5] = volStr;
+
     if (cfg.ds_mute_action >= 0 && cfg.ds_mute_action < (int)ConfigManager::DS_MUTE_OPTIONS.size()) {
-        cardValues[5] = ConfigManager::DS_MUTE_OPTIONS[cfg.ds_mute_action];
-    } else cardValues[5] = "Default";
+        cardValues[6] = ConfigManager::DS_MUTE_OPTIONS[cfg.ds_mute_action];
+    } else cardValues[6] = "Default";
 
     // Static color preview table
     static const Color colorPreviews[6] = {
@@ -1435,6 +1446,20 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
                 draw_circle_outline(scene, CARD_X + CARD_W - 275, cardY + 48, 7, COLOR_WHITE, 1);
             }
             draw_text_centered(scene, cardValues[cardIdx], fontValue, CARD_X + CARD_W - 165, cardY + 54, COLOR_WHITE);
+        } else if (cardIdx == 5) {
+            // Speaker Volume Card: draw percentage text + mini volume gauge bar
+            draw_text_centered(scene, cardValues[cardIdx], fontValue, CARD_X + CARD_W - 170, cardY + 44, COLOR_WHITE);
+            int vBarX = CARD_X + CARD_W - 250;
+            int vBarY = cardY + 62;
+            int vBarW = 160;
+            int vBarH = 8;
+            draw_rounded_rect(scene, vBarX, vBarY, vBarW, vBarH, 3, Color{ 15, 25, 40 });
+            draw_rounded_outline(scene, vBarX, vBarY, vBarW, vBarH, 3, COLOR_BORDER_DIM, 1);
+            int fillW = (vBarW * cfg.ds_speaker_volume) / 100;
+            if (fillW > 0) {
+                Color fillCol = (cfg.ds_speaker_volume > 0) ? COLOR_BLUE_BRIGHT : Color{ 80, 80, 80 };
+                draw_rounded_rect(scene, vBarX, vBarY, fillW, vBarH, 3, fillCol);
+            }
         } else {
             draw_text_centered(scene, cardValues[cardIdx], fontValue, CARD_X + CARD_W - 170, cardY + 54, COLOR_WHITE);
         }

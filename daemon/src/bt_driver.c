@@ -1328,12 +1328,13 @@ void bt_driver_poll_step(void) {
 
     uint64_t now_us = daemon_sys_time_us();
 
-    // Periodic Bluetooth output report keep-alive heartbeat (every 2.5s, or immediately on initial connection)
+    // Periodic Bluetooth output report keep-alive heartbeat (every 500ms, or immediately on initial connection)
     // Strictly gated on devices where controller_capacity (78-byte output report size) is active.
+    // Paces keep-alive reports at 500ms to preserve Bluetooth Active Mode (Exit Sniff Mode) for crackle-free audio.
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
         if (dev->connected && dev->address && dev->capacity_patched && !dev->output_unsupported) {
-            uint64_t interval = dev->initialized_output ? 2500000ULL : 20000ULL;
+            uint64_t interval = dev->initialized_output ? 500000ULL : 20000ULL;
             if (now_us - dev->last_output_time >= interval) {
                 bt_send_rumble_dev(dev, 0, 0, dev->last_color);
             }
@@ -1726,10 +1727,17 @@ static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, cons
         out[41] = 0x02;
         out[44] = 0x02;
     } else {
-        out[3] = 0x03 | 0x0C;       // Enable motors (0x03) + Enable trigger effects L2/R2 (0x0C)
+        out[3] = 0x03 | 0x0C | 0x20 | 0x80; // Enable motors (0x03) + Trigger effects (0x0C) + Speaker Volume (0x20) + Audio Routing (0x80)
         out[4] = 0x14;              // Player Indicator Control Enable (0x10) | Lightbar Control Enable (0x04)
         out[5] = small;             // Weak motor
         out[6] = large;             // Strong motor
+
+        // Internal Speaker Volume & Audio Routing (Issue #61)
+        int vol = g_daemon_config.dualsense_speaker_volume;
+        if (vol < 0) vol = 0;
+        if (vol > 100) vol = 100;
+        out[8] = (uint8_t)((vol * 255) / 100); // 0..255 hardware volume
+        out[10] = (vol > 0) ? 0x01 : 0x00;     // 0x01 = Internal mono speaker sink
 
         // 1. Adaptive Trigger Effects (calibrated physical presets for DualSense Simple Modes)
         int trig = g_daemon_config.dualsense_trigger_mode;
