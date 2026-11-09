@@ -35,6 +35,7 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
 
 
     // [DualSense]
+    cfg->dualsense_bt_mode = 0; // 0 = Safe Mode (Report 0x01, 10 bytes), 1 = Extended Mode (Report 0x31, 78 bytes)
     cfg->dualsense_lightbar_mode = 0;
     cfg->dualsense_lightbar_color = 0;
     cfg->dualsense_brightness = 0;
@@ -189,6 +190,8 @@ void daemon_config_load(DaemonConfig *cfg) {
                 cfg->swap_triggers_bumpers = parse_int(val, 0);
             } else if (str_case_eq(key, "switch_positional_layout")) {
                 cfg->switch_positional = parse_int(val, 1);
+            } else if (str_case_eq(key, "dualsense_bt_mode") || str_case_eq(key, "bt_mode")) {
+                cfg->dualsense_bt_mode = parse_int(val, 0);
             } else if (str_case_eq(key, "dualsense_lightbar_mode") || str_case_eq(key, "lightbar_mode")) {
                 cfg->dualsense_lightbar_mode = parse_int(val, 0);
             } else if (str_case_eq(key, "dualsense_lightbar_color") || str_case_eq(key, "lightbar_color")) {
@@ -222,6 +225,7 @@ bool daemon_config_check_reload(DaemonConfig *cfg) {
     daemon_config_load(cfg);
 
     bool ds_changed = (
+        old.dualsense_bt_mode != cfg->dualsense_bt_mode ||
         old.dualsense_lightbar_mode != cfg->dualsense_lightbar_mode ||
         old.dualsense_lightbar_color != cfg->dualsense_lightbar_color ||
         old.dualsense_brightness != cfg->dualsense_brightness ||

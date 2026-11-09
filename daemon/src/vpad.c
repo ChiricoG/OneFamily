@@ -1032,7 +1032,7 @@ void vpad_poll_rumble(void) {
                 g_slots[i].last_rumble_send_us = now;
 
                 if (g_slots[i].source == VPAD_SOURCE_BT) {
-                    if (g_daemon_config.enable_rumble || (lg == 0 && sm == 0) || color_changed) {
+                    if (g_daemon_config.dualsense_bt_mode == 1 && (g_daemon_config.enable_rumble || (lg == 0 && sm == 0) || color_changed)) {
                         uint8_t out_lg = g_daemon_config.enable_rumble ? lg : 0;
                         uint8_t out_sm = g_daemon_config.enable_rumble ? sm : 0;
                         uint8_t color[3] = {

@@ -35,6 +35,10 @@ const std::vector<std::string> ConfigManager::SWITCH_OPTIONS = {
     "Positional", "By Letter"
 };
 
+const std::vector<std::string> ConfigManager::DS_BT_MODE_OPTIONS = {
+    "Safe Mode (10-Byte)", "Extended (78-Byte)"
+};
+
 const std::vector<std::string> ConfigManager::DS_LIGHTBAR_OPTIONS = {
     "Game Sync", "Static Color", "Battery Status", "Off"
 };
@@ -164,6 +168,9 @@ bool ConfigManager::load() {
                 } else if (strcasecmp(key.c_str(), "switch_positional_layout") == 0) {
                     int v = atoi(val.c_str());
                     config.switch_index = (v != 0) ? 0 : 1; // 0=Positional (1), 1=By Letter (0)
+                } else if (strcasecmp(key.c_str(), "dualsense_bt_mode") == 0 || strcasecmp(key.c_str(), "bt_mode") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)DS_BT_MODE_OPTIONS.size()) config.ds_bt_mode = v;
                 } else if (strcasecmp(key.c_str(), "dualsense_lightbar_mode") == 0 || strcasecmp(key.c_str(), "lightbar_mode") == 0) {
                     int v = atoi(val.c_str());
                     if (v >= 0 && v < (int)DS_LIGHTBAR_OPTIONS.size()) config.ds_lightbar_mode = v;
@@ -227,6 +234,7 @@ bool ConfigManager::save() {
         "switch_positional_layout = %d\n"
         "\n"
         "[DualSense]\n"
+        "dualsense_bt_mode = %d\n"
         "dualsense_lightbar_mode = %d\n"
         "dualsense_lightbar_color = %d\n"
         "dualsense_brightness = %d\n"
@@ -239,6 +247,7 @@ bool ConfigManager::save() {
         rumble_val,
         swap_val,
         switch_val,
+        config.ds_bt_mode,
         config.ds_lightbar_mode,
         config.ds_lightbar_color,
         config.ds_brightness,

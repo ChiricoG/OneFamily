@@ -1099,7 +1099,7 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
             vpad_reactivate_slot(dev->vpad_slot);
             dev->last_calibration_attempt = daemon_sys_time_us();
-            if (!dev->capacity_patched) {
+            if (g_daemon_config.dualsense_bt_mode == 1 && !dev->capacity_patched) {
                 apply_controller_capacity(dev, 0);
             }
         } else {
@@ -1118,13 +1118,19 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             daemon_log(LOG_LEVEL_INFO, "controller_connected: DualSense BT 0x%llX (Slot %d, Player %d)",
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
 
-            int cap_rc = apply_controller_capacity(dev, 0);
-            if (cap_rc == 0) {
-                daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patched to 78 bytes (orig=%u)",
-                           (unsigned long long)dev->address, dev->original_capacity);
+            if (g_daemon_config.dualsense_bt_mode == 1) {
+                int cap_rc = apply_controller_capacity(dev, 0);
+                if (cap_rc == 0) {
+                    daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patched to 78 bytes (orig=%u)",
+                               (unsigned long long)dev->address, dev->original_capacity);
+                } else {
+                    daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patch unavailable (rc=%d), operating in safe 10-byte report mode",
+                               (unsigned long long)dev->address, cap_rc);
+                }
             } else {
-                daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patch unavailable (rc=%d), operating in safe 10-byte report mode",
-                           (unsigned long long)dev->address, cap_rc);
+                dev->capacity_patched = false;
+                daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): operating in safe 10-byte report mode (dualsense_bt_mode=0)",
+                           (unsigned long long)dev->address);
             }
         }
         usb_driver_load_remap_for_bt();
@@ -1333,7 +1339,7 @@ void bt_driver_poll_step(void) {
     // Paces keep-alive reports at 500ms to preserve Bluetooth Active Mode (Exit Sniff Mode) for crackle-free audio.
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
-        if (dev->connected && dev->address && dev->capacity_patched && !dev->output_unsupported) {
+        if (g_daemon_config.dualsense_bt_mode == 1 && dev->connected && dev->address && dev->capacity_patched && !dev->output_unsupported) {
             uint64_t interval = dev->initialized_output ? 500000ULL : 20000ULL;
             if (now_us - dev->last_output_time >= interval) {
                 bt_send_rumble_dev(dev, 0, 0, dev->last_color);
@@ -1705,7 +1711,7 @@ int bt_driver_connected_count(void) {
 
 static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, const uint8_t color[3]) {
     if (!dev || !dev->connected || s_bt_fd < 0 || !dev->address) return;
-    if (dev->output_unsupported || !dev->capacity_patched) return;
+    if (g_daemon_config.dualsense_bt_mode == 0 || dev->output_unsupported || !dev->capacity_patched) return;
 
     dev->last_output_time = daemon_sys_time_us();
     if (color && (color[0] || color[1] || color[2])) {

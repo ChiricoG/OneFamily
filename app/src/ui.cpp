@@ -1318,7 +1318,7 @@ void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile&
 }
 
 void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard, const HidStatus& status) {
-    const int TOTAL_CARDS = 7;
+    const int TOTAL_CARDS = 8;
     const int VISIBLE_CARDS = 5;
 
     int scrollOffset = 0;
@@ -1336,7 +1336,8 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         "Adaptive Triggers",
         "Player Indicator LEDs",
         "Internal Speaker Volume",
-        "Mute Button Remap"
+        "Mute Button Remap",
+        "Bluetooth Stream Mode"
     };
 
     const char* cardDescs[TOTAL_CARDS] = {
@@ -1346,7 +1347,8 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         "Hardware adaptive trigger motor resistance for L2 and R2.",
         "White LEDs below the touchpad indicating assigned player slot.",
         "In-game audio volume for the DualSense internal speaker (0% - 100%).",
-        "Remap the physical microphone mute button to Touchpad Click."
+        "Remap the physical microphone mute button to Touchpad Click.",
+        "Safe Mode (10-byte) avoids kernel packet drops; Extended (78-byte) enables BT triggers/gyro."
     };
 
     const ImageRGBA* cardIcons[TOTAL_CARDS] = {
@@ -1356,7 +1358,8 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         &iconSwap,
         &iconMode,
         &iconRumble,
-        &iconRemap
+        &iconRemap,
+        &iconGear
     };
 
     std::string cardValues[TOTAL_CARDS];
@@ -1391,6 +1394,10 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
     if (cfg.ds_mute_action >= 0 && cfg.ds_mute_action < (int)ConfigManager::DS_MUTE_OPTIONS.size()) {
         cardValues[6] = ConfigManager::DS_MUTE_OPTIONS[cfg.ds_mute_action];
     } else cardValues[6] = "Default";
+
+    if (cfg.ds_bt_mode >= 0 && cfg.ds_bt_mode < (int)ConfigManager::DS_BT_MODE_OPTIONS.size()) {
+        cardValues[7] = ConfigManager::DS_BT_MODE_OPTIONS[cfg.ds_bt_mode];
+    } else cardValues[7] = "Safe Mode (10-Byte)";
 
     // Static color preview table
     static const Color colorPreviews[6] = {

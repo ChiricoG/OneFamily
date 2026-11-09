@@ -560,7 +560,7 @@ int main() {
             }
         } else if (currentTabId == TAB_DUALSENSE && hasDualSense) {
             // --- DUALSENSE MANAGEMENT TAB ---
-            const int TOTAL_DS_CARDS = 7;
+            const int TOTAL_DS_CARDS = 8;
             if (justPressed & ORBIS_PAD_BUTTON_UP) {
                 dsSelectedCard = (dsSelectedCard + TOTAL_DS_CARDS - 1) % TOTAL_DS_CARDS;
             }
@@ -590,6 +590,8 @@ int main() {
                     dsChanged = true;
                 } else if (dsSelectedCard == 6) {
                     cfg.ds_mute_action ^= 1; dsChanged = true;
+                } else if (dsSelectedCard == 7) {
+                    cfg.ds_bt_mode ^= 1; dsChanged = true;
                 }
                 if (dsChanged) {
                     configMgr.save();
@@ -629,6 +631,8 @@ int main() {
                     dsChanged = true;
                 } else if (dsSelectedCard == 6) {
                     cfg.ds_mute_action ^= 1; dsChanged = true;
+                } else if (dsSelectedCard == 7) {
+                    cfg.ds_bt_mode ^= 1; dsChanged = true;
                 }
                 if (dsChanged) {
                     configMgr.save();

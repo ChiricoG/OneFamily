@@ -55,6 +55,7 @@ typedef struct {
 
 
     // [DualSense]
+    int                 dualsense_bt_mode;        // 0=Safe Mode (Report 0x01, 10 bytes - default), 1=Extended Mode (Report 0x31, 78 bytes)
     int                 dualsense_lightbar_mode;  // 0=Game Sync, 1=Static Color, 2=Battery, 3=Off
     int                 dualsense_lightbar_color; // 0..5 (Blue, Red, Green, Purple, Cyan, White)
     int                 dualsense_brightness;     // 0=High, 1=Medium, 2=Low

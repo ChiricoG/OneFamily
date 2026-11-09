@@ -19,6 +19,7 @@ struct AppConfig {
     int switch_index;       // 0 = Positional, 1 = By Letter
 
     // [DualSense]
+    int ds_bt_mode;         // 0=Safe Mode (10-byte Report 0x01), 1=Extended Mode (78-byte Report 0x31)
     int ds_lightbar_mode;   // 0=Game Sync, 1=Static Color, 2=Battery, 3=Off
     int ds_lightbar_color;  // 0=PlayStation Blue, 1=Red, 2=Green, 3=Purple, 4=Cyan, 5=White
     int ds_brightness;      // 0=High, 1=Medium, 2=Low
@@ -37,6 +38,7 @@ struct AppConfig {
         swap_index = 0;         // Disabled
         rumble_index = 0;       // Enabled
         switch_index = 0;       // Positional
+        ds_bt_mode = 0;         // Safe Mode (10-byte Report 0x01)
         ds_lightbar_mode = 0;
         ds_lightbar_color = 0;
         ds_brightness = 0;
@@ -58,6 +60,7 @@ public:
     static const std::vector<std::string> SWITCH_OPTIONS;
 
     // DualSense Options
+    static const std::vector<std::string> DS_BT_MODE_OPTIONS;
     static const std::vector<std::string> DS_LIGHTBAR_OPTIONS;
     static const std::vector<std::string> DS_COLOR_OPTIONS;
     static const std::vector<std::string> DS_BRIGHTNESS_OPTIONS;
