@@ -35,7 +35,7 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
 
 
     // [DualSense]
-    cfg->dualsense_bt_mode = 0; // 0 = Safe Mode (Report 0x01, 10 bytes), 1 = Extended Mode (Report 0x31, 78 bytes)
+    cfg->dualsense_bt_mode = 1; // 0 = Safe Mode (Report 0x01, 10 bytes), 1 = Extended Mode (Report 0x31, 78 bytes)
     cfg->dualsense_lightbar_mode = 0;
     cfg->dualsense_lightbar_color = 0;
     cfg->dualsense_brightness = 0;

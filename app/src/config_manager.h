@@ -38,7 +38,7 @@ struct AppConfig {
         swap_index = 0;         // Disabled
         rumble_index = 0;       // Enabled
         switch_index = 0;       // Positional
-        ds_bt_mode = 0;         // Safe Mode (10-byte Report 0x01)
+        ds_bt_mode = 1;         // Extended Mode (78-byte Report 0x31)
         ds_lightbar_mode = 0;
         ds_lightbar_color = 0;
         ds_brightness = 0;

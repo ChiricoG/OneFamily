@@ -1102,6 +1102,9 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             if (g_daemon_config.dualsense_bt_mode == 1 && !dev->capacity_patched) {
                 apply_controller_capacity(dev, 0);
             }
+            if (dev->capacity_patched && !dev->initialized_output) {
+                bt_send_rumble_dev(dev, 0, 0, dev->last_color);
+            }
         } else {
             // New device connection
             if (vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot) != 0 || dev->vpad_slot < 0) {
@@ -1123,6 +1126,8 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
                 if (cap_rc == 0) {
                     daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patched to 78 bytes (orig=%u)",
                                (unsigned long long)dev->address, dev->original_capacity);
+                    // Send initial handshake output report immediately to end pairing animation (Diram1x / AnyPad protocol)
+                    bt_send_rumble_dev(dev, 0, 0, dev->last_color);
                 } else {
                     daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patch unavailable (rc=%d), operating in safe 10-byte report mode",
                                (unsigned long long)dev->address, cap_rc);
@@ -1733,17 +1738,10 @@ static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, cons
         out[41] = 0x02;
         out[44] = 0x02;
     } else {
-        out[3] = 0x03 | 0x0C | 0x20 | 0x80; // Enable motors (0x03) + Trigger effects (0x0C) + Speaker Volume (0x20) + Audio Routing (0x80)
+        out[3] = 0x03 | 0x0C;       // Enable motors (0x03) + Trigger effects (0x0C) - Audio routing isolated to USB
         out[4] = 0x14;              // Player Indicator Control Enable (0x10) | Lightbar Control Enable (0x04)
         out[5] = small;             // Weak motor
         out[6] = large;             // Strong motor
-
-        // Internal Speaker Volume & Audio Routing (Issue #61)
-        int vol = g_daemon_config.dualsense_speaker_volume;
-        if (vol < 0) vol = 0;
-        if (vol > 100) vol = 100;
-        out[8] = (uint8_t)((vol * 255) / 100); // 0..255 hardware volume
-        out[10] = (vol > 0) ? 0x01 : 0x00;     // 0x01 = Internal mono speaker sink
 
         // 1. Adaptive Trigger Effects (calibrated physical presets for DualSense Simple Modes)
         int trig = g_daemon_config.dualsense_trigger_mode;

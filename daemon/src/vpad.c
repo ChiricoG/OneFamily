@@ -103,6 +103,8 @@ typedef struct {
     uint64_t device_key;
     SceUserServiceUserId bound_user_id;
     bool needs_user_picker;
+    uint64_t ps_pulse_until_us;
+    bool ps_pulse_active;
 } VPadSlotState;
 
 static VPadSlotState g_slots[VPAD_MAX_SLOTS];
@@ -506,7 +508,15 @@ void vpad_pulse_ps_button_slot(int slot) {
     if (slot < 0 || slot >= VPAD_MAX_SLOTS || !g_slots[slot].active || g_slots[slot].handle < 0 || !p_scePadVirtualDeviceInsertData) {
         return;
     }
-    daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button_slot(%d): Sending native PS button pulse (120ms) to trigger user selection...", slot);
+    daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button_slot(%d): Scheduling non-blocking PS button pulse (120ms)...", slot);
+
+    uint64_t now = daemon_sys_time_us();
+    g_slots[slot].ps_pulse_until_us = now + 120000ULL;
+    g_slots[slot].ps_pulse_active = true;
+
+    if (++g_slots[slot].packet_counter == 0) {
+        g_slots[slot].packet_counter = 1;
+    }
 
     OrbisPadData pulse;
     memset(&pulse, 0, sizeof(pulse));
@@ -515,27 +525,15 @@ void vpad_pulse_ps_button_slot(int slot) {
     pulse.rightStick.x = 128;
     pulse.rightStick.y = 128;
     pulse.connected = 1;
-    pulse.count = 1;
+    pulse.count = g_slots[slot].packet_counter;
     pulse.buttons = DS4_BUTTON_PS;
-    pulse.timestamp = daemon_sys_time_us();
+    pulse.timestamp = now;
 
-    // 1. Send PS button pressed
+    // Send initial PS button press frame without blocking the polling thread
     p_scePadVirtualDeviceInsertData(g_slots[slot].handle, &pulse);
-    g_slots[slot].last_send_time_us = pulse.timestamp;
+    g_slots[slot].last_send_time_us = now;
     g_slots[slot].last_sent_data = pulse;
     g_slots[slot].has_sent_first = true;
-
-    // 2. Hold pulse for 120 ms so SceShellCore latches it cleanly
-    daemon_sys_usleep(120000);
-
-    // 3. Send PS button released
-    pulse.buttons = 0;
-    pulse.timestamp = daemon_sys_time_us();
-    p_scePadVirtualDeviceInsertData(g_slots[slot].handle, &pulse);
-    g_slots[slot].last_send_time_us = pulse.timestamp;
-    g_slots[slot].last_sent_data = pulse;
-
-    daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button_slot(%d): PS button released, native user picker launched", slot);
 }
 
 void vpad_pulse_ps_button(void) {
@@ -750,8 +748,7 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
         daemon_log(LOG_LEVEL_INFO, "scePadSetConnection(0x%X, 1) = 0x%08X", vHandle, r);
     }
 
-    // Allow SceMbus 50ms to register the new virtual port before pulsing PS to open the native user picker
-    daemon_sys_usleep(50000);
+    // Pulse PS button asynchronously to prompt native user picker without blocking the main polling loop
     vpad_pulse_ps_button_slot(slot);
     if (g_daemon_config.mode != CONFIG_MODE_AUTO) {
         vpad_bind_user_slot(slot, g_daemon_config.mode, NULL, NULL, 0);
@@ -905,6 +902,14 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
     }
 
     OrbisPadData send_data = *data;
+    if (s->ps_pulse_active) {
+        if (now < s->ps_pulse_until_us) {
+            send_data.buttons |= DS4_BUTTON_PS;
+        } else {
+            s->ps_pulse_active = false;
+            daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button_slot(%d): PS button pulse complete, native user picker launched", slot);
+        }
+    }
     send_data.count = s->packet_counter;
     if (send_data.timestamp == 0) {
         send_data.timestamp = now;
@@ -960,6 +965,23 @@ void vpad_set_rumble_callback(vpad_rumble_cb_t cb) {
 }
 
 void vpad_poll_rumble(void) {
+    uint64_t now_pulse = daemon_sys_time_us();
+    for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
+        if (g_slots[i].active && g_slots[i].ps_pulse_active && now_pulse >= g_slots[i].ps_pulse_until_us) {
+            g_slots[i].ps_pulse_active = false;
+            daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button_slot(%d): PS button pulse complete, native user picker active", i);
+            if (p_scePadVirtualDeviceInsertData && g_slots[i].handle >= 0) {
+                OrbisPadData rel = g_slots[i].last_sent_data;
+                rel.buttons &= ~DS4_BUTTON_PS;
+                rel.count = ++g_slots[i].packet_counter;
+                rel.timestamp = now_pulse;
+                p_scePadVirtualDeviceInsertData(g_slots[i].handle, &rel);
+                g_slots[i].last_send_time_us = now_pulse;
+                g_slots[i].last_sent_data = rel;
+            }
+        }
+    }
+
     if (!p_scePadVirtualDeviceGetRemoteSetting) return;
 
     for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
