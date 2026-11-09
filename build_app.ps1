@@ -25,6 +25,9 @@ if (-not (Test-Path "$PROJECT/bin/onefamily.bin")) {
 Copy-Item "$PROJECT/bin/onefamily.bin" "$APP_DIR/assets/payload/onefamily.bin" -Force
 Write-Host "Copied onefamily.bin to app/assets/payload/onefamily.bin"
 
+Write-Host "=== Synchronizing Version Header ==="
+& "$PYTHON" "$PROJECT/scripts/generate_version.py"
+
 Write-Host "=== Generating SFO with make_sfo_app.py ==="
 & "$PYTHON" "$APP_DIR/make_sfo_app.py"
 if ($LASTEXITCODE -ne 0) {
@@ -46,7 +49,8 @@ $CXXFLAGS = @(
     "-isystem", "$TOOLCHAIN/include",
     "-isystem", "$TOOLCHAIN/include/c++/v1",
     "-I$APP_DIR/src",
-    "-I$APP_DIR/src/common"
+    "-I$APP_DIR/src/common",
+    "-I$PROJECT/include"
 )
 
 Write-Host "=== Compiling App Sources (no-exceptions, no-rtti) ==="

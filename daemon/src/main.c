@@ -10,6 +10,7 @@
 #include "log.h"
 #include "daemon_syscalls.h"
 #include "generic_hid.h"
+#include "onefamily_version.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -59,7 +60,7 @@ int main(int argc, char *argv[]) {
 
     // 1. Initialize Safe Kernel resolution and Logging
     daemon_log_init();
-    daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon v1.2.2-beta16 (Native) Starting ===");
+    daemon_log(LOG_LEVEL_INFO, "=== OneFamily Daemon " ONEFAMILY_VERSION_STRING " (Native) Starting ===");
     daemon_kernel_init();
 
     // Ensure persistent storage and controller profile directories exist (/data and /user/data for FW 5.05)
@@ -80,7 +81,7 @@ int main(int argc, char *argv[]) {
                g_daemon_config.enable_rumble);
 
     // 3. Notify user on screen immediately
-    daemon_notify("OneFamily Daemon v1.2.2-beta16 Active");
+    daemon_notify("OneFamily Daemon " ONEFAMILY_VERSION_STRING " Active");
 
     // 4. Initialize USB Driver Subsystem
     if (usb_driver_init() != 0) {

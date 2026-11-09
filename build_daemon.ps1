@@ -1,10 +1,14 @@
 $TOOLCHAIN = "C:/Users/Gianmarco/Projects/video-grab/ps4-store/tools/openorbis/OpenOrbis/PS4Toolchain"
 $PROJECT = $PSScriptRoot
+$PYTHON = "C:/Users/Gianmarco/AppData/Local/Python/bin/python.exe"
 $CREATE_FSELF = "C:/tmp/create-fself-new.exe"
 $DAEMON_DIR = "$PROJECT/daemon"
 
 if (-not (Test-Path "$DAEMON_DIR/obj")) { New-Item -ItemType Directory -Path "$DAEMON_DIR/obj" | Out-Null }
 if (-not (Test-Path "$PROJECT/bin")) { New-Item -ItemType Directory -Path "$PROJECT/bin" | Out-Null }
+
+Write-Host "=== Synchronizing Version Header ==="
+& "$PYTHON" "$PROJECT/scripts/generate_version.py"
 
 $CFLAGS = @(
     "--target=x86_64-pc-freebsd12-elf",
@@ -17,6 +21,7 @@ $CFLAGS = @(
     "-isystem", "$TOOLCHAIN/include",
     "-isystem", "$TOOLCHAIN/include/orbis/_types",
     "-I$DAEMON_DIR/include",
+    "-I$PROJECT/include",
     "-D__PS4__",
     "-D__ORBIS__"
 )

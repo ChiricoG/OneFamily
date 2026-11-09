@@ -68,10 +68,27 @@ def build_sfo(params, output_path="param.sfo"):
 
     print(f"[SFO] Successfully built: {output_path} ({os.path.getsize(output_path)} bytes)")
 
+def get_sfo_version():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    props_path = os.path.join(root, "version.properties")
+    major, minor, patch = 1, 2, 2
+    if os.path.exists(props_path):
+        with open(props_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("VERSION_MAJOR="):
+                    major = int(line.split("=")[1].strip())
+                elif line.startswith("VERSION_MINOR="):
+                    minor = int(line.split("=")[1].strip())
+                elif line.startswith("VERSION_PATCH="):
+                    patch = int(line.split("=")[1].strip())
+    return f"{major:02d}.{minor}{patch}"[:5]
+
 if __name__ == '__main__':
+    sfo_ver = get_sfo_version()
     params = {
         "APP_TYPE": 1,
-        "APP_VER": "01.22",
+        "APP_VER": sfo_ver,
         "ATTRIBUTE": 0,
         "CATEGORY": "gd",
         "CONTENT_ID": "UP9000-XBOX00001_00-XBOXCONFIGURATOR",
@@ -79,7 +96,7 @@ if __name__ == '__main__':
         "SYSTEM_VER": 0,
         "TITLE": "OneFamily Companion",
         "TITLE_ID": "XBOX00001",
-        "VERSION": "01.22"
+        "VERSION": sfo_ver
     }
 
     out = os.path.join(os.path.dirname(__file__), "sce_sys", "param.sfo")
