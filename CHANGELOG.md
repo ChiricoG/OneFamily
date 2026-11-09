@@ -2,6 +2,20 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.2] - Official Release (2026-11-09)
+
+### DualSense In-Game Speaker Audio Streaming & Volume Control (Issue #61)
+- **Native Orbis Controller Speaker Integration**: Enabled in-game controller audio output directly through the DualSense internal speaker over native PS4 Bluetooth (`SCE_AUDIO_OUT_PORT_TYPE_PADSPK`). Hear walkie-talkie dispatches and phone calls in Grand Theft Auto V, flashlight clicks and tape recordings in The Last of Us Remastered, and BB cries in Death Stranding directly from the controller speaker while the primary game audio mix remains active on the TV or monitor.
+- **Hardware Extended Report 0x31 Audio Control**: Enabled `0x20` (Speaker Volume) and `0x80` (Audio Control) in `valid_flag0` (`out[3]`), mapped volume to hardware range 0..255 in `out[8]`, and routed stream to mono internal speaker sink (`out[10] = 0x01`).
+- **Bluetooth Active Mode Pacing**: Reduced keep-alive heartbeat interval to 500 ms while active, keeping the Bluetooth baseband channel pinned in Active Mode and eliminating Sniff Mode power-saving audio latency, buffer underruns, and crackling.
+- **Companion App Volume Card & Instant Mute**: Added Card 5 in the DualSense tab for interactive speaker volume adjustment (0% to 100%) with a visual progress gauge and a Square button shortcut to immediately toggle mute.
+
+### Centralized Version Management System
+- **Single Source of Truth**: Introduced `version.properties` in the project root to centrally control version strings across all components (daemon, app, SFO, updater, and documentation).
+- **Automated Synchronization**: Integrated `scripts/generate_version.py` and `set_version.ps1` to automatically update `include/onefamily_version.h`, `param.sfo`, and `README.md` in a single command.
+
+---
+
 ## [v1.2.2-beta16] - Pre-release (2026-11-08)
 
 ### DualSense Adaptive Trigger Force Calibration (Issue #64)

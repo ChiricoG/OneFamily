@@ -9,10 +9,10 @@
 #define ONEFAMILY_VERSION_MAJOR     1
 #define ONEFAMILY_VERSION_MINOR     2
 #define ONEFAMILY_VERSION_PATCH     2
-#define ONEFAMILY_VERSION_RAW       "1.2.2-beta16"
-#define ONEFAMILY_VERSION_STRING    "v1.2.2-beta16"
+#define ONEFAMILY_VERSION_RAW       "1.2.2"
+#define ONEFAMILY_VERSION_STRING    "v1.2.2"
 #define ONEFAMILY_VERSION_SFO       "01.22"
 #define ONEFAMILY_VERSION_TITLE     "DualSense Audio & Multi-Controller Engine"
-#define ONEFAMILY_VERSION_FULL      "v1.2.2-beta16 (DualSense Audio & Multi-Controller Engine)"
+#define ONEFAMILY_VERSION_FULL      "v1.2.2 (DualSense Audio & Multi-Controller Engine)"
 
 #endif // ONEFAMILY_VERSION_H
