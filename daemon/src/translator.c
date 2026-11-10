@@ -171,7 +171,13 @@ void translator_convert(const Xbox360Report* xbox, OrbisPadData* ds4, const Tran
 
     // Menu buttons
     if (xbox_buttons & XBOX360_BTN_START) ds4_buttons |= DS4_BUTTON_OPTIONS;
-    if (xbox_buttons & XBOX360_BTN_BACK)  ds4_buttons |= DS4_BUTTON_SHARE;
+    if (xbox_buttons & XBOX360_BTN_BACK) {
+        if (g_config.back_button_action == CONFIG_BACK_TOUCHPAD) {
+            ds4_buttons |= DS4_BUTTON_TOUCHPAD;
+        } else {
+            ds4_buttons |= DS4_BUTTON_SHARE;
+        }
+    }
 
     // Guide button action
     if (xbox_buttons & XBOX360_BTN_GUIDE) {
@@ -336,7 +342,13 @@ void translator_convert_xboxone(const XboxOneReport* xbox, OrbisPadData* ds4, co
 
     // Menu buttons (in buttons_low)
     if (xbox->buttons_low & XBOXONE_MENU) ds4_buttons |= DS4_BUTTON_OPTIONS;
-    if (xbox->buttons_low & XBOXONE_VIEW) ds4_buttons |= DS4_BUTTON_SHARE;
+    if (xbox->buttons_low & XBOXONE_VIEW) {
+        if (g_config.back_button_action == CONFIG_BACK_TOUCHPAD) {
+            ds4_buttons |= DS4_BUTTON_TOUCHPAD;
+        } else {
+            ds4_buttons |= DS4_BUTTON_SHARE;
+        }
+    }
 
     // Note: Xbox/Guide button comes in separate report (0x07), not handled here
 

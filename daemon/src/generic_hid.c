@@ -8,6 +8,7 @@
  */
 
 #include "generic_hid.h"
+#include "config.h"
 #include "log.h"
 #include "daemon_syscalls.h"
 #include <stdio.h>
@@ -988,8 +989,9 @@ int generic_hid_parse_report(const uint8_t* rx, int len, OrbisPadData* out, cons
         used = 1;
     }
     if (s_ctx.back.present && s_ctx.back.rid == rid) {
-        mask |= DS4_BUTTON_SHARE;
-        if (get_bits(d, len, &s_ctx.back)) b |= DS4_BUTTON_SHARE;
+        uint32_t back_target = (g_config.back_button_action == CONFIG_BACK_TOUCHPAD) ? DS4_BUTTON_TOUCHPAD : DS4_BUTTON_SHARE;
+        mask |= back_target;
+        if (get_bits(d, len, &s_ctx.back)) b |= back_target;
         used = 1;
     }
 

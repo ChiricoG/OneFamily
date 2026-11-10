@@ -476,7 +476,11 @@ static void close_controller(void) {
 static int send_init_packet(const uint8_t* pkt, int len) {
     if (!g_dev_handle || !p_sceUsbdInterruptTransfer || g_usb_state.endpoint_out == 0) return -1;
     int transferred = 0;
-    return p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out, (uint8_t*)pkt, len, &transferred, 100);
+    int r = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out, (uint8_t*)pkt, len, &transferred, 20);
+    if (r != 0 && p_sceUsbdClearHalt) {
+        p_sceUsbdClearHalt(g_dev_handle, g_usb_state.endpoint_out);
+    }
+    return r;
 }
 
 static int send_gip_ack(const uint8_t* pkt, int len) {
@@ -486,7 +490,8 @@ static int send_gip_ack(const uint8_t* pkt, int len) {
 }
 
 static void init_gip_controller(void) {
-    daemon_log(LOG_LEVEL_INFO, "Sending GIP initialization handshake...");
+    daemon_log(LOG_LEVEL_INFO, "Sending GIP initialization handshake (VID=0x%04X, PID=0x%04X)...",
+               g_usb_state.vid, g_usb_state.pid);
     static uint8_t s_gip_init_seq = 1;
 
     // 1. Power On / Host connection request (Generic Xbox One baseline)
@@ -499,33 +504,35 @@ static void init_gip_controller(void) {
     send_init_packet(s_init, sizeof(s_init));
     daemon_sys_usleep(10000);
 
-    // 3. Hori & Titanfall 2 identify/stick-ack sequence (PowerA / Hori / Clones)
-    uint8_t powera_init[] = { 0x01, 0x20, s_gip_init_seq++, 0x09, 0x00, 0x04, 0x20, 0x3a, 0x00, 0x00, 0x00, 0x80, 0x00 };
-    send_init_packet(powera_init, sizeof(powera_init));
-    daemon_sys_usleep(10000);
+    // 3. Vendor specific handshakes:
+    // Only send PowerA / Hori sequences to PowerA (0x20D6) or Hori (0x0F0D) controllers
+    if (g_usb_state.vid == 0x20D6 || g_usb_state.vid == 0x0F0D) {
+        uint8_t powera_init[] = { 0x01, 0x20, s_gip_init_seq++, 0x09, 0x00, 0x04, 0x20, 0x3a, 0x00, 0x00, 0x00, 0x80, 0x00 };
+        send_init_packet(powera_init, sizeof(powera_init));
+        daemon_sys_usleep(10000);
 
-    // 4. PDP / Victrix / Turtle Beach handshake packet 1 (LED on / handshake)
-    uint8_t pdp_init1[] = { 0x0a, 0x20, s_gip_init_seq++, 0x03, 0x00, 0x01, 0x14 };
-    send_init_packet(pdp_init1, sizeof(pdp_init1));
-    daemon_sys_usleep(10000);
+        uint8_t powera_rumble_start[] = {
+            0x09, 0x00, s_gip_init_seq++, 0x09, 0x00, 0x0F, 0x00, 0x00, 0x1D, 0x1D, 0xFF, 0x00, 0x00
+        };
+        send_init_packet(powera_rumble_start, sizeof(powera_rumble_start));
+        daemon_sys_usleep(10000);
 
-    // 5. PDP / Victrix / Turtle Beach handshake packet 2 (Input mode unlock)
-    uint8_t pdp_init2[] = { 0x06, 0x20, s_gip_init_seq++, 0x02, 0x01, 0x00 };
-    send_init_packet(pdp_init2, sizeof(pdp_init2));
-    daemon_sys_usleep(10000);
+        uint8_t powera_rumble_stop[] = {
+            0x09, 0x00, s_gip_init_seq++, 0x09, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
+        send_init_packet(powera_rumble_stop, sizeof(powera_rumble_stop));
+        daemon_sys_usleep(10000);
+    }
+    // Only send PDP / Victrix / Turtle Beach sequences to PDP (0x0E6F) or Turtle Beach (0x10F5)
+    else if (g_usb_state.vid == 0x0E6F || g_usb_state.vid == 0x10F5) {
+        uint8_t pdp_init1[] = { 0x0a, 0x20, s_gip_init_seq++, 0x03, 0x00, 0x01, 0x14 };
+        send_init_packet(pdp_init1, sizeof(pdp_init1));
+        daemon_sys_usleep(10000);
 
-    // 6. PowerA force feedback subsystem activation ("rumble kick" + stop per Linux xpad.c)
-    uint8_t powera_rumble_start[] = {
-        0x09, 0x00, s_gip_init_seq++, 0x09, 0x00, 0x0F, 0x00, 0x00, 0x1D, 0x1D, 0xFF, 0x00, 0x00
-    };
-    send_init_packet(powera_rumble_start, sizeof(powera_rumble_start));
-    daemon_sys_usleep(10000);
-
-    uint8_t powera_rumble_stop[] = {
-        0x09, 0x00, s_gip_init_seq++, 0x09, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };
-    send_init_packet(powera_rumble_stop, sizeof(powera_rumble_stop));
-    daemon_sys_usleep(10000);
+        uint8_t pdp_init2[] = { 0x06, 0x20, s_gip_init_seq++, 0x02, 0x01, 0x00 };
+        send_init_packet(pdp_init2, sizeof(pdp_init2));
+        daemon_sys_usleep(10000);
+    }
 }
 
 static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_num, uint8_t ep_out, int is_wireless) {
@@ -998,9 +1005,11 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
             s_force_claim_cycling_ds4 = true;
             return 0; // Persistent truncation = multi-mode clone cycling personality
         } else if (desc->idProduct == SONY_DS4_V1_PID && desc->iManufacturer != 0) {
-            // String read failed completely (< 0) on 0x054C:0x05C4
-            if (s_last_unclaimed_ds4_disconnect_us != 0 && (now_us - s_last_unclaimed_ds4_disconnect_us) < 15000000ULL) {
-                daemon_log(LOG_LEVEL_INFO, "Device 0x054C:0x05C4 string read failed after disconnect cycle — claiming as third-party DS4");
+            // String read failed completely (< 0) on 0x054C:0x05C4.
+            // Only claim if this device was previously seen cycling from Switch Pro mode (multi-mode clone like Trust Muta 542).
+            // Genuine Sony DS4 v1 reconnects must NEVER be hijacked.
+            if (s_last_switch_clone_seen_us != 0 && (now_us - s_last_switch_clone_seen_us) < 25000000ULL) {
+                daemon_log(LOG_LEVEL_INFO, "Device 0x054C:0x05C4 string read failed after Switch clone cycle — claiming as third-party DS4");
                 s_force_claim_cycling_ds4 = true;
                 return 0;
             }

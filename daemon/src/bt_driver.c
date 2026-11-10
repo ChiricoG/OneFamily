@@ -1638,7 +1638,13 @@ int bt_driver_init(void) {
     if (bt_register_pair(SONY_VID, SONY_DUALSENSE_PID, "dualsense") == 0) {
         s_bt_reg_count = 1;
     }
-    if (s_bt_reg_count == 0) {
+
+    s_bt_edge_reg_count = 0;
+    if (bt_register_pair(SONY_VID, SONY_DUALSENSE_EDGE_PID, "dualsense_edge") == 0) {
+        s_bt_edge_reg_count = 1;
+    }
+
+    if (s_bt_reg_count == 0 && s_bt_edge_reg_count == 0) {
         apply_kernel_allowlist_patch(1 /* restore */, s_current_fw_bcd);
         daemon_sys_close(s_bt_queue);
         s_bt_queue = -1;
@@ -1649,7 +1655,6 @@ int bt_driver_init(void) {
     }
 
     s_bt_registered = true;
-    s_bt_edge_reg_count = 0;
 
     s_bt_running = true;
     s_bt_supported = true;

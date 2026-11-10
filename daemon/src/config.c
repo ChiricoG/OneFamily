@@ -20,6 +20,7 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
     // [General]
     cfg->mode = CONFIG_MODE_AUTO;
     cfg->guide_action = CONFIG_GUIDE_NONE; // Default: Focus on native PS Button
+    cfg->back_button_action = CONFIG_BACK_SHARE; // Default: Back/View -> Share
     cfg->enable_notifications = 1;
     cfg->enable_mode_combo = 1;
     cfg->enable_rumble = 1;
@@ -167,6 +168,12 @@ void daemon_config_load(DaemonConfig *cfg) {
                 } else {
                     // "none", "disabled", "ps", or default -> Focus on native PS Button
                     cfg->guide_action = CONFIG_GUIDE_NONE;
+                }
+            } else if (str_case_eq(key, "back_button_action") || str_case_eq(key, "view_action") || str_case_eq(key, "back_action")) {
+                if (str_case_eq(val, "touchpad") || str_case_eq(val, "touchpad_click") || str_case_eq(val, "1")) {
+                    cfg->back_button_action = CONFIG_BACK_TOUCHPAD;
+                } else {
+                    cfg->back_button_action = CONFIG_BACK_SHARE;
                 }
             } else if (str_case_eq(key, "enable_notifications")) {
                 cfg->enable_notifications = parse_int(val, 1);

@@ -146,6 +146,91 @@ static int s_assigned_slot = 1;
 static char s_assigned_username[64] = "Player 1";
 static int s_last_login_count = -1;
 
+struct ElevateArgs {
+    uint64_t target_authid;
+    uint64_t original_authid;
+    uint8_t target_caps[16];
+    uint8_t original_caps[16];
+    int restore;
+    int rc;
+};
+
+static int kernel_elevate_ucred(void* thread, struct ElevateArgs* args) {
+    if (!thread || !args) return 22;
+    uint8_t* td = (uint8_t*)thread;
+    uint8_t* proc = *(uint8_t**)(td + 8); // td->td_proc
+    if (!proc || ((uint64_t)proc >> 48) != 0xFFFF) return 2;
+
+    uint8_t* ucred = *(uint8_t**)(td + 0x140); // td->td_ucred
+    if (!ucred || ((uint64_t)ucred >> 48) != 0xFFFF) {
+        // Fallback: proc->p_ucred (offset 0x140 in Orbis OS proc)
+        ucred = *(uint8_t**)(proc + 0x140);
+        if (!ucred || ((uint64_t)ucred >> 48) != 0xFFFF) return 3;
+    }
+
+    uint64_t* authid_ptr = (uint64_t*)(ucred + 0x58);
+    uint64_t* caps_ptr   = (uint64_t*)(ucred + 0x60);
+    uint8_t*  attr_ptr   = (uint8_t*)(ucred + 0x83);
+
+    if (args->restore) {
+        if (args->original_authid != 0) {
+            *authid_ptr = args->original_authid;
+            memcpy(caps_ptr, args->original_caps, 16);
+        }
+    } else {
+        args->original_authid = *authid_ptr;
+        memcpy(args->original_caps, caps_ptr, 16);
+        if (args->target_authid != 0) {
+            *authid_ptr = args->target_authid;
+        }
+        caps_ptr[0] = 0xFFFFFFFFFFFFFFFFULL;
+        caps_ptr[1] = 0xFFFFFFFFFFFFFFFFULL;
+        *attr_ptr |= 0x80;
+    }
+    args->rc = 0;
+    return 0;
+}
+
+static int vpad_elevate_creds(int restore) {
+    static uint64_t s_orig_authid = 0;
+    static uint8_t s_orig_caps[16];
+    static bool s_is_elevated = false;
+
+    if (restore) {
+        if (!s_is_elevated) return 0;
+        struct ElevateArgs args;
+        memset(&args, 0, sizeof(args));
+        args.restore = 1;
+        args.original_authid = s_orig_authid;
+        memcpy(args.original_caps, s_orig_caps, 16);
+        long ret = daemon_syscall(11 /* SYS_KEXEC */, (long)kernel_elevate_ucred, (long)&args, 0);
+        if (ret == 0 && args.rc == 0) {
+            s_is_elevated = false;
+            daemon_log(LOG_LEVEL_INFO, "vpad: Original credentials restored (authid=0x%llX)", (unsigned long long)s_orig_authid);
+            return 0;
+        }
+        return -1;
+    }
+
+    if (s_is_elevated) return 0;
+
+    struct ElevateArgs args;
+    memset(&args, 0, sizeof(args));
+    args.target_authid = 0x3800000000010003ULL; // SceShellCore system service authority
+    args.restore = 0;
+    long ret = daemon_syscall(11 /* SYS_KEXEC */, (long)kernel_elevate_ucred, (long)&args, 0);
+    if (ret == 0 && args.rc == 0) {
+        s_orig_authid = args.original_authid;
+        memcpy(s_orig_caps, args.original_caps, 16);
+        s_is_elevated = true;
+        daemon_log(LOG_LEVEL_INFO, "vpad: Credentials elevated to system service (orig_authid=0x%llX -> 0x%llX)",
+                   (unsigned long long)s_orig_authid, (unsigned long long)args.target_authid);
+        return 0;
+    }
+    daemon_log(LOG_LEVEL_WARN, "vpad: Credential elevation returned ret=%ld rc=%d", ret, args.rc);
+    return -1;
+}
+
 static inline int abs_diff(int a, int b) {
     int d = a - b;
     return d < 0 ? -d : d;
@@ -525,9 +610,11 @@ void vpad_pulse_ps_button_slot(int slot) {
     pulse.rightStick.x = 128;
     pulse.rightStick.y = 128;
     pulse.connected = 1;
-    pulse.count = g_slots[slot].packet_counter;
+    pulse.count = 1;
     pulse.buttons = DS4_BUTTON_PS;
     pulse.timestamp = now;
+    pulse.quat.w = 1.0f;
+    pulse.acell.y = -1.0f;
 
     // Send initial PS button press frame without blocking the polling thread
     p_scePadVirtualDeviceInsertData(g_slots[slot].handle, &pulse);
@@ -549,7 +636,7 @@ void vpad_reactivate_slot(int slot) {
     if (slot < 0 || slot >= VPAD_MAX_SLOTS || !g_slots[slot].active || g_slots[slot].handle < 0) {
         return;
     }
-    if (p_scePadSetConnection) {
+    if (g_daemon_config.mode != CONFIG_MODE_AUTO && p_scePadSetConnection) {
         int r = p_scePadSetConnection(g_slots[slot].handle, 1);
         daemon_log(LOG_LEVEL_INFO, "vpad_reactivate_slot(%d): scePadSetConnection(0x%X, 1) = 0x%08X",
                    slot, g_slots[slot].handle, r);
@@ -590,7 +677,7 @@ void vpad_check_user_rebind(ConfigMode mode) {
             s_last_login_count = num_logged_in;
             for (int i = 0; i < VPAD_MAX_SLOTS; i++) {
                 if (g_slots[i].active && g_slots[i].handle >= 0) {
-                    if (p_scePadSetConnection) {
+                    if (g_daemon_config.mode != CONFIG_MODE_AUTO && p_scePadSetConnection) {
                         p_scePadSetConnection(g_slots[i].handle, 1);
                     }
                     if (mode == CONFIG_MODE_AUTO) {
@@ -608,6 +695,10 @@ void vpad_check_user_rebind(ConfigMode mode) {
 }
 
 static int vpad_ensure_subsystem(void) {
+    // Elevate credentials to SceShellCore system service (authid 0x3800000000010003ULL)
+    // so SceShellCore login manager trusts virtual devices and routes user picker input
+    vpad_elevate_creds(0);
+
     // 1. Mandatory: libSceMbus must be loaded prior to libScePad
     if (g_hMbus == 0) {
         if (load_prx("libSceMbus.sprx", &g_hMbus) < 0) {
@@ -743,7 +834,7 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
     daemon_log(LOG_LEVEL_INFO, "Virtual DS4 Slot %d (%s, dev_key=0x%llX) registered with handle=0x%X",
                slot, source == VPAD_SOURCE_BT ? "Bluetooth" : "USB", (unsigned long long)device_key, vHandle);
 
-    if (p_scePadSetConnection) {
+    if (g_daemon_config.mode != CONFIG_MODE_AUTO && p_scePadSetConnection) {
         int r = p_scePadSetConnection(vHandle, 1);
         daemon_log(LOG_LEVEL_INFO, "scePadSetConnection(0x%X, 1) = 0x%08X", vHandle, r);
     }
@@ -837,6 +928,7 @@ void vpad_shutdown(void) {
     }
     g_vpad_active = false;
     g_vpad_handle = -1;
+    vpad_elevate_creds(1);
 }
 
 bool vpad_is_active(void) {
@@ -910,9 +1002,19 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
             daemon_log(LOG_LEVEL_INFO, "vpad_pulse_ps_button_slot(%d): PS button pulse complete, native user picker launched", slot);
         }
     }
-    send_data.count = s->packet_counter;
+    // ScePadData offset 104 is connectedCount (must be 1 for valid connected state)
+    send_data.count = 1;
     if (send_data.timestamp == 0) {
         send_data.timestamp = now;
+    }
+
+    // Identity orientation quaternion and downward resting gravity
+    if (send_data.quat.x == 0.0f && send_data.quat.y == 0.0f &&
+        send_data.quat.z == 0.0f && send_data.quat.w == 0.0f) {
+        send_data.quat.w = 1.0f;
+    }
+    if (send_data.acell.x == 0.0f && send_data.acell.y == 0.0f && send_data.acell.z == 0.0f) {
+        send_data.acell.y = -1.0f;
     }
 
     // Capacitive Touchpad Emulation for Touchpad Click:
@@ -973,8 +1075,15 @@ void vpad_poll_rumble(void) {
             if (p_scePadVirtualDeviceInsertData && g_slots[i].handle >= 0) {
                 OrbisPadData rel = g_slots[i].last_sent_data;
                 rel.buttons &= ~DS4_BUTTON_PS;
-                rel.count = ++g_slots[i].packet_counter;
+                rel.count = 1;
                 rel.timestamp = now_pulse;
+                if (rel.quat.x == 0.0f && rel.quat.y == 0.0f &&
+                    rel.quat.z == 0.0f && rel.quat.w == 0.0f) {
+                    rel.quat.w = 1.0f;
+                }
+                if (rel.acell.x == 0.0f && rel.acell.y == 0.0f && rel.acell.z == 0.0f) {
+                    rel.acell.y = -1.0f;
+                }
                 p_scePadVirtualDeviceInsertData(g_slots[i].handle, &rel);
                 g_slots[i].last_send_time_us = now_pulse;
                 g_slots[i].last_sent_data = rel;

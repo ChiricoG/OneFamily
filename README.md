@@ -116,6 +116,8 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
   - Swap Bumpers and Triggers (L1/R1 <-> L2/R2).
   - Nintendo Switch Button Layout: Positional (A=Circle, B=Cross) or By Letter.
   - Xbox Guide Button Mapping: Native PS Button or Touchpad Click.
+  - Back/View Button Mapping: Share or Touchpad Click (ideal for PC gamepads like EasySMX X05, 8BitDo, and Xbox controllers lacking a dedicated physical touchpad button).
+  - Universal Per-Controller Remapping: Override any button mapping dynamically via `/data/onefamily/controllers/<VID>_<PID>.ini`.
 
 ---
 
@@ -163,6 +165,7 @@ Unlike traditional game-specific hooks that only intercept inputs inside running
 > - If you are using **VueAfterFree on FW 12.50**, simply update your GoldHEN payload to **2.4b18.10 or newer (e.g. 2.4b18.12)** and OneFamily will auto-boot and operate flawlessly!
 >
 > *(Ensure **Settings > GoldHEN > PayLoader > Enable AutoRun** is checked on your console).*
+> - **AutoRun Boot Order (Issue #67):** If running multiple background daemons or plugins under PayLoader AutoRun, ensure OneFamily is sequenced cleanly. Running OneFamily alongside standard plugins executes smoothly without blocking other payloads.
 
 ---
 

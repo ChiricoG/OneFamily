@@ -35,11 +35,18 @@ typedef enum {
     CONFIG_GUIDE_NONE           // Do nothing
 } ConfigGuideAction;
 
+// Back / View button action (Issue #68)
+typedef enum {
+    CONFIG_BACK_SHARE = 0,      // DS4_BUTTON_SHARE (default)
+    CONFIG_BACK_TOUCHPAD        // DS4_BUTTON_TOUCHPAD (Touchpad click)
+} ConfigBackAction;
+
 // Complete plugin configuration
 typedef struct {
     // [General]
     ConfigMode          mode;
     ConfigGuideAction   guide_action;
+    ConfigBackAction    back_button_action;
     int                 enable_notifications;   // 1 = enabled (default), 0 = disabled
     int                 enable_mode_combo;      // 1 = enabled (default), 0 = disabled
     int                 enable_rumble;          // 1 = enabled (default), 0 = disabled
