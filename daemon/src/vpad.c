@@ -636,7 +636,7 @@ void vpad_reactivate_slot(int slot) {
     if (slot < 0 || slot >= VPAD_MAX_SLOTS || !g_slots[slot].active || g_slots[slot].handle < 0) {
         return;
     }
-    if (g_daemon_config.mode != CONFIG_MODE_AUTO && p_scePadSetConnection) {
+    if (p_scePadSetConnection) {
         int r = p_scePadSetConnection(g_slots[slot].handle, 1);
         daemon_log(LOG_LEVEL_INFO, "vpad_reactivate_slot(%d): scePadSetConnection(0x%X, 1) = 0x%08X",
                    slot, g_slots[slot].handle, r);
@@ -750,6 +750,14 @@ static int vpad_ensure_subsystem(void) {
         if (p_scePadInit) {
             int r = p_scePadInit();
             daemon_log(LOG_LEVEL_INFO, "scePadInit() = 0x%08X", r);
+            if (r != 0) {
+                // If scePadInit failed with elevated credentials, retry with original credentials
+                daemon_log(LOG_LEVEL_WARN, "scePadInit failed (0x%08X), retrying with original credentials...", r);
+                vpad_elevate_creds(1);
+                r = p_scePadInit();
+                daemon_log(LOG_LEVEL_INFO, "scePadInit() with orig creds = 0x%08X", r);
+                vpad_elevate_creds(0);
+            }
         }
         if (p_scePadMbusInit) {
             int r = p_scePadMbusInit();

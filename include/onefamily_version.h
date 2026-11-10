@@ -8,11 +8,11 @@
 
 #define ONEFAMILY_VERSION_MAJOR     1
 #define ONEFAMILY_VERSION_MINOR     2
-#define ONEFAMILY_VERSION_PATCH     2
-#define ONEFAMILY_VERSION_RAW       "1.2.2"
-#define ONEFAMILY_VERSION_STRING    "v1.2.2"
-#define ONEFAMILY_VERSION_SFO       "01.22"
-#define ONEFAMILY_VERSION_TITLE     "DualSense Audio & Multi-Controller Engine"
-#define ONEFAMILY_VERSION_FULL      "v1.2.2 (DualSense Audio & Multi-Controller Engine)"
+#define ONEFAMILY_VERSION_PATCH     3
+#define ONEFAMILY_VERSION_RAW       "1.2.3"
+#define ONEFAMILY_VERSION_STRING    "v1.2.3"
+#define ONEFAMILY_VERSION_SFO       "01.23"
+#define ONEFAMILY_VERSION_TITLE     "Hotfix - Profile Navigation & Controller Fixes"
+#define ONEFAMILY_VERSION_FULL      "v1.2.3 (Hotfix - Profile Navigation & Controller Fixes)"
 
 #endif // ONEFAMILY_VERSION_H
