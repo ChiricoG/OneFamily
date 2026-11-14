@@ -2,6 +2,34 @@
 
 All notable changes to the OneFamily project are documented in this file.
 
+## [v1.2.4-beta1] - Pre-release (2026-11-14)
+
+### DualSense Bluetooth Kernel Safety & Multi-Controller Fixes (Issues #74, #76, #81, #85, #86, #93, #95)
+- **Firmware-Gated Kernel Link Capacity Patch**: Restricted `apply_controller_capacity()` strictly to verified firmware versions (`12.50`, `13.02`, `13.04`, `13.50`, `13.52`) and removed the blind secondary Ring-0 pointer scan (`0x2612000..0x2613000`), resolving kernel page fault crashes when connecting a DualSense via Bluetooth on FW `9.00` and `12.00` (#85, #86, #95).
+- **Fixed Ring-0 Credential Elevation (`kernel_elevate_ucred`)**: Corrected FreeBSD `syscall(11)` argument wrapper unpacking (`uap->req`) and added `proc + 0x40` `p_ucred` resolution in `vpad.c`, resolving `ret=-3` credential elevation failures across all firmwares (#79, #81, #93).
+- **Restored `scePadSetConnection(1)` in Auto Mode**: Restored virtual port connection state registration upon opening a slot in `CONFIG_MODE_AUTO`, allowing `SceShellCore` to accept D-Pad/Cross navigation and PS button prompts on the "Who is using this controller?" user selection screen (#74, #76, #81, #93).
+- **DualSense Bluetooth Reconnection & Multi-Pad Polling**: Updated `controller_capacity()` to patch all matching `bthid` link table entries for a reconnecting MAC address (#81), and moved the per-device `ioctl(0x80206233UL)` fallback poll outside the `ready <= 0` block so a second, third, or fourth Bluetooth DualSense is never starved while Controller 1 is active (#74).
+
+### USB Controller Compatibility, 1000 Hz Polling & Rumble Fixes (Issues #22, #23, #24, #52, #70, #77, #84, #87, #90, #94)
+- **Genuine Sony DualShock 4 Charging Protection & Clone Detection**: Updated `usbd_is_sony_device()` to inspect USB Audio (`bInterfaceClass == 0x01`) interfaces present on all authentic Sony DualShock 4 v1/v2 controllers, ensuring genuine DS4 pads plugged into USB for charging are never hijacked (#87) while third-party DS4 clones lacking USB Audio (GXtrust Muta 542, GameSir Cyclone 2, generic `0x054C:0x05C4` pads) are deterministically claimed on first plug (#22, #77, #84).
+- **1000 Hz High-Polling 2.4GHz Wireless Dongles**: Removed the `xfer_dur_us < 2000ULL` gate for `bInterval < 4` endpoints in `usb_driver.c` and dynamically paced the main daemon loop at `1000 Hz` (`1000 us`) when a high-polling USB receiver (such as GuliKit KK3 Max) is active, eliminating input queue buildup and dongle sleep disconnects (#24).
+- **Genuine DualShock 3 USB Activation**: Aligned `CONTROLLER_DS3` initialization with Linux `hid-sony.c` (`GET_REPORT 0xF2`, single 4-byte `SET_REPORT 0xF4`, no `0xF5` on genuine DS3, and `10 ms` settle delay before LED report), preventing genuine PS3 controllers from disconnecting after the first report (#52).
+- **PowerA MOGA XP-Ultra & Xbox One GIP Announce**: Restored the `is_powera_moga` (`0x20D6:0x4005`) handshake guard and added automatic GIP Power-On (`0x05`) + vendor initialization whenever a GIP Announce (`0x02`) packet arrives during polling (#23, #70).
+- **Persistent Xbox One USB Rumble**: Reset `s_xone_ep_out_stalls` after GIP initialization and excluded transient USB timeouts (`0x80240007`) from the permanent endpoint stall counter so Xbox One vibration never stops during gameplay (#94).
+- **Nintendo Switch Stick Scaling & Hori Taiko Drum Support**: Increased Switch clone stick axis normalization factor to `165/100` for full `0..255` deflection (#22) and added Hori Switch Taiko Drum (`0x0F0D:0x00F0`) and Hori wired Switch PIDs to `is_switch_input_only_controller()` (#90).
+
+### Touchpad Left/Right Click, 4-Way Swipe Emulation, Rest Mode & Companion App (Issues #73, #78, #82, #83, #88, #89, #92, #96)
+- **Touchpad Left/Right/Center Click & Directional Swipe Shortcuts**: Added universal combinations on both USB and Bluetooth controllers:
+  - `Share + L1` or `Share + D-Pad Left`: Left Touchpad Click (`x = 400, y = 470`).
+  - `Share + R1` or `Share + D-Pad Right`: Right Touchpad Click (`x = 1520, y = 470`).
+  - `Share + Options / D-Pad Up / Cross / L3`: Center Touchpad Click (`x = 960, y = 470`).
+  - `Share + Right Stick` (Up/Down/Left/Right): Smooth 4-way capacitive touchpad swipe without mechanical click (#82, #83, #88, #89).
+- **PS4 Rest Mode & Bluetooth Resume**: Immediately release the USB handle and close the virtual pad slot on `SCE_USBD_ERROR_NO_DEVICE` (`0x80240004`) without querying the USB device list during suspend, and automatically reinitialize `/dev/bt` upon waking from Rest Mode (#92).
+- **Debounced DualSense Low-Battery Alert & System Notifications Toggle**: Added a 20-sample discharging debounce (`<= 15%`) for DualSense low-battery warnings (#78) and added a `System Notifications` (`Enabled` / `Disabled`) setting card in the Companion App (#73).
+- **Companion App Input Tester L2/R2 Fix**: Removed `L2` and `R2` from player slot switching in the Input Tester tab so analog trigger percentages (`0%..100%`) can be tested without switching slots (#96).
+
+---
+
 ## [v1.2.2] - Official Release (2026-11-09)
 
 ### DualSense In-Game Speaker Audio Streaming & Volume Control (Issue #61)
