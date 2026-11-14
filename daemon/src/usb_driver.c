@@ -489,10 +489,26 @@ static int send_gip_ack(const uint8_t* pkt, int len) {
     return p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_out, (uint8_t*)pkt, len, &transferred, 5);
 }
 
+static uint8_t s_gip_init_seq = 1;
+
+static void send_gip_announce_response(void) {
+    uint8_t start_cmd[] = { 0x05, 0x20, s_gip_init_seq++, 0x01, 0x00 };
+    send_init_packet(start_cmd, sizeof(start_cmd));
+    if (g_usb_state.vid == 0x0E6F || g_usb_state.vid == 0x10F5) {
+        uint8_t pdp_init1[] = { 0x0a, 0x20, s_gip_init_seq++, 0x03, 0x00, 0x01, 0x14 };
+        send_init_packet(pdp_init1, sizeof(pdp_init1));
+        uint8_t pdp_init2[] = { 0x06, 0x20, s_gip_init_seq++, 0x02, 0x01, 0x00 };
+        send_init_packet(pdp_init2, sizeof(pdp_init2));
+    }
+}
+
 static void init_gip_controller(void) {
     daemon_log(LOG_LEVEL_INFO, "Sending GIP initialization handshake (VID=0x%04X, PID=0x%04X)...",
                g_usb_state.vid, g_usb_state.pid);
-    static uint8_t s_gip_init_seq = 1;
+
+    // PowerA MOGA XP-Ultra (0x20D6:0x4005 - Issue #23 & AGENTS.md Section 4.3):
+    // Only send standard GIP power-on without proprietary PowerA init/rumble packets that stall EP_IN.
+    bool is_powera_moga = (g_usb_state.vid == 0x20D6 && g_usb_state.pid == 0x4005);
 
     // 1. Power On / Host connection request (Generic Xbox One baseline)
     uint8_t start_cmd[] = { 0x05, 0x20, s_gip_init_seq++, 0x01, 0x00 };
@@ -500,13 +516,15 @@ static void init_gip_controller(void) {
     daemon_sys_usleep(10000);
 
     // 2. Mode switch / host wake-up packet for Xbox One S / Elite Series 2
-    uint8_t s_init[] = { 0x05, 0x20, s_gip_init_seq++, 0x0F, 0x06 };
-    send_init_packet(s_init, sizeof(s_init));
-    daemon_sys_usleep(10000);
+    if (!is_powera_moga) {
+        uint8_t s_init[] = { 0x05, 0x20, s_gip_init_seq++, 0x0F, 0x06 };
+        send_init_packet(s_init, sizeof(s_init));
+        daemon_sys_usleep(10000);
+    }
 
     // 3. Vendor specific handshakes:
-    // Only send PowerA / Hori sequences to PowerA (0x20D6) or Hori (0x0F0D) controllers
-    if (g_usb_state.vid == 0x20D6 || g_usb_state.vid == 0x0F0D) {
+    // Only send PowerA / Hori sequences to PowerA (0x20D6, excluding MOGA XP-Ultra) or Hori (0x0F0D) controllers
+    if ((g_usb_state.vid == 0x20D6 && !is_powera_moga) || g_usb_state.vid == 0x0F0D) {
         uint8_t powera_init[] = { 0x01, 0x20, s_gip_init_seq++, 0x09, 0x00, 0x04, 0x20, 0x3a, 0x00, 0x00, 0x00, 0x80, 0x00 };
         send_init_packet(powera_init, sizeof(powera_init));
         daemon_sys_usleep(10000);
@@ -533,6 +551,8 @@ static void init_gip_controller(void) {
         send_init_packet(pdp_init2, sizeof(pdp_init2));
         daemon_sys_usleep(10000);
     }
+
+    s_xone_ep_out_stalls = 0;
 }
 
 static void init_xbox360_controller(libusb_device_handle* h, uint8_t interface_num, uint8_t ep_out, int is_wireless) {
@@ -917,20 +937,52 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
 
     uint64_t now_us = daemon_sys_time_us();
 
-    // 1. If a multi-mode clone (e.g. GXtrust Muta 542) recently enumerated as a Switch Pro clone
-    // or cycled its 0x054C:0x05C4 USB connection >= 2 times due to watchdog timeout, claim it immediately!
+    // 1. If a multi-mode clone (e.g. GXtrust Muta 542) recently enumerated as a Switch Pro clone,
+    // claim its 0x054C:0x05C4 personality immediately (AGENTS.md Section 4.2).
     if (desc->idProduct == SONY_DS4_V1_PID) {
         if (s_force_claim_cycling_ds4 ||
-            (s_last_switch_clone_seen_us != 0 && (now_us - s_last_switch_clone_seen_us) < 25000000ULL) ||
-            (s_unclaimed_ds4_cycle_count >= 2 && s_last_unclaimed_ds4_disconnect_us != 0 && (now_us - s_last_unclaimed_ds4_disconnect_us) < 15000000ULL)) {
+            (s_last_switch_clone_seen_us != 0 && (now_us - s_last_switch_clone_seen_us) < 25000000ULL)) {
             s_force_claim_cycling_ds4 = true;
-            daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X detected as cycling/multi-mode DS4 clone — claiming as CONTROLLER_DS4",
+            daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X detected as multi-mode Switch/DS4 clone — claiming as CONTROLLER_DS4",
                        desc->idVendor, desc->idProduct);
             return 0;
         }
     }
 
-    // 2. Return cached result if the USB bus topology has not changed since the last check
+    // 2. Structural USB Configuration Descriptor check for DS4 v1 (0x05C4) and DS4 v2 (0x09CC) (Issues #22, #77, #84, #87):
+    // Every genuine Sony DualShock 4 (CUH-ZCT1 0x05C4 and CUH-ZCT2 0x09CC) exposes USB Audio interfaces
+    // (bInterfaceClass == 0x01 for headset/speaker) alongside the HID interface (bNumInterfaces >= 3).
+    // Third-party clones spoofing 0x054C:0x05C4 or 0x054C:0x09CC (e.g. GXtrust Muta 542, GameSir Cyclone 2, PS4 clones)
+    // expose only the HID interface without USB Audio (bInterfaceClass == 0x01).
+    if (desc->idProduct == SONY_DS4_V1_PID || desc->idProduct == SONY_DS4_V2_PID) {
+        struct libusb_config_descriptor* cfg = NULL;
+        if (usbd_get_active_config_descriptor(dev, &cfg) == 0 && cfg != NULL) {
+            bool has_usb_audio = false;
+            for (uint8_t i = 0; i < cfg->bNumInterfaces; i++) {
+                const struct libusb_interface* iface = &cfg->interface[i];
+                for (int j = 0; j < iface->num_altsetting; j++) {
+                    if (iface->altsetting[j].bInterfaceClass == 0x01 /* LIBUSB_CLASS_AUDIO */) {
+                        has_usb_audio = true;
+                        break;
+                    }
+                }
+                if (has_usb_audio) break;
+            }
+            uint8_t num_ifaces = cfg->bNumInterfaces;
+            usbd_free_config_descriptor(cfg);
+
+            if (!has_usb_audio) {
+                daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X has %u interface(s) and no USB Audio class — claiming third-party DS4 clone",
+                           desc->idVendor, desc->idProduct, (unsigned)num_ifaces);
+                s_cached_sony_vid = desc->idVendor;
+                s_cached_sony_pid = desc->idProduct;
+                s_cached_sony_result = 0;
+                return 0;
+            }
+        }
+    }
+
+    // 3. Return cached result if the USB bus topology has not changed since the last check
     // and at most 1 device on the bus shares this VID:PID
     int same_vid_pid_count = 0;
     for (int i = 0; i < s_last_bus_device_count && i < USB_MAX_SNAPSHOT_DEVICES; i++) {
@@ -971,51 +1023,17 @@ int usbd_is_sony_device(libusb_device* dev, const struct libusb_device_descripto
             s_cached_sony_pid = desc->idProduct;
             s_cached_sony_result = 0;
             return 0; // Read successfully, does not contain "Sony" (e.g. GameSir, Brook, etc.)
-        } else if (r > 0) {
-            // Truncated read: retry once with a 5ms settle to resolve transient USB errors.
-            daemon_sys_usleep(5000);
-            char mfg2[128] = {0};
-            libusb_device_handle* h2 = NULL;
-            int r2 = -1;
-            if (p_sceUsbdOpen && p_sceUsbdOpen(dev, &h2) == 0 && h2) {
-                r2 = usb_get_string_ascii(h2, desc->iManufacturer, mfg2, sizeof(mfg2));
-                p_sceUsbdClose(h2);
-            }
-            if (r2 >= 4) {
-                daemon_log(LOG_LEVEL_INFO, "Device 0x%04X:0x%04X iManufacturer (retry)='%s'", desc->idVendor, desc->idProduct, mfg2);
-                if (desc->idProduct == SONY_DS4_V1_PID && str_contains_nocase(mfg2, "Interactive")) {
-                    s_cached_sony_vid = desc->idVendor;
-                    s_cached_sony_pid = desc->idProduct;
-                    s_cached_sony_result = 0;
-                    return 0;
-                }
-                if (str_contains_nocase(mfg2, "SONY")) {
-                    s_cached_sony_vid = desc->idVendor;
-                    s_cached_sony_pid = desc->idProduct;
-                    s_cached_sony_result = 1;
-                    return 1; // Genuine Sony on retry
-                }
-                s_cached_sony_vid = desc->idVendor;
-                s_cached_sony_pid = desc->idProduct;
-                s_cached_sony_result = 0;
-                return 0; // Retry succeeded; not Sony (third-party clone)
-            }
-            daemon_log(LOG_LEVEL_WARN, "Device 0x%04X:0x%04X iManufacturer still truncated after retry (r=%d r2=%d) - treating as third-party",
-                       desc->idVendor, desc->idProduct, r, r2);
+        }
+        // Issue #87: If string descriptor read was truncated or collided with Orbis OS EP0 traffic while
+        // plugging a genuine DualShock 4 into USB for charging, NEVER hijack it unless it just cycled from Switch mode.
+        if (desc->idProduct == SONY_DS4_V1_PID &&
+            s_last_switch_clone_seen_us != 0 && (now_us - s_last_switch_clone_seen_us) < 25000000ULL) {
+            daemon_log(LOG_LEVEL_INFO, "Device 0x054C:0x05C4 string read failed after Switch clone cycle — claiming as third-party DS4");
             s_force_claim_cycling_ds4 = true;
-            return 0; // Persistent truncation = multi-mode clone cycling personality
-        } else if (desc->idProduct == SONY_DS4_V1_PID && desc->iManufacturer != 0) {
-            // String read failed completely (< 0) on 0x054C:0x05C4.
-            // Only claim if this device was previously seen cycling from Switch Pro mode (multi-mode clone like Trust Muta 542).
-            // Genuine Sony DS4 v1 reconnects must NEVER be hijacked.
-            if (s_last_switch_clone_seen_us != 0 && (now_us - s_last_switch_clone_seen_us) < 25000000ULL) {
-                daemon_log(LOG_LEVEL_INFO, "Device 0x054C:0x05C4 string read failed after Switch clone cycle — claiming as third-party DS4");
-                s_force_claim_cycling_ds4 = true;
-                return 0;
-            }
+            return 0;
         }
     }
-    // If opening or descriptor read failed, default to treating Sony VID as genuine Sony to be safe
+    // Default to treating Sony VID with USB Audio interfaces as genuine Sony so charging DS4s are never hijacked
     return 1;
 }
 
@@ -1339,24 +1357,30 @@ static int scan_and_open(void) {
                             daemon_sys_usleep(5000);
                         }
                         if (p_sceUsbdControlTransfer) {
-                            // 1. Linux hid-sony / Sixaxis operational mode activation: GET_REPORT Feature 0xF2
+                            // 1. Linux hid-sony / Sixaxis operational mode activation: GET_REPORT Feature 0xF2 (Issue #52)
                             uint8_t op_buf[17];
                             memset(op_buf, 0, sizeof(op_buf));
                             int r_f2 = p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F2, det.interface_num, op_buf, sizeof(op_buf), 100);
                             daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational mode query 0xF2 sent (ret=%d)", r_f2);
 
-                            // 2. SET_REPORT Feature 0xF4 magic packet (wake-up command: both 0x0C and 0x03 variants)
+                            // 2. SET_REPORT Feature 0xF4 magic packet (standard 4-byte hid-sony payload)
                             uint8_t magic_c[4] = { 0x42, 0x0C, 0x00, 0x00 };
-                            p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic_c, sizeof(magic_c), 500);
-                            uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
-                            int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 1000);
+                            int cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic_c, sizeof(magic_c), 500);
+                            if (cret < 0) {
+                                uint8_t magic[5] = { 0xF4, 0x42, 0x03, 0x00, 0x00 };
+                                cret = p_sceUsbdControlTransfer(h, DS3_MAGIC_REQ_TYPE, DS3_MAGIC_REQUEST, DS3_MAGIC_VALUE, det.interface_num, magic, sizeof(magic), 500);
+                            }
                             daemon_log(LOG_LEVEL_INFO, "DualShock 3 operational handshake sent (ret=%d)", cret);
 
-                            // 3. Shanwan / Gasia DS3 clone wake-up: query Feature Report 0xF5 via GET_REPORT
-                            uint8_t dummy[64];
-                            p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F5, det.interface_num, dummy, 8, 100);
+                            // 3. Only query Feature Report 0xF5 on third-party clones that rejected 0xF2;
+                            // genuine Sony DS3 controllers treat 0xF5 as Bluetooth master MAC pairing and reset USB if queried after 0xF4.
+                            if (r_f2 < 0) {
+                                uint8_t dummy[64];
+                                p_sceUsbdControlTransfer(h, 0xA1, 0x01, 0x03F5, det.interface_num, dummy, 8, 100);
+                            }
                         }
-                        // 4. Send initial 49-byte LED 1 output report to unlock input streaming on clones
+                        daemon_sys_usleep(10000);
+                        // 4. Send initial 49-byte LED 1 output report
                         uint8_t ds3_led[49];
                         memcpy(ds3_led, s_ds3_output_template, sizeof(ds3_led));
                         int transferred_led = 0;
@@ -1539,14 +1563,15 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
             0x00, // Delay
             0x00  // Repeat count (0 = continuous until next packet)
         };
-        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, rumble_timeout_ms);
+        int ret = p_sceUsbdInterruptTransfer(g_dev_handle, ep, pkt, sizeof(pkt), &transferred, 20);
         if (ret != 0) {
+            // Issue #94: Ignore transient USB timeouts (0x80240007) so Xbox One vibration is never permanently disabled
             if (ret == 0x802400FF || ret == 0x80240009) {
                 s_xone_ep_out_stalls += 2;
                 if (p_sceUsbdClearHalt) {
                     p_sceUsbdClearHalt(g_dev_handle, ep);
                 }
-            } else {
+            } else if (ret != 0x80240007 && ret != -7) {
                 s_xone_ep_out_stalls++;
             }
         } else {
@@ -1695,23 +1720,85 @@ static void apply_universal_shortcuts(OrbisPadData* ds4) {
 
     if (share_down) {
         bool combo_matched = false;
+        int rx_delta = (int)ds4->rightStick.x - 128;
+        int ry_delta = (int)ds4->rightStick.y - 128;
 
-        // 1. Share + Options (Back + Start / Minus + Plus / Select + Start) -> Touchpad Click
+        // 1. Share + Options (Back + Start / Minus + Plus / Select + Start) -> Center Touchpad Click
         if (ds4->buttons & DS4_BUTTON_OPTIONS) {
             ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
             ds4->buttons |= DS4_BUTTON_TOUCHPAD;
+            if (ds4->touch.fingers == 0) {
+                ds4->touch.fingers = 1;
+                ds4->touch.touch[0].finger = 1;
+                ds4->touch.touch[0].x = 960;
+                ds4->touch.touch[0].y = 470;
+            }
             combo_matched = true;
         }
-        // 2. Share + D-Pad Up (Back + D-Pad Up) -> Touchpad Click
+        // 2. Share + D-Pad Up (Back + D-Pad Up) -> Center Touchpad Click
         else if (ds4->buttons & DS4_BUTTON_DPAD_UP) {
             ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
             ds4->buttons |= DS4_BUTTON_TOUCHPAD;
+            if (ds4->touch.fingers == 0) {
+                ds4->touch.fingers = 1;
+                ds4->touch.touch[0].finger = 1;
+                ds4->touch.touch[0].x = 960;
+                ds4->touch.touch[0].y = 470;
+            }
             combo_matched = true;
         }
-        // 3. Share + D-Pad Down (Back + D-Pad Down) -> PS Button (Home)
+        // 3. Share + L1 or Share + D-Pad Left -> Left Touchpad Click (Issue #89)
+        else if (ds4->buttons & (DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT)) {
+            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT);
+            ds4->buttons |= DS4_BUTTON_TOUCHPAD;
+            ds4->touch.fingers = 1;
+            ds4->touch.touch[0].finger = 1;
+            ds4->touch.touch[0].x = 400;
+            ds4->touch.touch[0].y = 470;
+            combo_matched = true;
+        }
+        // 4. Share + R1 or Share + D-Pad Right -> Right Touchpad Click (Issue #89)
+        else if (ds4->buttons & (DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT)) {
+            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT);
+            ds4->buttons |= DS4_BUTTON_TOUCHPAD;
+            ds4->touch.fingers = 1;
+            ds4->touch.touch[0].finger = 1;
+            ds4->touch.touch[0].x = 1520;
+            ds4->touch.touch[0].y = 470;
+            combo_matched = true;
+        }
+        // 5. Share + D-Pad Down (Back + D-Pad Down) -> PS Button (Home)
         else if (ds4->buttons & DS4_BUTTON_DPAD_DOWN) {
             ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
             ds4->buttons |= DS4_BUTTON_PS;
+            combo_matched = true;
+        }
+        // 6. Share + Right Stick -> Directional Capacitive Touchpad Swipe (Issues #82, #83, #88)
+        else if (rx_delta > 45 || rx_delta < -45 || ry_delta > 45 || ry_delta < -45) {
+            ds4->buttons &= ~DS4_BUTTON_SHARE;
+            ds4->rightStick.x = 128;
+            ds4->rightStick.y = 128;
+            uint64_t now_swipe = daemon_sys_time_us();
+            uint32_t phase = (uint32_t)((now_swipe / 1000ULL) % 180ULL);
+            int abs_rx = rx_delta < 0 ? -rx_delta : rx_delta;
+            int abs_ry = ry_delta < 0 ? -ry_delta : ry_delta;
+            ds4->touch.fingers = 1;
+            ds4->touch.touch[0].finger = 1;
+            if (abs_rx >= abs_ry) {
+                ds4->touch.touch[0].y = 470;
+                if (rx_delta > 0) {
+                    ds4->touch.touch[0].x = (uint16_t)(360 + (phase * 1200) / 180);
+                } else {
+                    ds4->touch.touch[0].x = (uint16_t)(1560 - (phase * 1200) / 180);
+                }
+            } else {
+                ds4->touch.touch[0].x = 960;
+                if (ry_delta > 0) {
+                    ds4->touch.touch[0].y = (uint16_t)(170 + (phase * 600) / 180);
+                } else {
+                    ds4->touch.touch[0].y = (uint16_t)(770 - (phase * 600) / 180);
+                }
+            }
             combo_matched = true;
         }
 
@@ -1804,15 +1891,19 @@ void usb_driver_poll_step(void) {
     // Drain pending packets to the newest real-time head while preserving transient button/D-pad transitions.
     bool is_high_polling = (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4);
     bool should_drain = (is_high_polling || g_usb_state.type == CONTROLLER_XBOXONE);
-    if (ret == 0 && should_drain && xfer_dur_us < 2000ULL &&
+    // Issue #24: On PS4 Orbis OS, libSceUsbd interrupt transfer round-trip takes ~2-3.5ms even when packets
+    // are queued in the xHCI buffer. For true high-polling devices (bInterval < 4, e.g. GuliKit KK3 Max 1000Hz),
+    // always drain pending packets without gating on xfer_dur_us < 2000ULL so the dongle's TX FIFO never overflows or sleeps.
+    if (ret == 0 && should_drain && (is_high_polling || xfer_dur_us < 2000ULL) &&
         ((g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) ||
          (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4))) {
         uint8_t next_rx[128];
         int next_transferred = 0;
         int drain_count = 0;
+        int max_drain = is_high_polling ? 12 : 8;
         uint8_t xone_burst_btn_low = (g_usb_state.type == CONTROLLER_XBOXONE && rx[0] == XBOXONE_REPORT_INPUT && transferred >= 5) ? rx[4] : 0;
         uint8_t xone_burst_btn_high = (g_usb_state.type == CONTROLLER_XBOXONE && rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6) ? rx[5] : 0;
-        while (drain_count < 8) {
+        while (drain_count < max_drain) {
             int drain_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, next_rx, read_len, &next_transferred, 1);
             if (drain_ret == 0 && next_transferred > 0) {
                 if (g_usb_state.type == CONTROLLER_XBOX360) {
@@ -1867,6 +1958,9 @@ void usb_driver_poll_step(void) {
                                 0x01, 0x20, next_rx[2], 0x09, 0x00, next_rx[0], 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
                             };
                             send_gip_ack(ack_pkt, sizeof(ack_pkt));
+                        }
+                        if (next_rx[0] == 0x02) {
+                            send_gip_announce_response();
                         }
                         // Only overwrite rx if rx is not already holding a valid input report
                         if (!(rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6)) {
@@ -1983,8 +2077,15 @@ void usb_driver_poll_step(void) {
                 handle_pad_input_and_send(&ds4);
             }
         } else if (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4) {
-            if (rx[0] == XBOXONE_REPORT_INPUT && transferred >= 18) {
-                translator_convert_xboxone((const XboxOneReport*)rx, &ds4, &s_trans_cfg);
+            if (rx[0] == XBOXONE_REPORT_INPUT && transferred >= 14) {
+                XboxOneReport xone_padded;
+                const XboxOneReport* xone_ptr = (const XboxOneReport*)rx;
+                if (transferred < (int)sizeof(XboxOneReport)) {
+                    memset(&xone_padded, 0, sizeof(xone_padded));
+                    memcpy(&xone_padded, rx, (size_t)transferred);
+                    xone_ptr = &xone_padded;
+                }
+                translator_convert_xboxone(xone_ptr, &ds4, &s_trans_cfg);
                 if (s_xboxone_guide) {
                     ds4.buttons |= get_guide_button_mask();
                 }
@@ -2024,6 +2125,12 @@ void usb_driver_poll_step(void) {
                     };
                     send_gip_ack(ack_pkt, sizeof(ack_pkt));
                     daemon_log(LOG_LEVEL_INFO, "GIP ACK sent for cmd 0x%02X (seq 0x%02X, len %d)", rx[0], rx[2], transferred);
+                }
+                // Issue #23 & #70: When a GIP controller (e.g. PDP, PowerA MOGA) sends GIP Announce (0x02),
+                // respond with GIP Power-On (0x05) + vendor init so it transitions into active input streaming.
+                if (rx[0] == 0x02) {
+                    daemon_log(LOG_LEVEL_INFO, "GIP Announce (0x02) received (len=%d) — sending GIP Power-On response", transferred);
+                    send_gip_announce_response();
                 }
             }
         } else if (g_usb_state.type == CONTROLLER_SWITCH && transferred >= sizeof(SwitchInputOnlyReport)) {
@@ -2172,16 +2279,29 @@ void usb_driver_poll_step(void) {
             }
         }
     } else {
-        // Check for physical disconnect on any transfer error/timeout
+        // Immediate release on SCE_USBD_ERROR_NO_DEVICE (0x80240004 / -4) or repeated disconnect
+        // during PS4 Rest Mode suspend (AGENTS.md Section 4.5 & Issue #92):
+        // Do NOT call is_current_device_present_on_bus() here as querying the USB device list
+        // while Orbis OS is suspending the USB stack blocks Rest Mode entry.
+        if (ret == 0x80240004 || ret == -4) {
+            daemon_log(LOG_LEVEL_INFO, "USB controller removed or system entering Rest Mode (ret=0x%08X) — releasing immediately", ret);
+            s_consecutive_disconnects = 0;
+            s_consecutive_timeouts = 0;
+            s_consecutive_transfer_errors = 0;
+            close_controller();
+            return;
+        }
+
         if (p_sceUsbdCheckConnected != NULL && p_sceUsbdCheckConnected(g_dev_handle) != 0) {
             s_consecutive_disconnects++;
-            if (s_consecutive_disconnects >= 10 || ret == 0x80240004 || ret == -4) {
-                if (!is_current_device_present_on_bus()) {
-                    daemon_log(LOG_LEVEL_INFO, "USB controller physical disconnect confirmed (ret=0x%08X)", ret);
-                    close_controller();
-                    s_consecutive_disconnects = 0;
-                    return;
-                }
+            if (s_consecutive_disconnects >= 3) {
+                daemon_log(LOG_LEVEL_INFO, "USB controller physical disconnect confirmed via CheckConnected (ret=0x%08X, count=%d)",
+                           ret, s_consecutive_disconnects);
+                s_consecutive_disconnects = 0;
+                s_consecutive_timeouts = 0;
+                s_consecutive_transfer_errors = 0;
+                close_controller();
+                return;
             }
         } else {
             s_consecutive_disconnects = 0;

@@ -556,14 +556,16 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         return 1;
     }
 
-    // 5. Nintendo Switch Third-Party Input-Only (PDP Rock Candy, etc.)
+    // 5. Nintendo Switch Third-Party Input-Only (PDP Rock Candy, Hori Taiko Drum / Horipad, etc.)
     if (is_switch_input_only_controller(desc->idVendor, desc->idProduct)) {
         out->type = CONTROLLER_SWITCH;
         out->vid = desc->idVendor;
         out->pid = desc->idProduct;
-        out->interface_num = 0;
-        out->ep_in = 0x81;
-        out->ep_out = 0;
+        if (!detect_switch_pro_endpoints(dev, out)) {
+            out->interface_num = 0;
+            out->ep_in = 0x81;
+            out->ep_out = 0;
+        }
         return 1;
     }
 

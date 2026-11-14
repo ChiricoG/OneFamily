@@ -175,7 +175,7 @@ void daemon_config_load(DaemonConfig *cfg) {
                 } else {
                     cfg->back_button_action = CONFIG_BACK_SHARE;
                 }
-            } else if (str_case_eq(key, "enable_notifications")) {
+            } else if (str_case_eq(key, "enable_notifications") || str_case_eq(key, "notifications")) {
                 cfg->enable_notifications = parse_int(val, 1);
             } else if (str_case_eq(key, "enable_mode_combo")) {
                 cfg->enable_mode_combo = parse_int(val, 1);

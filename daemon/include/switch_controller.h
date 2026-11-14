@@ -128,6 +128,13 @@ static inline int is_switch_input_only_controller(uint16_t vid, uint16_t pid) {
     if (vid == 0x0e6f && pid == 0x0181) return 1;
     // PDP Wired Fight Pad Pro
     if (vid == 0x0e6f && pid == 0x0185) return 1;
+    // Hori Switch Input-Only Controllers (Taiko Drum, Horipad, Pokken DX, Fighting Stick Mini, Split Pad Fit)
+    if (vid == 0x0f0d) {
+        if (pid == 0x00f0 || pid == 0x0092 || pid == 0x00c1 ||
+            pid == 0x00dc || pid == 0x00ee || pid == 0x0175) {
+            return 1;
+        }
+    }
 
     return 0;
 }

@@ -35,6 +35,10 @@ const std::vector<std::string> ConfigManager::SWITCH_OPTIONS = {
     "Positional", "By Letter"
 };
 
+const std::vector<std::string> ConfigManager::NOTIFICATIONS_OPTIONS = {
+    "Enabled", "Disabled"
+};
+
 const std::vector<std::string> ConfigManager::DS_BT_MODE_OPTIONS = {
     "Safe Mode (10-Byte)", "Extended (78-Byte)"
 };
@@ -168,6 +172,9 @@ bool ConfigManager::load() {
                 } else if (strcasecmp(key.c_str(), "switch_positional_layout") == 0) {
                     int v = atoi(val.c_str());
                     config.switch_index = (v != 0) ? 0 : 1; // 0=Positional (1), 1=By Letter (0)
+                } else if (strcasecmp(key.c_str(), "enable_notifications") == 0 || strcasecmp(key.c_str(), "notifications") == 0) {
+                    int v = atoi(val.c_str());
+                    config.notifications_index = (v != 0) ? 0 : 1; // 0=Enabled (1), 1=Disabled (0)
                 } else if (strcasecmp(key.c_str(), "dualsense_bt_mode") == 0 || strcasecmp(key.c_str(), "bt_mode") == 0) {
                     int v = atoi(val.c_str());
                     if (v >= 0 && v < (int)DS_BT_MODE_OPTIONS.size()) config.ds_bt_mode = v;
@@ -216,6 +223,7 @@ bool ConfigManager::save() {
     int swap_val = (config.swap_index != 0) ? 1 : 0;
     int rumble_val = (config.rumble_index == 0) ? 1 : 0;
     int switch_val = (config.switch_index == 0) ? 1 : 0;
+    int notify_val = (config.notifications_index == 0) ? 1 : 0;
 
     int len = snprintf(out, sizeof(out),
         "# OneFamily Daemon - Configuration File\n"
@@ -228,6 +236,7 @@ bool ConfigManager::save() {
         "\n"
         "[General]\n"
         "enable_rumble = %d\n"
+        "enable_notifications = %d\n"
         "\n"
         "[Remap]\n"
         "swap_triggers_bumpers = %d\n"
@@ -245,6 +254,7 @@ bool ConfigManager::save() {
         deadzone_val,
         trigger_val,
         rumble_val,
+        notify_val,
         swap_val,
         switch_val,
         config.ds_bt_mode,

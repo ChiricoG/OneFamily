@@ -155,15 +155,33 @@ struct ElevateArgs {
     int rc;
 };
 
-static int kernel_elevate_ucred(void* thread, struct ElevateArgs* args) {
-    if (!thread || !args) return 22;
+struct ElevateKexecArgs {
+    void* fn;
+    struct ElevateArgs* req;
+};
+
+static int kernel_elevate_ucred(void* thread, void* uap) {
+    if (!thread || !uap) return 22;
+    struct ElevateKexecArgs* ka = (struct ElevateKexecArgs*)uap;
+    struct ElevateArgs* args = ka->req;
+    if (!args) return 22;
+
     uint8_t* td = (uint8_t*)thread;
     uint8_t* proc = *(uint8_t**)(td + 8); // td->td_proc
     if (!proc || ((uint64_t)proc >> 48) != 0xFFFF) return 2;
 
-    uint8_t* ucred = *(uint8_t**)(td + 0x140); // td->td_ucred
+    // In FreeBSD 9 / Orbis OS struct proc, p_ucred is at offset 0x40
+    uint8_t* ucred = *(uint8_t**)(proc + 0x40);
     if (!ucred || ((uint64_t)ucred >> 48) != 0xFFFF) {
-        // Fallback: proc->p_ucred (offset 0x140 in Orbis OS proc)
+        ucred = *(uint8_t**)(td + 0x130); // td->td_ucred fallback
+    }
+    if (!ucred || ((uint64_t)ucred >> 48) != 0xFFFF) {
+        ucred = *(uint8_t**)(td + 0x138);
+    }
+    if (!ucred || ((uint64_t)ucred >> 48) != 0xFFFF) {
+        ucred = *(uint8_t**)(td + 0x140);
+    }
+    if (!ucred || ((uint64_t)ucred >> 48) != 0xFFFF) {
         ucred = *(uint8_t**)(proc + 0x140);
         if (!ucred || ((uint64_t)ucred >> 48) != 0xFFFF) return 3;
     }
@@ -842,7 +860,7 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
     daemon_log(LOG_LEVEL_INFO, "Virtual DS4 Slot %d (%s, dev_key=0x%llX) registered with handle=0x%X",
                slot, source == VPAD_SOURCE_BT ? "Bluetooth" : "USB", (unsigned long long)device_key, vHandle);
 
-    if (g_daemon_config.mode != CONFIG_MODE_AUTO && p_scePadSetConnection) {
+    if (p_scePadSetConnection) {
         int r = p_scePadSetConnection(vHandle, 1);
         daemon_log(LOG_LEVEL_INFO, "scePadSetConnection(0x%X, 1) = 0x%08X", vHandle, r);
     }

@@ -392,7 +392,7 @@ int main() {
         }
 
         if (currentTabId == TAB_SETTINGS) {
-            const int TOTAL_CARDS = 5;
+            const int TOTAL_CARDS = 6;
 
             // Navigate Cards in Settings
             if (justPressed & ORBIS_PAD_BUTTON_UP) {
@@ -415,6 +415,8 @@ int main() {
                     cfg.rumble_index ^= 1; changed = true;
                 } else if (selectedCard == 4) {
                     cfg.switch_index ^= 1; changed = true;
+                } else if (selectedCard == 5) {
+                    cfg.notifications_index ^= 1; changed = true;
                 }
                 if (changed) {
                     configMgr.save();
@@ -439,6 +441,8 @@ int main() {
                     cfg.rumble_index ^= 1; changed = true;
                 } else if (selectedCard == 4) {
                     cfg.switch_index ^= 1; changed = true;
+                } else if (selectedCard == 5) {
+                    cfg.notifications_index ^= 1; changed = true;
                 }
                 if (changed) {
                     configMgr.save();
@@ -462,11 +466,11 @@ int main() {
             }
 
             if (!tester.testMode) {
-                // Left / Right / L2 / R2: Switch controller slot under test
-                if ((justPressed & ORBIS_PAD_BUTTON_LEFT) || (justPressed & ORBIS_PAD_BUTTON_L2)) {
+                // D-Pad Left / Right: Switch controller slot under test (do NOT use L2/R2 so triggers can be tested freely)
+                if (justPressed & ORBIS_PAD_BUTTON_LEFT) {
                     tester.selectedSlot = (tester.selectedSlot + 3) % 4;
                 }
-                if ((justPressed & ORBIS_PAD_BUTTON_RIGHT) || (justPressed & ORBIS_PAD_BUTTON_R2)) {
+                if (justPressed & ORBIS_PAD_BUTTON_RIGHT) {
                     tester.selectedSlot = (tester.selectedSlot + 1) % 4;
                 }
 

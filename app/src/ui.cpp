@@ -386,8 +386,8 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
 
     // 4. Main Content Area
     if (currentTabId == TAB_SETTINGS) {
-        // --- SETTINGS VIEW (5 Cards) ---
-        const int TOTAL_CARDS = 5;
+        // --- SETTINGS VIEW (6 Cards) ---
+        const int TOTAL_CARDS = 6;
         const int VISIBLE_CARDS = 5;
 
         int scrollOffset = 0;
@@ -403,7 +403,8 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
             "Trigger Sensitivity",
             "Swap Bumpers & Triggers",
             "Controller Vibration",
-            "Switch Controller Layout"
+            "Switch Controller Layout",
+            "System Notifications"
         };
 
         const char* cardDescs[TOTAL_CARDS] = {
@@ -411,12 +412,13 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
             "Digital press activation threshold for analog triggers.",
             "Invert bumper (LB/RB) and trigger (LT/RT) functions.",
             "Enable or disable controller rumble feedback.",
-            "Positional (bottom=X) or by letter (A=Circle, B=Cross)."
+            "Positional (bottom=X) or by letter (A=Circle, B=Cross).",
+            "Show or hide system pop-up notifications on connection."
         };
 
         ImageRGBA cardIcons[TOTAL_CARDS] = {
             iconDeadzone, iconDeadzone, iconSwap,
-            iconRumble, iconSwap
+            iconRumble, iconSwap, iconInfo
         };
 
         std::string vals[TOTAL_CARDS];
@@ -425,6 +427,7 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
         vals[2] = ConfigManager::SWAP_OPTIONS[cfg.swap_index];
         vals[3] = ConfigManager::RUMBLE_OPTIONS[cfg.rumble_index];
         vals[4] = ConfigManager::SWITCH_OPTIONS[cfg.switch_index];
+        vals[5] = ConfigManager::NOTIFICATIONS_OPTIONS[cfg.notifications_index];
 
         int selectorCenterX = 1380;
 
@@ -815,11 +818,11 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
     }
 
     int r2X = pillsStartX + 4 * pillW + 3 * pillGap + 10;
-    draw_image(scene, btnR2, r2X, barY + 9);
+    draw_image(scene, btnArrows, r2X, barY + 9);
     if (tester.testMode) {
         draw_text(scene, "Slot switching locked (Test Mode active)", fontCardDesc, r2X + 38, barY + 27, Color{ 0, 255, 150 });
     } else {
-        draw_text(scene, "Switch: [L2]/[R2] or [D-Pad]", fontCardDesc, r2X + 38, barY + 27, COLOR_TEXT_DIM);
+        draw_text(scene, "Switch: [D-Pad Left / Right]", fontCardDesc, r2X + 38, barY + 27, COLOR_TEXT_DIM);
     }
 
     // Check if selected controller slot is connected
@@ -847,7 +850,7 @@ void UI::render_tester(Scene2D* scene, const AppConfig& cfg, const OrbisPadData&
         snprintf(buf, sizeof(buf), "No controller is currently active on Slot %d (Player %d).", tester.selectedSlot + 1, tester.selectedSlot + 1);
         draw_text(scene, buf, fontCardDesc, warnX + 40, textY, COLOR_WHITE);
         textY += 40;
-        draw_text(scene, "Press [L2] / [R2] or [LEFT] / [RIGHT] to switch to another player slot,",
+        draw_text(scene, "Press [D-Pad Left] / [D-Pad Right] to switch to another player slot,",
                   fontCardDesc, warnX + 40, textY, COLOR_BLUE_BRIGHT);
         textY += 36;
         draw_text(scene, "or connect a DualSense (Bluetooth) / USB controller to assign it to this slot.",

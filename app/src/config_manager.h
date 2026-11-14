@@ -14,9 +14,10 @@
 struct AppConfig {
     int deadzone_index;     // 0..7 (0%, 5%, 8%, 10%, 12%, 15%, 20%, 25%)
     int trigger_index;      // 0..4 (15, 30, 45, 60, 80)
-    int swap_index;         // 0 = Disabled, 1 = Enabled
-    int rumble_index;       // 0 = Enabled, 1 = Disabled
-    int switch_index;       // 0 = Positional, 1 = By Letter
+    int swap_index;          // 0 = Disabled, 1 = Enabled
+    int rumble_index;        // 0 = Enabled, 1 = Disabled
+    int switch_index;        // 0 = Positional, 1 = By Letter
+    int notifications_index; // 0 = Enabled, 1 = Disabled
 
     // [DualSense]
     int ds_bt_mode;         // 0=Safe Mode (10-byte Report 0x01), 1=Extended Mode (78-byte Report 0x31)
@@ -36,9 +37,10 @@ struct AppConfig {
         deadzone_index = 4;     // 12% (15/127)
         trigger_index = 1;      // 30 (12%)
         swap_index = 0;         // Disabled
-        rumble_index = 0;       // Enabled
-        switch_index = 0;       // Positional
-        ds_bt_mode = 1;         // Extended Mode (78-byte Report 0x31)
+        rumble_index = 0;        // Enabled
+        switch_index = 0;        // Positional
+        notifications_index = 0; // Enabled
+        ds_bt_mode = 1;          // Extended Mode (78-byte Report 0x31)
         ds_lightbar_mode = 0;
         ds_lightbar_color = 0;
         ds_brightness = 0;
@@ -58,6 +60,7 @@ public:
     static const std::vector<std::string> SWAP_OPTIONS;
     static const std::vector<std::string> RUMBLE_OPTIONS;
     static const std::vector<std::string> SWITCH_OPTIONS;
+    static const std::vector<std::string> NOTIFICATIONS_OPTIONS;
 
     // DualSense Options
     static const std::vector<std::string> DS_BT_MODE_OPTIONS;

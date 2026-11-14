@@ -432,7 +432,7 @@ static uint32_t switch_hat_to_dpad(uint8_t hat) {
  */
 static inline uint8_t scale_switch_stick_axis(uint8_t val) {
     int32_t diff = (int32_t)val - 128;
-    int32_t scaled = (diff * 142) / 100;
+    int32_t scaled = (diff * 165) / 100;
     int32_t out = 128 + scaled;
     if (out < 0) out = 0;
     if (out > 255) out = 255;

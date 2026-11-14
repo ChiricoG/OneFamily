@@ -141,10 +141,15 @@ int main(int argc, char *argv[]) {
             vpad_check_user_rebind(g_daemon_config.mode);
         }
 
-        // Precision sleep to pace exactly at 250 Hz (4000 us)
+        // Precision sleep: pace at 1000 Hz (1000 us) when a high-polling USB receiver
+        // (bInterval < 4, e.g. GuliKit KK3 Max 2.4GHz 1000 Hz dongle) is connected,
+        // otherwise pace at 250 Hz (4000 us).
+        uint64_t target_loop_us = (g_usb_state.connected && g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4)
+                                      ? 1000ULL
+                                      : 4000ULL;
         uint64_t elapsed_us = daemon_sys_time_us() - loop_start_us;
-        if (elapsed_us < 4000ULL) {
-            daemon_sys_usleep((uint32_t)(4000ULL - elapsed_us));
+        if (elapsed_us < target_loop_us) {
+            daemon_sys_usleep((uint32_t)(target_loop_us - elapsed_us));
         }
     }
 

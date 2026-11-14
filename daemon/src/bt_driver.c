@@ -68,6 +68,8 @@ typedef struct {
     uint8_t  rumble_seq;      // sequence tag for output reports
     uint8_t  battery_pct;
     uint8_t  battery_status;
+    uint32_t low_battery_samples;
+    bool     low_battery_notified;
     bool     share_combo_active;
     float    orientation[4];  // x, y, z, w
     uint64_t last_motion_time;
@@ -709,9 +711,10 @@ static int controller_capacity(void* thread, struct CapacityArgs* args) {
     }
 
     int rc = 2; // Link not found
-    uint8_t* found_link = NULL;
 
-    // 1. Primary check: verified context offset 0x2612550 (FW 12.50, 13.02, 13.52)
+    // Verified context offset 0x2612550 (FW 12.50, 13.02, 13.52)
+    // Patch all matching link entries for r->address so a stale link entry from a prior
+    // session never shadows a newly allocated link entry on reconnect (Issue #81).
     uint8_t* context = *(void**)(base + 0x2612550);
     if (context && ((uint64_t)context >> 48) == 0xFFFF) {
         for (uint32_t offset = 0x42A8; offset < 0x185A0; offset += 0x1588) {
@@ -723,73 +726,26 @@ static int controller_capacity(void* thread, struct CapacityArgs* args) {
                 *(volatile uint16_t*)(device + 0x28) != 0x054C ||
                 (*(volatile uint16_t*)(device + 0x2A) != 0x0CE6 &&
                  *(volatile uint16_t*)(device + 0x2A) != 0x0DF2)) {
-                break;
+                continue;
             }
 
             uint32_t* capacity = (void*)(link + 0x1574);
             if (*capacity != 22 && *capacity != 49 && *capacity != 78) {
-                rc = 22;
-                break;
+                continue;
             }
 
-            found_link = link;
             if (r->restore) {
-                if (r->original != 22 && r->original != 49 && r->original != 78) {
-                    rc = 22;
-                    break;
+                if (r->original == 22 || r->original == 49 || r->original == 78) {
+                    *capacity = r->original;
+                    rc = 0;
                 }
-                *capacity = r->original;
-                rc = 0;
             } else {
-                r->original = *capacity;
+                if (r->original == 0 || *capacity == 22) {
+                    r->original = *capacity;
+                }
                 *capacity = 78;
                 rc = 0;
             }
-            break;
-        }
-    }
-
-    // 2. Secondary scan: nearby range [0x2612000 .. 0x2613000] if not found at 0x2612550
-    if (!found_link) {
-        for (uint32_t cand = 0x2612000; cand <= 0x2613000; cand += 8) {
-            if (cand == 0x2612550) continue;
-            uint8_t* ctx = *(void**)(base + cand);
-            if (!ctx || ((uint64_t)ctx >> 48) != 0xFFFF) continue;
-
-            for (uint32_t offset = 0x42A8; offset < 0x185A0; offset += 0x1588) {
-                uint8_t* link = ctx + offset;
-                if (*(volatile uint64_t*)(link + 0x30) != r->address) continue;
-
-                uint8_t* device = *(void**)(link + 0x638);
-                if (!device || ((uint64_t)device >> 48) != 0xFFFF ||
-                    *(volatile uint16_t*)(device + 0x28) != 0x054C ||
-                    (*(volatile uint16_t*)(device + 0x2A) != 0x0CE6 &&
-                     *(volatile uint16_t*)(device + 0x2A) != 0x0DF2)) {
-                    break;
-                }
-
-                uint32_t* capacity = (void*)(link + 0x1574);
-                if (*capacity != 22 && *capacity != 49 && *capacity != 78) {
-                    rc = 22;
-                    break;
-                }
-
-                found_link = link;
-                if (r->restore) {
-                    if (r->original != 22 && r->original != 49 && r->original != 78) {
-                        rc = 22;
-                        break;
-                    }
-                    *capacity = r->original;
-                    rc = 0;
-                } else {
-                    r->original = *capacity;
-                    *capacity = 78;
-                    rc = 0;
-                }
-                break;
-            }
-            if (found_link) break;
         }
     }
 
@@ -803,6 +759,16 @@ static int controller_capacity(void* thread, struct CapacityArgs* args) {
 
 static int apply_controller_capacity(BtDevice* dev, int restore) {
     if (!dev || !dev->address) return -1;
+    // Strict Firmware Safe Gate (Issues #85, #86, #95 & AGENTS.md Section 2.1):
+    // Offset 0x2612550 is only valid on FW 12.50..13.52. On older firmwares (e.g. FW 9.00, 11.00, 12.00),
+    // never dereference 0x2612550 in Ring 0; return -1 so DualSense operates safely in 10-byte Report 0x01 mode.
+    if (s_current_fw_bcd != 0x1250 &&
+        s_current_fw_bcd != 0x1302 &&
+        s_current_fw_bcd != 0x1304 &&
+        s_current_fw_bcd != 0x1350 &&
+        s_current_fw_bcd != 0x1352) {
+        return -1;
+    }
     struct CapacityRequest req = {
         .address = dev->address,
         .restore = restore ? 1U : 0U,
@@ -1102,9 +1068,6 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             if (g_daemon_config.dualsense_bt_mode == 1 && !dev->capacity_patched) {
                 apply_controller_capacity(dev, 0);
             }
-            if (dev->capacity_patched && !dev->initialized_output) {
-                bt_send_rumble_dev(dev, 0, 0, dev->last_color);
-            }
         } else {
             // New device connection
             if (vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot) != 0 || dev->vpad_slot < 0) {
@@ -1126,8 +1089,6 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
                 if (cap_rc == 0) {
                     daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patched to 78 bytes (orig=%u)",
                                (unsigned long long)dev->address, dev->original_capacity);
-                    // Send initial handshake output report immediately to end pairing animation (Diram1x / AnyPad protocol)
-                    bt_send_rumble_dev(dev, 0, 0, dev->last_color);
                 } else {
                     daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patch unavailable (rc=%d), operating in safe 10-byte report mode",
                                (unsigned long long)dev->address, cap_rc);
@@ -1210,28 +1171,83 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
     // Apply per-controller custom button remap rules (054C_0CE6.ini / 054C_0DF2.ini)
     usb_driver_apply_bt_remap(&ds4);
 
-    // Universal Shortcuts & De-ghosting for DualSense BT
+    // Universal Shortcuts & De-ghosting for DualSense BT (Issues #82, #83, #88, #89)
     bool share_down = (ds4.buttons & DS4_BUTTON_SHARE) != 0;
+    uint16_t synth_touch_x = 0;
+    uint16_t synth_touch_y = 0;
+    bool synth_touch_active = false;
 
     if (share_down) {
         bool combo_matched = false;
+        int rx_delta = (int)ds4.rightStick.x - 128;
+        int ry_delta = (int)ds4.rightStick.y - 128;
 
-        // 1. Create + Options -> Touchpad Click
+        // 1. Create + Options -> Center Touchpad Click
         if (ds4.buttons & DS4_BUTTON_OPTIONS) {
             ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
             ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+            synth_touch_x = 960;
+            synth_touch_y = 470;
+            synth_touch_active = true;
             combo_matched = true;
         }
-        // 2. Create + D-Pad Up -> Touchpad Click
+        // 2. Create + D-Pad Up -> Center Touchpad Click
         else if (ds4.buttons & DS4_BUTTON_DPAD_UP) {
             ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
             ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+            synth_touch_x = 960;
+            synth_touch_y = 470;
+            synth_touch_active = true;
             combo_matched = true;
         }
-        // 3. Create + D-Pad Down -> PS Button
+        // 3. Create + L1 or Create + D-Pad Left -> Left Touchpad Click (Issue #89)
+        else if (ds4.buttons & (DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT)) {
+            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT);
+            ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+            synth_touch_x = 400;
+            synth_touch_y = 470;
+            synth_touch_active = true;
+            combo_matched = true;
+        }
+        // 4. Create + R1 or Create + D-Pad Right -> Right Touchpad Click (Issue #89)
+        else if (ds4.buttons & (DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT)) {
+            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT);
+            ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+            synth_touch_x = 1520;
+            synth_touch_y = 470;
+            synth_touch_active = true;
+            combo_matched = true;
+        }
+        // 5. Create + D-Pad Down -> PS Button
         else if (ds4.buttons & DS4_BUTTON_DPAD_DOWN) {
             ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
             ds4.buttons |= DS4_BUTTON_PS;
+            combo_matched = true;
+        }
+        // 6. Create + Right Stick -> Directional Capacitive Touchpad Swipe (Issues #82, #83, #88)
+        else if (rx_delta > 45 || rx_delta < -45 || ry_delta > 45 || ry_delta < -45) {
+            ds4.buttons &= ~DS4_BUTTON_SHARE;
+            ds4.rightStick.x = 128;
+            ds4.rightStick.y = 128;
+            uint32_t phase = (uint32_t)((dev->last_input_time / 1000ULL) % 180ULL);
+            int abs_rx = rx_delta < 0 ? -rx_delta : rx_delta;
+            int abs_ry = ry_delta < 0 ? -ry_delta : ry_delta;
+            if (abs_rx >= abs_ry) {
+                synth_touch_y = 470;
+                if (rx_delta > 0) {
+                    synth_touch_x = (uint16_t)(360 + (phase * 1200) / 180);
+                } else {
+                    synth_touch_x = (uint16_t)(1560 - (phase * 1200) / 180);
+                }
+            } else {
+                synth_touch_x = 960;
+                if (ry_delta > 0) {
+                    synth_touch_y = (uint16_t)(170 + (phase * 600) / 180);
+                } else {
+                    synth_touch_y = (uint16_t)(770 - (phase * 600) / 180);
+                }
+            }
+            synth_touch_active = true;
             combo_matched = true;
         }
 
@@ -1257,6 +1273,23 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
         dev->battery_pct = battery_pct;
         dev->battery_status = battery_status;
 
+        // Debounced low-battery notification (Issue #78 & #73):
+        // Require at least 20 consecutive discharging (status == 0) reports with battery_pct <= 15%
+        // before emitting a single notification, and reset only when charging/full or >= 30%.
+        if (battery_status == 0 && battery_pct > 0 && battery_pct <= 15) {
+            if (dev->low_battery_samples < 1000) {
+                dev->low_battery_samples++;
+            }
+            if (dev->low_battery_samples >= 20 && !dev->low_battery_notified) {
+                dev->low_battery_notified = true;
+                int slot_num = dev->vpad_slot >= 0 ? vpad_get_assigned_slot_num(dev->vpad_slot) : 1;
+                daemon_notify("OneFamily: DualSense (Player %d) Low Battery (%d%%)", slot_num, battery_pct);
+            }
+        } else if (battery_status == 1 || battery_status == 2 || battery_pct >= 30) {
+            dev->low_battery_samples = 0;
+            dev->low_battery_notified = false;
+        }
+
         static uint64_t s_last_battery_update = 0;
         if (s_last_battery_update == 0 || dev->last_input_time - s_last_battery_update >= 30000000ULL) { // Immediate first write, then every 30s
             s_last_battery_update = dev->last_input_time;
@@ -1276,6 +1309,13 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
         extended_sample(dev, &ds4, report, dt);
     } else {
         ds4.quat.w = 1.0f;
+    }
+
+    if (synth_touch_active && ds4.touch.fingers == 0) {
+        ds4.touch.fingers = 1;
+        ds4.touch.touch[0].finger = 1;
+        ds4.touch.touch[0].x = synth_touch_x;
+        ds4.touch.touch[0].y = synth_touch_y;
     }
 
     dev->last_pad_data = ds4;
@@ -1335,17 +1375,48 @@ static void bt_check_timeouts(void) {
 void bt_driver_poll_step(void) {
     if (!s_bt_running || s_bt_fd < 0 || s_bt_queue < 0) return;
 
+    uint64_t now_us = daemon_sys_time_us();
+    static uint64_t s_last_poll_step_us = 0;
+    if (s_last_poll_step_us != 0 && (now_us - s_last_poll_step_us) > 15000000ULL) {
+        daemon_log(LOG_LEVEL_INFO, "DualSense BT: system resume from Rest Mode detected (gap=%llu ms) — reinitializing /dev/bt",
+                   (unsigned long long)((now_us - s_last_poll_step_us) / 1000ULL));
+        s_last_poll_step_us = now_us;
+        bt_driver_shutdown();
+        bt_driver_init();
+        return;
+    }
+    s_last_poll_step_us = now_us;
+
     bt_check_timeouts();
 
-    uint64_t now_us = daemon_sys_time_us();
+    // Feature Report 0x05 request for factory IMU calibration and 0x01 -> 0x31 extended mode switch
+    // Strictly gated on dev->capacity_patched (AGENTS.md Section 2.1 & 2.3)
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        BtDevice *dev = &s_devices[i];
+        if (g_daemon_config.dualsense_bt_mode == 1 && dev->connected && dev->address &&
+            dev->capacity_patched && !dev->calibration_requested &&
+            (now_us - dev->last_calibration_attempt >= 1000000ULL)) {
+            dev->last_calibration_attempt = now_us;
+            struct {
+                uint64_t address;
+                uint8_t  report_id;
+                uint8_t  reserved[7];
+            } feature = { dev->address, 5, {0} };
+            long rc = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x8010622FUL, (long)&feature);
+            if (rc == 0) {
+                dev->calibration_requested = true;
+                daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): requested IMU factory calibration (Feature Report 0x05)",
+                           (unsigned long long)dev->address);
+            }
+        }
+    }
 
-    // Periodic Bluetooth output report keep-alive heartbeat (every 500ms, or immediately on initial connection)
+    // Periodic Bluetooth output report keep-alive heartbeat (20ms after connect, then every 2500ms)
     // Strictly gated on devices where controller_capacity (78-byte output report size) is active.
-    // Paces keep-alive reports at 500ms to preserve Bluetooth Active Mode (Exit Sniff Mode) for crackle-free audio.
     for (int i = 0; i < BT_MAX_DEVICES; ++i) {
         BtDevice *dev = &s_devices[i];
         if (g_daemon_config.dualsense_bt_mode == 1 && dev->connected && dev->address && dev->capacity_patched && !dev->output_unsupported) {
-            uint64_t interval = dev->initialized_output ? 500000ULL : 20000ULL;
+            uint64_t interval = dev->initialized_output ? 2500000ULL : 20000ULL;
             if (now_us - dev->last_output_time >= interval) {
                 bt_send_rumble_dev(dev, 0, 0, dev->last_color);
             }
@@ -1395,131 +1466,144 @@ void bt_driver_poll_step(void) {
     } event;
 
     long ready = daemon_sys_call6(SYS_KEVENT, s_bt_queue, 0, 0, (long)&event, 1, (long)&timeout);
-    if (ready <= 0) {
-        // Fallback poll: if bthid missed an edge-triggered kevent notification (e.g. after Feature Report 0x05),
-        // directly check ioctl 0x80206233UL for known devices when quiet for >= 16ms.
-        for (int i = 0; i < BT_MAX_DEVICES; ++i) {
-            BtDevice *dev = &s_devices[i];
-            if (!dev->address || (now_us - dev->last_input_time < 16000ULL)) continue;
+    if (ready < 0 && ready != -4 /* -EINTR */) {
+        daemon_log(LOG_LEVEL_WARN, "DualSense BT: kevent returned %ld — reinitializing /dev/bt after Rest Mode / reset", ready);
+        bt_driver_shutdown();
+        bt_driver_init();
+        return;
+    }
+    if (ready > 0) {
+        uint8_t buffer[256];
+        long count = daemon_sys_read(s_bt_fd, buffer, sizeof(buffer));
+        if (count < 0 && count != -35 /* -EAGAIN */ && count != -4 /* -EINTR */) {
+            daemon_log(LOG_LEVEL_WARN, "DualSense BT: /dev/bt read returned %ld — reinitializing Bluetooth subsystem", count);
+            bt_driver_shutdown();
+            bt_driver_init();
+            return;
+        }
+        if (count > 0 && count <= (long)sizeof(buffer)) {
+            for (long pos = 0; pos + 16 <= count; pos += 16) {
+                uint8_t ev_type = buffer[pos];
+                if (ev_type < 0x18 || ev_type > 0x20) continue;
 
-            uint8_t report[80];
-            memset(report, 0, sizeof(report));
-            struct {
-                uint64_t address;
-                void*    buffer;
-                uint64_t capacity;
-                uint64_t reserved;
-            } req = { dev->address, report, sizeof(report), 0 };
+                uint64_t address = 0;
+                for (unsigned i = 0; i < 8; ++i) {
+                    address |= ((uint64_t)buffer[pos + 8 + i]) << (8 * i);
+                }
 
-            long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
-            if (result > 0 && result <= (long)sizeof(report)) {
-                if (result != dev->last_raw_len || memcmp(report, dev->last_raw_report, (size_t)result) != 0) {
+                if (ev_type == 0x18 || ev_type == 0x19) {
+                    BtDevice *existing = bt_dev_find(address);
+                    if (existing) {
+                        existing->calibration_requested = false;
+                        existing->extended_mode = false;
+                        existing->initialized_output = false;
+                        existing->capacity_patched = false;
+                        existing->output_errors = 0;
+                        existing->output_unsupported = false;
+                    }
+                }
+
+                for (int drain = 0; drain < 8; ++drain) {
+                    uint8_t report[80];
+                    memset(report, 0, sizeof(report));
+                    struct {
+                        uint64_t address;
+                        void*    buffer;
+                        uint64_t capacity;
+                        uint64_t reserved;
+                    } req = { address, report, sizeof(report), 0 };
+
+                    long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
+                    if (result <= 0 || result > (long)sizeof(report)) break;
+
+                    BtDevice* dev = bt_dev_acquire(address);
+                    if (!dev) break;
+
+                    if (drain > 0 && result == dev->last_raw_len &&
+                        memcmp(report, dev->last_raw_report, (size_t)result) == 0) {
+                        break;
+                    }
                     memcpy(dev->last_raw_report, report, (size_t)result);
                     dev->last_raw_len = result;
+
                     if (result == 43 && report[0] == 41 && report[2] == 5) {
                         int rc = dualsense_calibration_bluetooth(report + 2, 41, &dev->calibration);
                         if (rc == 0) {
                             dev->calibration_valid = true;
                             daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): factory calibration loaded",
-                                       (unsigned long long)dev->address);
+                                       (unsigned long long)address);
                         } else {
                             daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): calibration decode failed (rc=%d)",
-                                       (unsigned long long)dev->address, rc);
+                                       (unsigned long long)address, rc);
                         }
                     } else if (result >= 2 && result <= 80 && report[0] + 2 == result &&
                                (report[1] == 0x1F || report[2] == 0x01 || report[2] == 0x31)) {
                         dev->reports_seen++;
                         if (dev->reports_seen <= 5) {
                             daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): input packet #%u (res=%ld, id=0x%02X, len=%zu)",
-                                       (unsigned long long)dev->address, dev->reports_seen, result, (report + 2)[0], (size_t)(result - 2));
+                                       (unsigned long long)address, dev->reports_seen, result, (report + 2)[0], (size_t)(result - 2));
                         }
                         decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
                     } else {
-                        static uint32_t s_fallback_drop_cnt = 0;
-                        if (s_fallback_drop_cnt < 5 || (s_fallback_drop_cnt % 500 == 0)) {
-                            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): fallback packet skipped (res=%ld, rep[0]=%u, rep[1]=0x%02X, rep[2]=0x%02X)",
-                                       (unsigned long long)dev->address, result, (unsigned)report[0], report[1], report[2]);
+                        static uint32_t s_kevent_drop_cnt = 0;
+                        if (s_kevent_drop_cnt < 5 || (s_kevent_drop_cnt % 500 == 0)) {
+                            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kevent packet skipped (res=%ld, rep[0]=%u, rep[1]=0x%02X, rep[2]=0x%02X)",
+                                       (unsigned long long)address, result, (unsigned)report[0], report[1], report[2]);
                         }
-                        s_fallback_drop_cnt++;
+                        s_kevent_drop_cnt++;
                     }
                 }
             }
         }
-        return;
     }
 
-    uint8_t buffer[256];
-    long count = daemon_sys_read(s_bt_fd, buffer, sizeof(buffer));
-    if (count > 0 && count <= (long)sizeof(buffer)) {
-        for (long pos = 0; pos + 16 <= count; pos += 16) {
-            uint8_t ev_type = buffer[pos];
-            if (ev_type < 0x18 || ev_type > 0x20) continue;
+    // Fallback poll (AGENTS.md Section 2.3 & Issue #74):
+    // Directly check ioctl 0x80206233UL for any known device that has been quiet for >= 16ms,
+    // even when another DualSense controller triggered kevent during this tick.
+    now_us = daemon_sys_time_us();
+    for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+        BtDevice *dev = &s_devices[i];
+        if (!dev->address || (now_us - dev->last_input_time < 16000ULL)) continue;
 
-            uint64_t address = 0;
-            for (unsigned i = 0; i < 8; ++i) {
-                address |= ((uint64_t)buffer[pos + 8 + i]) << (8 * i);
-            }
+        uint8_t report[80];
+        memset(report, 0, sizeof(report));
+        struct {
+            uint64_t address;
+            void*    buffer;
+            uint64_t capacity;
+            uint64_t reserved;
+        } req = { dev->address, report, sizeof(report), 0 };
 
-            if (ev_type == 0x18 || ev_type == 0x19) {
-                BtDevice *existing = bt_dev_find(address);
-                if (existing) {
-                    existing->calibration_requested = false;
-                    existing->extended_mode = false;
-                    existing->initialized_output = false;
-                    existing->capacity_patched = false;
-                    existing->output_errors = 0;
-                    existing->output_unsupported = false;
-                }
-            }
-
-            for (int drain = 0; drain < 8; ++drain) {
-                uint8_t report[80];
-                memset(report, 0, sizeof(report));
-                struct {
-                    uint64_t address;
-                    void*    buffer;
-                    uint64_t capacity;
-                    uint64_t reserved;
-                } req = { address, report, sizeof(report), 0 };
-
-                long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
-                if (result <= 0 || result > (long)sizeof(report)) break;
-
-                BtDevice* dev = bt_dev_acquire(address);
-                if (!dev) break;
-
-                if (drain > 0 && result == dev->last_raw_len &&
-                    memcmp(report, dev->last_raw_report, (size_t)result) == 0) {
-                    break;
-                }
+        long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
+        if (result > 0 && result <= (long)sizeof(report)) {
+            if (result != dev->last_raw_len || memcmp(report, dev->last_raw_report, (size_t)result) != 0) {
                 memcpy(dev->last_raw_report, report, (size_t)result);
                 dev->last_raw_len = result;
-
                 if (result == 43 && report[0] == 41 && report[2] == 5) {
                     int rc = dualsense_calibration_bluetooth(report + 2, 41, &dev->calibration);
                     if (rc == 0) {
                         dev->calibration_valid = true;
                         daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): factory calibration loaded",
-                                   (unsigned long long)address);
+                                   (unsigned long long)dev->address);
                     } else {
                         daemon_log(LOG_LEVEL_WARN, "DualSense BT (0x%llX): calibration decode failed (rc=%d)",
-                                   (unsigned long long)address, rc);
+                                   (unsigned long long)dev->address, rc);
                     }
                 } else if (result >= 2 && result <= 80 && report[0] + 2 == result &&
                            (report[1] == 0x1F || report[2] == 0x01 || report[2] == 0x31)) {
                     dev->reports_seen++;
                     if (dev->reports_seen <= 5) {
                         daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): input packet #%u (res=%ld, id=0x%02X, len=%zu)",
-                                   (unsigned long long)address, dev->reports_seen, result, (report + 2)[0], (size_t)(result - 2));
+                                   (unsigned long long)dev->address, dev->reports_seen, result, (report + 2)[0], (size_t)(result - 2));
                     }
                     decode_dualsense_bt_report(dev, report + 2, (size_t)(result - 2));
                 } else {
-                    static uint32_t s_kevent_drop_cnt = 0;
-                    if (s_kevent_drop_cnt < 5 || (s_kevent_drop_cnt % 500 == 0)) {
-                        daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kevent packet skipped (res=%ld, rep[0]=%u, rep[1]=0x%02X, rep[2]=0x%02X)",
-                                   (unsigned long long)address, result, (unsigned)report[0], report[1], report[2]);
+                    static uint32_t s_fallback_drop_cnt = 0;
+                    if (s_fallback_drop_cnt < 5 || (s_fallback_drop_cnt % 500 == 0)) {
+                        daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): fallback packet skipped (res=%ld, rep[0]=%u, rep[1]=0x%02X, rep[2]=0x%02X)",
+                                   (unsigned long long)dev->address, result, (unsigned)report[0], report[1], report[2]);
                     }
-                    s_kevent_drop_cnt++;
+                    s_fallback_drop_cnt++;
                 }
             }
         }
