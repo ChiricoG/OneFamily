@@ -71,6 +71,10 @@ typedef struct {
     uint32_t low_battery_samples;
     bool     low_battery_notified;
     bool     share_combo_active;
+    bool     share_was_down;
+    bool     share_hold_forwarded;
+    uint64_t share_down_since_us;
+    uint64_t share_tap_until_us;
     float    orientation[4];  // x, y, z, w
     uint64_t last_motion_time;
     DualSenseCalibration calibration;
@@ -82,9 +86,16 @@ typedef struct {
     long     last_raw_len;
     bool     initialized_output;
     bool     capacity_patched;
+    bool     capacity_unsupported;
+    uint64_t last_capacity_attempt;
     uint32_t original_capacity;
     uint32_t output_errors;
     bool     output_unsupported;
+    int      last_logged_battery_pct;
+    uint8_t  last_logged_battery_status;
+    uint64_t last_status_write_us;
+    uint8_t  last_ev_type;
+    long     last_ioctl_rc;
 } BtDevice;
 
 static BtDevice s_devices[BT_MAX_DEVICES];
@@ -97,6 +108,7 @@ static void bt_device_init_entry(BtDevice *dev) {
     memset(dev, 0, sizeof(*dev));
     dev->vpad_slot = -1;
     dev->battery_pct = 100;
+    dev->last_logged_battery_pct = -1;
     dev->orientation[3] = 1.0f;
     dev->last_color[0] = 0;
     dev->last_color[1] = 112;
@@ -142,6 +154,10 @@ static void bt_dev_mark_away(BtDevice *dev, uint64_t now) {
     if (!dev) return;
     dev->connected = false;
     dev->away_since = now;
+    dev->share_combo_active = false;
+    dev->share_was_down = false;
+    dev->share_hold_forwarded = false;
+    dev->share_tap_until_us = 0;
 
     if (dev->vpad_slot >= 0) {
         OrbisPadData neutral;
@@ -495,7 +511,8 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     }
     // Path 2: Verified Static Table (FW 11.00)
     else if (req->fw_version == 0x1100) {
-        if (*(volatile uint32_t*)(base + 0x5A4206) != 0x0000044FUL) {
+        uint32_t sig = *(volatile uint32_t*)(base + 0x5A4206);
+        if (sig != 0x0000044FUL && sig != 0x0000054CUL) {
             req->detail_code = 0x1100;
             return 22;
         }
@@ -515,7 +532,8 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     }
     // Path 3: Verified Static Table (FW 9.00)
     else if (req->fw_version == 0x0900) {
-        if (*(volatile uint32_t*)(base + 0x5A5E56) != 0x0000044FUL) {
+        uint32_t sig = *(volatile uint32_t*)(base + 0x5A5E56);
+        if (sig != 0x0000044FUL && sig != 0x0000054CUL) {
             req->detail_code = 0x0900;
             return 22;
         }
@@ -535,7 +553,8 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
     }
     // Path 4: Verified Static Table (FW 13.52)
     else if (req->fw_version == 0x1352) {
-        if (*(volatile uint32_t*)(base + 0x5B1616) != 0x0000044FUL) {
+        uint32_t sig = *(volatile uint32_t*)(base + 0x5B1616);
+        if (sig != 0x0000044FUL && sig != 0x0000054CUL) {
             req->detail_code = 0x1352;
             return 22;
         }
@@ -553,6 +572,27 @@ static int patch_allowlist(void* thread, struct PatchArgs* args) {
         total_offsets = 12;
         req->is_dynamic = 0;
         req->pair_count = 6;
+    }
+    // Path 5: Verified Static Table (FW 13.02 - courtesy of @Pomashtain)
+    else if (req->fw_version == 0x1302) {
+        uint32_t sig = *(volatile uint32_t*)(base + 0x5B0DD6);
+        if (sig != 0x0000044FUL && sig != 0x0000054CUL) {
+            req->detail_code = 0x1302;
+            return 22;
+        }
+        lock_off = 0x5A6BB0;
+        unlock_off = 0x5A6C30;
+        const uint32_t static_1302[10] = {
+            0x5B0DD6, 0x5B0E06,
+            0x5B1646, 0x5B1679,
+            0x5B5408, 0x5B5FFA,
+            0x5B57BD, 0x5B5C9E,
+            0x5B583B, 0x5B5D2E
+        };
+        for (int i = 0; i < 10; ++i) active_offsets[i] = static_1302[i];
+        total_offsets = 10;
+        req->is_dynamic = 0;
+        req->pair_count = 5;
     }
     // Path 3: Safe Contextual AOB Scanner for unlisted firmwares (11.00, 9.00, 10.xx, etc.)
     else {
@@ -682,6 +722,7 @@ struct CapacityRequest {
     uint32_t original;
     uint32_t lock_off;
     uint32_t unlock_off;
+    uint32_t ctx_off;
 };
 
 struct CapacityArgs {
@@ -697,7 +738,7 @@ static int controller_capacity(void* thread, struct CapacityArgs* args) {
     if ((base >> 48) != 0xFFFF || (base & 0x3FFF) || !args || !args->request) return 22;
 
     struct CapacityRequest* r = args->request;
-    if (!r->address || (r->address >> 48) || r->restore > 1) return 22;
+    if (!r->address || (r->address >> 48) || r->restore > 1 || !r->ctx_off) return 22;
 
     int (*lock)(void) = r->lock_off ? (void*)(base + r->lock_off) : NULL;
     int (*unlock)(int) = r->unlock_off ? (void*)(base + r->unlock_off) : NULL;
@@ -712,10 +753,10 @@ static int controller_capacity(void* thread, struct CapacityArgs* args) {
 
     int rc = 2; // Link not found
 
-    // Verified context offset 0x2612550 (FW 12.50, 13.02, 13.52)
+    // Verified context offset: 0x2613DB0 (FW 9.00) or 0x2612550 (FW 12.50..13.52).
     // Patch all matching link entries for r->address so a stale link entry from a prior
     // session never shadows a newly allocated link entry on reconnect (Issue #81).
-    uint8_t* context = *(void**)(base + 0x2612550);
+    uint8_t* context = *(void**)(base + r->ctx_off);
     if (context && ((uint64_t)context >> 48) == 0xFFFF) {
         for (uint32_t offset = 0x42A8; offset < 0x185A0; offset += 0x1588) {
             uint8_t* link = context + offset;
@@ -759,14 +800,19 @@ static int controller_capacity(void* thread, struct CapacityArgs* args) {
 
 static int apply_controller_capacity(BtDevice* dev, int restore) {
     if (!dev || !dev->address) return -1;
-    // Strict Firmware Safe Gate (Issues #85, #86, #95 & AGENTS.md Section 2.1):
-    // Offset 0x2612550 is only valid on FW 12.50..13.52. On older firmwares (e.g. FW 9.00, 11.00, 12.00),
-    // never dereference 0x2612550 in Ring 0; return -1 so DualSense operates safely in 10-byte Report 0x01 mode.
-    if (s_current_fw_bcd != 0x1250 &&
-        s_current_fw_bcd != 0x1302 &&
-        s_current_fw_bcd != 0x1304 &&
-        s_current_fw_bcd != 0x1350 &&
-        s_current_fw_bcd != 0x1352) {
+    // Strict Firmware Safe Gate (Issues #85, #86, #95, #99 & AGENTS.md Section 2.1):
+    // Whitelist verified bthid context globals only (0x2613DB0 for FW 9.00, 0x2612550 for FW 12.50..13.52).
+    // All other firmwares never dereference in Ring 0 and operate safely in 10-byte Report 0x01 mode.
+    uint32_t ctx_off = 0;
+    if (s_current_fw_bcd == 0x0900) {
+        ctx_off = 0x2613DB0U;
+    } else if (s_current_fw_bcd == 0x1250 ||
+               s_current_fw_bcd == 0x1302 ||
+               s_current_fw_bcd == 0x1304 ||
+               s_current_fw_bcd == 0x1350 ||
+               s_current_fw_bcd == 0x1352) {
+        ctx_off = 0x2612550U;
+    } else {
         return -1;
     }
     struct CapacityRequest req = {
@@ -774,7 +820,8 @@ static int apply_controller_capacity(BtDevice* dev, int restore) {
         .restore = restore ? 1U : 0U,
         .original = restore ? dev->original_capacity : 0U,
         .lock_off = s_discovered_lock,
-        .unlock_off = s_discovered_unlock
+        .unlock_off = s_discovered_unlock,
+        .ctx_off = ctx_off
     };
     long rc = daemon_syscall(SYS_KEXEC, (long)controller_capacity, (long)&req, 0);
     if (rc == 0) {
@@ -840,8 +887,20 @@ static void bt_write_status_file(void) {
     daemon_sys_mkdir("/data/onefamily", 0777);
     int fd = daemon_sys_open("/data/onefamily/onefamily.status", 0x0001 | 0x0200 | 0x0400, 0666);
     if (fd >= 0) {
-        char buf[1024];
+        char buf[1536];
         int count = bt_driver_connected_count();
+        BtDevice *first_dev = NULL;
+        for (int i = 0; i < BT_MAX_DEVICES; ++i) {
+            if (s_devices[i].connected) {
+                first_dev = &s_devices[i];
+                break;
+            }
+        }
+        int first_slot = first_dev ? vpad_get_assigned_slot_num(first_dev->vpad_slot) : 1;
+        int first_batt = first_dev ? first_dev->battery_pct : 100;
+        int first_chg  = (first_dev && first_dev->battery_status == 1) ? 1 : 0;
+        int first_ext  = (first_dev && (first_dev->extended_mode || first_dev->capacity_patched)) ? 1 : 0;
+
         int offset = snprintf(buf, sizeof(buf),
             "connected = %d\n"
             "type = dualsense_bt\n"
@@ -849,21 +908,29 @@ static void bt_write_status_file(void) {
             "pid = 0x0CE6\n"
             "name = DualSense Wireless\n"
             "nbuttons = 16\n"
+            "player_slot = %d\n"
+            "battery_pct = %d\n"
+            "battery_charging = %d\n"
+            "extended_mode = %d\n"
             "count = %d\n",
-            count > 0 ? 1 : 0, count);
+            count > 0 ? 1 : 0,
+            first_slot, first_batt, first_chg, first_ext, count);
 
-        for (int i = 0; i < BT_MAX_DEVICES && offset < (int)sizeof(buf) - 120; ++i) {
+        for (int i = 0; i < BT_MAX_DEVICES && offset < (int)sizeof(buf) - 140; ++i) {
             if (s_devices[i].connected) {
                 int slot = vpad_get_assigned_slot_num(s_devices[i].vpad_slot);
+                int ext = (s_devices[i].extended_mode || s_devices[i].capacity_patched) ? 1 : 0;
                 offset += snprintf(buf + offset, sizeof(buf) - offset,
                     "dev_%d_slot = %d\n"
                     "dev_%d_mac = %llX\n"
                     "dev_%d_battery = %d\n"
-                    "dev_%d_charging = %d\n",
+                    "dev_%d_charging = %d\n"
+                    "dev_%d_extended = %d\n",
                     i, slot,
                     i, (unsigned long long)s_devices[i].address,
                     i, s_devices[i].battery_pct,
-                    i, s_devices[i].battery_status == 1 ? 1 : 0);
+                    i, s_devices[i].battery_status == 1 ? 1 : 0,
+                    i, ext);
             }
         }
         daemon_sys_write(fd, buf, offset);
@@ -1028,6 +1095,9 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
         data = report + 2; // Data payload begins at offset 2
         if (!dev->extended_mode) {
             dev->extended_mode = true;
+            if (dev->connected) {
+                bt_write_status_file();
+            }
         }
     } else {
         if (dev->decode_drops < 5 || (dev->decode_drops % 250 == 0)) {
@@ -1065,14 +1135,19 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
                        (unsigned long long)dev->address, dev->vpad_slot, slot_num);
             vpad_reactivate_slot(dev->vpad_slot);
             dev->last_calibration_attempt = daemon_sys_time_us();
-            if (g_daemon_config.dualsense_bt_mode == 1 && !dev->capacity_patched) {
-                apply_controller_capacity(dev, 0);
+            if (g_daemon_config.dualsense_bt_mode == 1 && !dev->capacity_patched && !dev->capacity_unsupported) {
+                if (apply_controller_capacity(dev, 0) == -1) {
+                    dev->capacity_unsupported = true;
+                }
             }
         } else {
             // New device connection
-            if (vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot) != 0 || dev->vpad_slot < 0) {
-                daemon_log(LOG_LEVEL_WARN, "DualSense BT 0x%llX: no virtual pad slot available",
-                           (unsigned long long)dev->address);
+            int open_rc = vpad_slot_open_dev(VPAD_SOURCE_BT, dev->address, &dev->vpad_slot);
+            if (open_rc != 0 || dev->vpad_slot < 0) {
+                if (open_rc != -16) {
+                    daemon_log(LOG_LEVEL_WARN, "DualSense BT 0x%llX: no virtual pad slot available (rc=%d)",
+                               (unsigned long long)dev->address, open_rc);
+                }
                 dev->vpad_slot = -1;
                 return;
             }
@@ -1086,10 +1161,14 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
 
             if (g_daemon_config.dualsense_bt_mode == 1) {
                 int cap_rc = apply_controller_capacity(dev, 0);
+                dev->last_capacity_attempt = daemon_sys_time_us();
                 if (cap_rc == 0) {
                     daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patched to 78 bytes (orig=%u)",
                                (unsigned long long)dev->address, dev->original_capacity);
                 } else {
+                    if (cap_rc == -1) {
+                        dev->capacity_unsupported = true;
+                    }
                     daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity patch unavailable (rc=%d), operating in safe 10-byte report mode",
                                (unsigned long long)dev->address, cap_rc);
                 }
@@ -1101,6 +1180,21 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
         }
         usb_driver_load_remap_for_bt();
         bt_write_status_file();
+    }
+
+    uint64_t now_cap = daemon_sys_time_us();
+    if (dev->connected && g_daemon_config.dualsense_bt_mode == 1 &&
+        !dev->capacity_patched && !dev->capacity_unsupported &&
+        (dev->last_capacity_attempt == 0 || (now_cap - dev->last_capacity_attempt) >= 1000000ULL)) {
+        dev->last_capacity_attempt = now_cap;
+        int cap_rc = apply_controller_capacity(dev, 0);
+        if (cap_rc == 0) {
+            daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel link capacity re-patched to 78 bytes (orig=%u)",
+                       (unsigned long long)dev->address, dev->original_capacity);
+            bt_write_status_file();
+        } else if (cap_rc == -1) {
+            dev->capacity_unsupported = true;
+        }
     }
 
     dev->last_input_time = daemon_sys_time_us();
@@ -1171,94 +1265,142 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
     // Apply per-controller custom button remap rules (054C_0CE6.ini / 054C_0DF2.ini)
     usb_driver_apply_bt_remap(&ds4);
 
-    // Universal Shortcuts & De-ghosting for DualSense BT (Issues #82, #83, #88, #89)
-    bool share_down = (ds4.buttons & DS4_BUTTON_SHARE) != 0;
+    // Universal Shortcuts & Deferred Share / De-ghosting for DualSense BT (Issues #82, #83, #88, #89, #100)
+    int combo_mod = g_daemon_config.touchpad_combo_modifier;
     uint16_t synth_touch_x = 0;
     uint16_t synth_touch_y = 0;
     bool synth_touch_active = false;
+    uint64_t now_combo = dev->last_input_time;
 
-    if (share_down) {
-        bool combo_matched = false;
-        int rx_delta = (int)ds4.rightStick.x - 128;
-        int ry_delta = (int)ds4.rightStick.y - 128;
+    if (combo_mod == CONFIG_COMBO_MOD_DISABLED) {
+        dev->share_combo_active = false;
+        dev->share_was_down = false;
+        dev->share_hold_forwarded = false;
+        dev->share_tap_until_us = 0;
+    } else {
+        uint32_t mod_bit = (combo_mod == CONFIG_COMBO_MOD_L3) ? DS4_BUTTON_L3 : DS4_BUTTON_SHARE;
+        bool mod_phys_down = (ds4.buttons & mod_bit) != 0;
 
-        // 1. Create + Options -> Center Touchpad Click
-        if (ds4.buttons & DS4_BUTTON_OPTIONS) {
-            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-            ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-            synth_touch_x = 960;
-            synth_touch_y = 470;
-            synth_touch_active = true;
-            combo_matched = true;
-        }
-        // 2. Create + D-Pad Up -> Center Touchpad Click
-        else if (ds4.buttons & DS4_BUTTON_DPAD_UP) {
-            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
-            ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-            synth_touch_x = 960;
-            synth_touch_y = 470;
-            synth_touch_active = true;
-            combo_matched = true;
-        }
-        // 3. Create + L1 or Create + D-Pad Left -> Left Touchpad Click (Issue #89)
-        else if (ds4.buttons & (DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT)) {
-            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT);
-            ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-            synth_touch_x = 400;
-            synth_touch_y = 470;
-            synth_touch_active = true;
-            combo_matched = true;
-        }
-        // 4. Create + R1 or Create + D-Pad Right -> Right Touchpad Click (Issue #89)
-        else if (ds4.buttons & (DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT)) {
-            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT);
-            ds4.buttons |= DS4_BUTTON_TOUCHPAD;
-            synth_touch_x = 1520;
-            synth_touch_y = 470;
-            synth_touch_active = true;
-            combo_matched = true;
-        }
-        // 5. Create + D-Pad Down -> PS Button
-        else if (ds4.buttons & DS4_BUTTON_DPAD_DOWN) {
-            ds4.buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-            ds4.buttons |= DS4_BUTTON_PS;
-            combo_matched = true;
-        }
-        // 6. Create + Right Stick -> Directional Capacitive Touchpad Swipe (Issues #82, #83, #88)
-        else if (rx_delta > 45 || rx_delta < -45 || ry_delta > 45 || ry_delta < -45) {
-            ds4.buttons &= ~DS4_BUTTON_SHARE;
-            ds4.rightStick.x = 128;
-            ds4.rightStick.y = 128;
-            uint32_t phase = (uint32_t)((dev->last_input_time / 1000ULL) % 180ULL);
-            int abs_rx = rx_delta < 0 ? -rx_delta : rx_delta;
-            int abs_ry = ry_delta < 0 ? -ry_delta : ry_delta;
-            if (abs_rx >= abs_ry) {
-                synth_touch_y = 470;
-                if (rx_delta > 0) {
-                    synth_touch_x = (uint16_t)(360 + (phase * 1200) / 180);
-                } else {
-                    synth_touch_x = (uint16_t)(1560 - (phase * 1200) / 180);
+        if (combo_mod == CONFIG_COMBO_MOD_SHARE) {
+            if (mod_phys_down && !dev->share_was_down) {
+                dev->share_was_down = true;
+                dev->share_down_since_us = now_combo;
+                dev->share_combo_active = false;
+                dev->share_hold_forwarded = false;
+                dev->share_tap_until_us = 0;
+            } else if (!mod_phys_down && dev->share_was_down) {
+                dev->share_was_down = false;
+                if (!dev->share_combo_active && !dev->share_hold_forwarded) {
+                    dev->share_tap_until_us = now_combo + 80000ULL;
                 }
-            } else {
-                synth_touch_x = 960;
-                if (ry_delta > 0) {
-                    synth_touch_y = (uint16_t)(170 + (phase * 600) / 180);
-                } else {
-                    synth_touch_y = (uint16_t)(770 - (phase * 600) / 180);
+                dev->share_combo_active = false;
+                dev->share_hold_forwarded = false;
+            }
+        } else {
+            dev->share_was_down = false;
+            dev->share_hold_forwarded = false;
+            dev->share_tap_until_us = 0;
+        }
+
+        if (mod_phys_down) {
+            bool eval_combos = (combo_mod == CONFIG_COMBO_MOD_L3) || !dev->share_hold_forwarded;
+            bool combo_matched = false;
+            if (eval_combos) {
+                int rx_delta = (int)ds4.rightStick.x - 128;
+                int ry_delta = (int)ds4.rightStick.y - 128;
+
+                // 1. Modifier + Options -> Center Touchpad Click
+                if (ds4.buttons & DS4_BUTTON_OPTIONS) {
+                    ds4.buttons &= ~(mod_bit | DS4_BUTTON_OPTIONS);
+                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                    synth_touch_x = 960;
+                    synth_touch_y = 470;
+                    synth_touch_active = true;
+                    combo_matched = true;
+                }
+                // 2. Modifier + D-Pad Up -> Center Touchpad Click
+                else if (ds4.buttons & DS4_BUTTON_DPAD_UP) {
+                    ds4.buttons &= ~(mod_bit | DS4_BUTTON_DPAD_UP);
+                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                    synth_touch_x = 960;
+                    synth_touch_y = 470;
+                    synth_touch_active = true;
+                    combo_matched = true;
+                }
+                // 3. Modifier + L1 or D-Pad Left -> Left Touchpad Click (Issue #89)
+                else if (ds4.buttons & (DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT)) {
+                    ds4.buttons &= ~(mod_bit | DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT);
+                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                    synth_touch_x = 400;
+                    synth_touch_y = 470;
+                    synth_touch_active = true;
+                    combo_matched = true;
+                }
+                // 4. Modifier + R1 or D-Pad Right -> Right Touchpad Click (Issue #89)
+                else if (ds4.buttons & (DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT)) {
+                    ds4.buttons &= ~(mod_bit | DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT);
+                    ds4.buttons |= DS4_BUTTON_TOUCHPAD;
+                    synth_touch_x = 1520;
+                    synth_touch_y = 470;
+                    synth_touch_active = true;
+                    combo_matched = true;
+                }
+                // 5. Modifier + D-Pad Down -> PS Button
+                else if (ds4.buttons & DS4_BUTTON_DPAD_DOWN) {
+                    ds4.buttons &= ~(mod_bit | DS4_BUTTON_DPAD_DOWN);
+                    ds4.buttons |= DS4_BUTTON_PS;
+                    combo_matched = true;
+                }
+                // 6. Modifier + Right Stick -> Directional Capacitive Touchpad Swipe (Issues #82, #83, #88)
+                else if (rx_delta > 45 || rx_delta < -45 || ry_delta > 45 || ry_delta < -45) {
+                    ds4.buttons &= ~mod_bit;
+                    ds4.rightStick.x = 128;
+                    ds4.rightStick.y = 128;
+                    uint32_t phase = (uint32_t)((dev->last_input_time / 1000ULL) % 180ULL);
+                    int abs_rx = rx_delta < 0 ? -rx_delta : rx_delta;
+                    int abs_ry = ry_delta < 0 ? -ry_delta : ry_delta;
+                    if (abs_rx >= abs_ry) {
+                        synth_touch_y = 470;
+                        if (rx_delta > 0) {
+                            synth_touch_x = (uint16_t)(360 + (phase * 1200) / 180);
+                        } else {
+                            synth_touch_x = (uint16_t)(1560 - (phase * 1200) / 180);
+                        }
+                    } else {
+                        synth_touch_x = 960;
+                        if (ry_delta > 0) {
+                            synth_touch_y = (uint16_t)(170 + (phase * 600) / 180);
+                        } else {
+                            synth_touch_y = (uint16_t)(770 - (phase * 600) / 180);
+                        }
+                    }
+                    synth_touch_active = true;
+                    combo_matched = true;
                 }
             }
-            synth_touch_active = true;
-            combo_matched = true;
-        }
 
-        if (combo_matched) {
-            dev->share_combo_active = true;
-        } else if (dev->share_combo_active) {
-            // Asynchronous release de-ghosting: suppress Share/Create
-            ds4.buttons &= ~DS4_BUTTON_SHARE;
+            if (combo_matched) {
+                dev->share_combo_active = true;
+            } else if (dev->share_combo_active) {
+                // Asynchronous release de-ghosting
+                ds4.buttons &= ~mod_bit;
+            } else if (combo_mod == CONFIG_COMBO_MOD_SHARE && !dev->share_hold_forwarded) {
+                if ((now_combo - dev->share_down_since_us) >= 600000ULL) {
+                    dev->share_hold_forwarded = true;
+                } else {
+                    ds4.buttons &= ~DS4_BUTTON_SHARE;
+                }
+            }
+        } else {
+            dev->share_combo_active = false;
+            if (combo_mod == CONFIG_COMBO_MOD_SHARE && dev->share_tap_until_us != 0) {
+                if (now_combo < dev->share_tap_until_us) {
+                    ds4.buttons |= DS4_BUTTON_SHARE;
+                } else {
+                    dev->share_tap_until_us = 0;
+                }
+            }
         }
-    } else {
-        dev->share_combo_active = false;
     }
 
     ds4.connected = 1;
@@ -1290,14 +1432,21 @@ static void decode_dualsense_bt_report(BtDevice* dev, const uint8_t* report, siz
             dev->low_battery_notified = false;
         }
 
-        static uint64_t s_last_battery_update = 0;
-        if (s_last_battery_update == 0 || dev->last_input_time - s_last_battery_update >= 30000000ULL) { // Immediate first write, then every 30s
-            s_last_battery_update = dev->last_input_time;
+        bool batt_changed = ((int)battery_pct != dev->last_logged_battery_pct ||
+                             battery_status != dev->last_logged_battery_status);
+        if (batt_changed) {
+            dev->last_logged_battery_pct = (int)battery_pct;
+            dev->last_logged_battery_status = battery_status;
+            dev->last_status_write_us = dev->last_input_time;
             bt_write_status_file();
             daemon_log(LOG_LEVEL_INFO, "DualSense BT 0x%llX Battery: %d%% (status=%s)",
                        (unsigned long long)dev->address,
                        battery_pct,
                        battery_status == 1 ? "Charging" : (battery_status == 2 ? "Full" : "Discharging"));
+        } else if (dev->last_status_write_us == 0 ||
+                   (dev->last_input_time - dev->last_status_write_us) >= 30000000ULL) {
+            dev->last_status_write_us = dev->last_input_time;
+            bt_write_status_file();
         }
 
         float dt = 0.0f;
@@ -1359,10 +1508,10 @@ static void bt_check_timeouts(void) {
         // Just went quiet: mark away, hold pad/account, send neutral sample
         int player = dev->vpad_slot >= 0 ? vpad_get_assigned_slot_num(dev->vpad_slot) : 0;
         daemon_log(LOG_LEVEL_INFO,
-                   "controller_away: DualSense BT 0x%llX quiet %llu ms, holding Slot %d (Player %d)",
+                   "controller_away: DualSense BT 0x%llX quiet %llu ms, holding Slot %d (Player %d, last_ev=0x%02X, last_rc=%ld, ext=%d)",
                    (unsigned long long)dev->address,
                    (unsigned long long)((now - dev->last_input_time) / 1000ULL),
-                   dev->vpad_slot, player);
+                   dev->vpad_slot, player, dev->last_ev_type, dev->last_ioctl_rc, dev->extended_mode ? 1 : 0);
         bt_dev_mark_away(dev, now);
         bt_write_status_file();
     }
@@ -1447,6 +1596,23 @@ void bt_driver_poll_step(void) {
             }
             dev->last_pad_data.connected = 1;
             dev->last_pad_data.timestamp = now_us;
+
+            if (dev->connected && g_daemon_config.touchpad_combo_modifier == CONFIG_COMBO_MOD_SHARE) {
+                if (dev->share_tap_until_us != 0) {
+                    if (now_us < dev->share_tap_until_us) {
+                        dev->last_pad_data.buttons |= DS4_BUTTON_SHARE;
+                    } else {
+                        dev->share_tap_until_us = 0;
+                        dev->last_pad_data.buttons &= ~DS4_BUTTON_SHARE;
+                    }
+                } else if (dev->share_was_down && !dev->share_combo_active) {
+                    if (dev->share_hold_forwarded || (now_us - dev->share_down_since_us) >= 600000ULL) {
+                        dev->share_hold_forwarded = true;
+                        dev->last_pad_data.buttons |= DS4_BUTTON_SHARE;
+                    }
+                }
+            }
+
             vpad_send_data_slot(dev->vpad_slot, &dev->last_pad_data);
         }
     }
@@ -1492,14 +1658,19 @@ void bt_driver_poll_step(void) {
                 }
 
                 if (ev_type == 0x18 || ev_type == 0x19) {
+                    daemon_log(LOG_LEVEL_INFO, "DualSense BT (0x%llX): kernel connect event (ev_type=0x%02X)",
+                               (unsigned long long)address, ev_type);
                     BtDevice *existing = bt_dev_find(address);
                     if (existing) {
                         existing->calibration_requested = false;
                         existing->extended_mode = false;
                         existing->initialized_output = false;
                         existing->capacity_patched = false;
+                        existing->capacity_unsupported = false;
+                        existing->last_capacity_attempt = 0;
                         existing->output_errors = 0;
                         existing->output_unsupported = false;
+                        existing->last_ev_type = ev_type;
                     }
                 }
 
@@ -1514,10 +1685,19 @@ void bt_driver_poll_step(void) {
                     } req = { address, report, sizeof(report), 0 };
 
                     long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
-                    if (result <= 0 || result > (long)sizeof(report)) break;
+                    if (result <= 0 || result > (long)sizeof(report)) {
+                        BtDevice *cur = bt_dev_find(address);
+                        if (cur) {
+                            cur->last_ev_type = ev_type;
+                            if (drain == 0) cur->last_ioctl_rc = result;
+                        }
+                        break;
+                    }
 
                     BtDevice* dev = bt_dev_acquire(address);
                     if (!dev) break;
+                    dev->last_ev_type = ev_type;
+                    dev->last_ioctl_rc = result;
 
                     if (drain > 0 && result == dev->last_raw_len &&
                         memcmp(report, dev->last_raw_report, (size_t)result) == 0) {
@@ -1575,6 +1755,7 @@ void bt_driver_poll_step(void) {
         } req = { dev->address, report, sizeof(report), 0 };
 
         long result = daemon_syscall(SYS_IOCTL, s_bt_fd, 0x80206233UL, (long)&req);
+        dev->last_ioctl_rc = result;
         if (result > 0 && result <= (long)sizeof(report)) {
             if (result != dev->last_raw_len || memcmp(report, dev->last_raw_report, (size_t)result) != 0) {
                 memcpy(dev->last_raw_report, report, (size_t)result);
@@ -1834,21 +2015,31 @@ static void bt_send_rumble_dev(BtDevice* dev, uint8_t large, uint8_t small, cons
 
         // 1. Adaptive Trigger Effects (calibrated physical presets for DualSense Simple Modes)
         int trig = g_daemon_config.dualsense_trigger_mode;
+        int target = g_daemon_config.dualsense_trigger_target; // 0=Both, 1=R2 Only, 2=L2 Only
+        uint8_t eff[4] = { 0x05, 0x00, 0x00, 0x00 };
         if (trig == 1) {
             // Hair Trigger: firm snap click between ~12% (0x20) and ~31% (0x50) of travel at full strength (0xFF)
-            out[13] = 0x02; out[14] = 0x20; out[15] = 0x50; out[16] = 0xFF;
-            out[24] = 0x02; out[25] = 0x20; out[26] = 0x50; out[27] = 0xFF;
+            eff[0] = 0x02; eff[1] = 0x20; eff[2] = 0x50; eff[3] = 0xFF;
         } else if (trig == 2) {
             // Continuous Resistance: medium resistance (100/255 = 0x64) over the full travel
-            out[13] = 0x01; out[14] = 0x00; out[15] = 0x64;
-            out[24] = 0x01; out[25] = 0x00; out[26] = 0x64;
+            eff[0] = 0x01; eff[1] = 0x00; eff[2] = 0x64; eff[3] = 0x00;
         } else if (trig == 3) {
             // Vibration / Pulsation: 12 Hz (0x0C) frequency, amplitude 200/255 (0xC8)
-            out[13] = 0x06; out[14] = 0x0C; out[15] = 0xC8; out[16] = 0x00;
-            out[24] = 0x06; out[25] = 0x0C; out[26] = 0xC8; out[27] = 0x00;
+            eff[0] = 0x06; eff[1] = 0x0C; eff[2] = 0xC8; eff[3] = 0x00;
+        } else if (trig == 4) {
+            // End-Stop Resistance: hard tactile wall starting at ~63% (0xA0) at maximum force (0xFF)
+            eff[0] = 0x01; eff[1] = 0xA0; eff[2] = 0xFF; eff[3] = 0x00;
+        }
+
+        if (trig > 0 && (target == 0 || target == 1)) {
+            out[13] = eff[0]; out[14] = eff[1]; out[15] = eff[2]; out[16] = eff[3];
         } else {
-            // Standard / Off: mode 0x05 actively releases the motor and resets gears
             out[13] = 0x05;
+        }
+
+        if (trig > 0 && (target == 0 || target == 2)) {
+            out[24] = eff[0]; out[25] = eff[1]; out[26] = eff[2]; out[27] = eff[3];
+        } else {
             out[24] = 0x05;
         }
 

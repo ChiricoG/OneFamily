@@ -11,8 +11,9 @@ struct DualSenseDeviceInfo {
     std::string mac;
     int battery_pct;
     bool battery_charging;
+    bool extended_mode;
 
-    DualSenseDeviceInfo() : slot(1), player_slot(1), user_name("Player 1"), mac(""), battery_pct(100), battery_charging(false) {}
+    DualSenseDeviceInfo() : slot(1), player_slot(1), user_name("Player 1"), mac(""), battery_pct(100), battery_charging(false), extended_mode(true) {}
 };
 
 struct HidStatus {
@@ -26,12 +27,13 @@ struct HidStatus {
     std::string user_name;
     int battery_pct;
     bool battery_charging;
+    bool extended_mode;
     int device_count;
     std::vector<DualSenseDeviceInfo> devices;
 
     HidStatus() : connected(false), type("none"), vid(0), pid(0), name("Unknown"),
                   nbuttons(16), player_slot(1), user_name("Player 1"), battery_pct(100),
-                  battery_charging(false), device_count(0) {}
+                  battery_charging(false), extended_mode(true), device_count(0) {}
 };
 
 enum Ds4ActionId {

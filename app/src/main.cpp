@@ -392,7 +392,7 @@ int main() {
         }
 
         if (currentTabId == TAB_SETTINGS) {
-            const int TOTAL_CARDS = 6;
+            const int TOTAL_CARDS = 8;
 
             // Navigate Cards in Settings
             if (justPressed & ORBIS_PAD_BUTTON_UP) {
@@ -417,6 +417,10 @@ int main() {
                     cfg.switch_index ^= 1; changed = true;
                 } else if (selectedCard == 5) {
                     cfg.notifications_index ^= 1; changed = true;
+                } else if (selectedCard == 6) {
+                    cfg.back_button_index ^= 1; changed = true;
+                } else if (selectedCard == 7) {
+                    if (cfg.combo_modifier_index > 0) { cfg.combo_modifier_index--; changed = true; }
                 }
                 if (changed) {
                     configMgr.save();
@@ -443,6 +447,12 @@ int main() {
                     cfg.switch_index ^= 1; changed = true;
                 } else if (selectedCard == 5) {
                     cfg.notifications_index ^= 1; changed = true;
+                } else if (selectedCard == 6) {
+                    cfg.back_button_index ^= 1; changed = true;
+                } else if (selectedCard == 7) {
+                    if (cfg.combo_modifier_index < (int)ConfigManager::COMBO_MODIFIER_OPTIONS.size() - 1) {
+                        cfg.combo_modifier_index++; changed = true;
+                    }
                 }
                 if (changed) {
                     configMgr.save();
@@ -564,7 +574,7 @@ int main() {
             }
         } else if (currentTabId == TAB_DUALSENSE && hasDualSense) {
             // --- DUALSENSE MANAGEMENT TAB ---
-            const int TOTAL_DS_CARDS = 8;
+            const int TOTAL_DS_CARDS = 9;
             if (justPressed & ORBIS_PAD_BUTTON_UP) {
                 dsSelectedCard = (dsSelectedCard + TOTAL_DS_CARDS - 1) % TOTAL_DS_CARDS;
             }
@@ -584,17 +594,19 @@ int main() {
                 } else if (dsSelectedCard == 3) {
                     if (cfg.ds_trigger_mode > 0) { cfg.ds_trigger_mode--; dsChanged = true; }
                 } else if (dsSelectedCard == 4) {
-                    if (cfg.ds_player_leds > 0) { cfg.ds_player_leds--; dsChanged = true; }
+                    if (cfg.ds_trigger_target > 0) { cfg.ds_trigger_target--; dsChanged = true; }
                 } else if (dsSelectedCard == 5) {
+                    if (cfg.ds_player_leds > 0) { cfg.ds_player_leds--; dsChanged = true; }
+                } else if (dsSelectedCard == 6) {
                     if (cfg.ds_speaker_volume >= 5) {
                         cfg.ds_speaker_volume -= 5;
                     } else {
                         cfg.ds_speaker_volume = 0;
                     }
                     dsChanged = true;
-                } else if (dsSelectedCard == 6) {
-                    cfg.ds_mute_action ^= 1; dsChanged = true;
                 } else if (dsSelectedCard == 7) {
+                    cfg.ds_mute_action ^= 1; dsChanged = true;
+                } else if (dsSelectedCard == 8) {
                     cfg.ds_bt_mode ^= 1; dsChanged = true;
                 }
                 if (dsChanged) {
@@ -623,19 +635,23 @@ int main() {
                         cfg.ds_trigger_mode++; dsChanged = true;
                     }
                 } else if (dsSelectedCard == 4) {
+                    if (cfg.ds_trigger_target < (int)ConfigManager::DS_TRIGGER_TARGET_OPTIONS.size() - 1) {
+                        cfg.ds_trigger_target++; dsChanged = true;
+                    }
+                } else if (dsSelectedCard == 5) {
                     if (cfg.ds_player_leds < (int)ConfigManager::DS_PLAYER_LEDS_OPTIONS.size() - 1) {
                         cfg.ds_player_leds++; dsChanged = true;
                     }
-                } else if (dsSelectedCard == 5) {
+                } else if (dsSelectedCard == 6) {
                     if (cfg.ds_speaker_volume <= 95) {
                         cfg.ds_speaker_volume += 5;
                     } else {
                         cfg.ds_speaker_volume = 100;
                     }
                     dsChanged = true;
-                } else if (dsSelectedCard == 6) {
-                    cfg.ds_mute_action ^= 1; dsChanged = true;
                 } else if (dsSelectedCard == 7) {
+                    cfg.ds_mute_action ^= 1; dsChanged = true;
+                } else if (dsSelectedCard == 8) {
                     cfg.ds_bt_mode ^= 1; dsChanged = true;
                 }
                 if (dsChanged) {
@@ -645,7 +661,7 @@ int main() {
             }
 
             // Toggle Mute on SQUARE when on Speaker Volume card
-            if ((justPressed & ORBIS_PAD_BUTTON_SQUARE) && dsSelectedCard == 5) {
+            if ((justPressed & ORBIS_PAD_BUTTON_SQUARE) && dsSelectedCard == 6) {
                 if (cfg.ds_speaker_volume > 0) {
                     cfg.ds_speaker_volume = 0;
                 } else {

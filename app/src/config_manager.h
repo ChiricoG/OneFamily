@@ -18,13 +18,17 @@ struct AppConfig {
     int rumble_index;        // 0 = Enabled, 1 = Disabled
     int switch_index;        // 0 = Positional, 1 = By Letter
     int notifications_index; // 0 = Enabled, 1 = Disabled
+    int back_button_index;   // 0 = Share, 1 = Touchpad Click
+    int combo_modifier_index;// 0 = Share (Deferred), 1 = L3 Click, 2 = Disabled
+    int disable_speaker;     // 0 = Enabled, 1 = Mute USB DS4 Speaker (INI-only)
 
     // [DualSense]
     int ds_bt_mode;         // 0=Safe Mode (10-byte Report 0x01), 1=Extended Mode (78-byte Report 0x31)
     int ds_lightbar_mode;   // 0=Game Sync, 1=Static Color, 2=Battery, 3=Off
     int ds_lightbar_color;  // 0=PlayStation Blue, 1=Red, 2=Green, 3=Purple, 4=Cyan, 5=White
     int ds_brightness;      // 0=High, 1=Medium, 2=Low
-    int ds_trigger_mode;    // 0=Standard / Off, 1=Hair Trigger, 2=Resistance, 3=Vibration
+    int ds_trigger_mode;    // 0=Standard / Off, 1=Hair Trigger, 2=Resistance, 3=Vibration, 4=End-Stop Resistance
+    int ds_trigger_target;  // 0=Both (L2+R2), 1=R2 Only, 2=L2 Only
     int ds_player_leds;     // 0=Player Slot, 1=All On, 2=Off
     int ds_mute_action;     // 0=Default, 1=Touchpad Click
     int ds_speaker_volume;  // 0..100 (Default: 80)
@@ -40,11 +44,15 @@ struct AppConfig {
         rumble_index = 0;        // Enabled
         switch_index = 0;        // Positional
         notifications_index = 0; // Enabled
+        back_button_index = 0;   // Share
+        combo_modifier_index = 0;// Share (Deferred)
+        disable_speaker = 0;     // Enabled
         ds_bt_mode = 1;          // Extended Mode (78-byte Report 0x31)
         ds_lightbar_mode = 0;
         ds_lightbar_color = 0;
         ds_brightness = 0;
         ds_trigger_mode = 0;
+        ds_trigger_target = 0;
         ds_player_leds = 0;
         ds_mute_action = 0;
         ds_speaker_volume = 80;
@@ -61,6 +69,8 @@ public:
     static const std::vector<std::string> RUMBLE_OPTIONS;
     static const std::vector<std::string> SWITCH_OPTIONS;
     static const std::vector<std::string> NOTIFICATIONS_OPTIONS;
+    static const std::vector<std::string> BACK_BUTTON_OPTIONS;
+    static const std::vector<std::string> COMBO_MODIFIER_OPTIONS;
 
     // DualSense Options
     static const std::vector<std::string> DS_BT_MODE_OPTIONS;
@@ -68,6 +78,7 @@ public:
     static const std::vector<std::string> DS_COLOR_OPTIONS;
     static const std::vector<std::string> DS_BRIGHTNESS_OPTIONS;
     static const std::vector<std::string> DS_TRIGGER_OPTIONS;
+    static const std::vector<std::string> DS_TRIGGER_TARGET_OPTIONS;
     static const std::vector<std::string> DS_PLAYER_LEDS_OPTIONS;
     static const std::vector<std::string> DS_MUTE_OPTIONS;
 

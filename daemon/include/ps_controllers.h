@@ -39,7 +39,6 @@ static inline int is_ds4_compatible_controller(uint16_t vid, uint16_t pid) {
     }
     if (vid == 0x0C12) return 1; // Armor3 / Zeroplus
     if (vid == 0x7545) return 1; // Brook converters & adapters
-    if (vid == 0x20D6 && (pid == 0xA711 || pid == 0xA712 || pid == 0xA713)) return 1; // PowerA PS4
     if (vid == 0x24C6 && (pid == 0x5501 || pid == 0x5502 || pid == 0x5503)) return 1; // Thrustmaster / PowerA
     if (vid == 0x044F && (pid == 0xB300 || pid == 0xB315 || pid == 0xD007)) return 1; // Thrustmaster PS4
     if (vid == 0x2C22) return 1; // Qanba PS4

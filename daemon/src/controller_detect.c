@@ -18,8 +18,31 @@
 #define VICTRIX_PRO_BFG_XBOX_PID    0x024C
 
 static const uint16_t s_xboxone_pids[] = {
-    0x02D1, 0x02DD, 0x02E3, 0x02EA, 0x0B00, 0x0B0A, 0x0B12
+    0x02D1, 0x02DD, 0x02E3, 0x02EA, 0x0B00, 0x0B0A, 0x0B12, 0x0B20, 0x0B22
 };
+
+typedef struct {
+    uint16_t vid;
+    uint16_t pid;
+} LoggedVidPid;
+
+#define MAX_LOGGED_SKIP_DEVS 16
+static LoggedVidPid s_logged_vid_pids[MAX_LOGGED_SKIP_DEVS];
+static int s_logged_vid_pid_count = 0;
+
+static int should_log_vid_pid_once(uint16_t vid, uint16_t pid) {
+    for (int i = 0; i < s_logged_vid_pid_count; i++) {
+        if (s_logged_vid_pids[i].vid == vid && s_logged_vid_pids[i].pid == pid) {
+            return 0;
+        }
+    }
+    if (s_logged_vid_pid_count < MAX_LOGGED_SKIP_DEVS) {
+        s_logged_vid_pids[s_logged_vid_pid_count].vid = vid;
+        s_logged_vid_pids[s_logged_vid_pid_count].pid = pid;
+        s_logged_vid_pid_count++;
+    }
+    return 1;
+}
 
 static int is_xone_pid(uint16_t pid) {
     for (size_t i = 0; i < sizeof(s_xboxone_pids) / sizeof(s_xboxone_pids[0]); i++) {
@@ -87,6 +110,7 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
             uint8_t ep_in = 0;
             uint8_t ep_out = 0;
             uint8_t interval = 0;
+            uint16_t max_pkt = 0;
             for (int k = 0; k < alt->bNumEndpoints; k++) {
                 const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
                 if ((ep->bmAttributes & EP_XFER_MASK) != EP_XFER_INTERRUPT) {
@@ -96,6 +120,7 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
                     if (ep_in == 0) {
                         ep_in = ep->bEndpointAddress;
                         interval = ep->bInterval;
+                        max_pkt = ep->wMaxPacketSize;
                     }
                 } else {
                     if (ep_out == 0) ep_out = ep->bEndpointAddress;
@@ -109,13 +134,14 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
             }
 
             memset(out, 0, sizeof(*out));
-            out->type          = type;
-            out->interface_num = alt->bInterfaceNumber;
-            out->alt_setting   = alt->bAlternateSetting;
-            out->ep_in         = ep_in;
-            out->ep_out        = ep_out;
-            out->bInterval     = interval;
-            out->is_wireless   = is_wireless;
+            out->type           = type;
+            out->interface_num  = alt->bInterfaceNumber;
+            out->alt_setting    = alt->bAlternateSetting;
+            out->ep_in          = ep_in;
+            out->ep_out         = ep_out;
+            out->bInterval      = interval;
+            out->wMaxPacketSize = max_pkt;
+            out->is_wireless    = is_wireless;
             out->kbd_interface_num = 0xFF;
             found = 1;
         }
@@ -139,24 +165,30 @@ int controller_detect_by_descriptor(libusb_device* dev, DetectedController* out)
     return found;
 }
 
-static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* out) {
+static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* out, int verbose) {
     if (!dev || !out) return 0;
 
     struct libusb_config_descriptor* cfg = NULL;
     if (usbd_get_active_config_descriptor(dev, &cfg) != 0 || !cfg) {
-        daemon_log(LOG_LEVEL_WARN, "DualSense: usbd_get_active_config_descriptor returned error or NULL");
+        if (verbose) {
+            daemon_log(LOG_LEVEL_WARN, "DualSense: usbd_get_active_config_descriptor returned error or NULL");
+        }
         return 0;
     }
 
-    daemon_log(LOG_LEVEL_INFO, "DualSense Config: bNumInterfaces=%d", cfg->bNumInterfaces);
+    if (verbose) {
+        daemon_log(LOG_LEVEL_INFO, "DualSense Config: bNumInterfaces=%d", cfg->bNumInterfaces);
+    }
     int found = 0;
     for (int i = 0; i < cfg->bNumInterfaces; i++) {
         const struct libusb_interface* intf = &cfg->interface[i];
         for (int a = 0; a < intf->num_altsetting; a++) {
             const struct libusb_interface_descriptor* alt = &intf->altsetting[a];
-            daemon_log(LOG_LEVEL_INFO, "DualSense IF %d (alt %d): class=0x%02X subclass=0x%02X proto=0x%02X ep_count=%d",
-                       alt->bInterfaceNumber, alt->bAlternateSetting, alt->bInterfaceClass,
-                       alt->bInterfaceSubClass, alt->bInterfaceProtocol, alt->bNumEndpoints);
+            if (verbose) {
+                daemon_log(LOG_LEVEL_INFO, "DualSense IF %d (alt %d): class=0x%02X subclass=0x%02X proto=0x%02X ep_count=%d",
+                           alt->bInterfaceNumber, alt->bAlternateSetting, alt->bInterfaceClass,
+                           alt->bInterfaceSubClass, alt->bInterfaceProtocol, alt->bNumEndpoints);
+            }
 
             if (alt->bInterfaceClass != USB_CLASS_HID) continue;
 
@@ -165,8 +197,10 @@ static int detect_dualsense_endpoints(libusb_device* dev, DetectedController* ou
             uint8_t interval = 0;
             for (int k = 0; k < alt->bNumEndpoints; k++) {
                 const struct libusb_endpoint_descriptor* ep = &alt->endpoint[k];
-                daemon_log(LOG_LEVEL_INFO, "  DualSense HID EP [%d]: addr=0x%02X attr=0x%02X maxPkt=%d",
-                           k, ep->bEndpointAddress, ep->bmAttributes, ep->wMaxPacketSize);
+                if (verbose) {
+                    daemon_log(LOG_LEVEL_INFO, "  DualSense HID EP [%d]: addr=0x%02X attr=0x%02X maxPkt=%d",
+                               k, ep->bEndpointAddress, ep->bmAttributes, ep->wMaxPacketSize);
+                }
                 if ((ep->bmAttributes & EP_XFER_MASK) == EP_XFER_INTERRUPT) {
                     if (ep->bEndpointAddress & EP_DIR_IN) {
                         if (ep_in == 0) {
@@ -428,8 +462,10 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
     // If it's a native PS4 controller (Sony VID 0x054C with DS4 PID 0x05C4, 0x09CC, 0x0BA0):
     if (is_native_ps4_controller(desc->idVendor, desc->idProduct)) {
         if (usbd_is_sony_device(dev, desc)) {
-            daemon_log(LOG_LEVEL_INFO, "Skipping native Sony DualShock 4 (VID=0x%04x, PID=0x%04x) for Orbis OS driver",
-                       desc->idVendor, desc->idProduct);
+            if (should_log_vid_pid_once(desc->idVendor, desc->idProduct)) {
+                daemon_log(LOG_LEVEL_INFO, "Skipping native Sony DualShock 4 (VID=0x%04x, PID=0x%04x) for Orbis OS driver",
+                           desc->idVendor, desc->idProduct);
+            }
             return 0;
         } else {
             daemon_log(LOG_LEVEL_INFO, "Third-party controller in DS4 mode (VID=0x%04X PID=0x%04X) — claiming as CONTROLLER_DS4 to prevent 8-minute timeout",
@@ -458,11 +494,14 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
             out->kbd_interface_num = 0xFF;
             return 1;
         } else if (desc->idProduct == SONY_DUALSENSE_PID || desc->idProduct == SONY_DUALSENSE_EDGE_PID) {
+            int verbose = should_log_vid_pid_once(desc->idVendor, desc->idProduct);
             out->type = CONTROLLER_DUALSENSE;
             out->vid = desc->idVendor;
             out->pid = desc->idProduct;
-            if (!detect_dualsense_endpoints(dev, out)) {
-                daemon_log(LOG_LEVEL_WARN, "DualSense descriptor parse failed, using fallback IF=3 EP_IN=0x84 EP_OUT=0x03");
+            if (!detect_dualsense_endpoints(dev, out, verbose)) {
+                if (verbose) {
+                    daemon_log(LOG_LEVEL_WARN, "DualSense descriptor parse failed, using fallback IF=3 EP_IN=0x84 EP_OUT=0x03");
+                }
                 out->interface_num = 3;
                 out->ep_in = 0x84;
                 out->ep_out = 0x03;
@@ -472,8 +511,10 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         // Non-controller Sony peripherals (PlayStation VR Processor Unit 0x09AF/0x09B0,
         // PS Move, Wireless Headset dongles, etc.) must never be hijacked by generic HID detection.
         // Leave them completely untouched for native Orbis OS drivers!
-        daemon_log(LOG_LEVEL_INFO, "Skipping non-controller Sony peripheral (VID:0x%04X PID:0x%04X) for Orbis OS",
-                   desc->idVendor, desc->idProduct);
+        if (should_log_vid_pid_once(desc->idVendor, desc->idProduct)) {
+            daemon_log(LOG_LEVEL_INFO, "Skipping non-controller Sony peripheral (VID:0x%04X PID:0x%04X) for Orbis OS",
+                       desc->idVendor, desc->idProduct);
+        }
         return 0;
     }
 
@@ -556,16 +597,16 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         return 1;
     }
 
-    // 5. Nintendo Switch Third-Party Input-Only (PDP Rock Candy, Hori Taiko Drum / Horipad, etc.)
+    // 5. Nintendo Switch Third-Party Input-Only (PDP Rock Candy, Hori Taiko Drum / Horipad, PowerA, etc.)
     if (is_switch_input_only_controller(desc->idVendor, desc->idProduct)) {
-        out->type = CONTROLLER_SWITCH;
-        out->vid = desc->idVendor;
-        out->pid = desc->idProduct;
         if (!detect_switch_pro_endpoints(dev, out)) {
             out->interface_num = 0;
             out->ep_in = 0x81;
             out->ep_out = 0;
         }
+        out->type = CONTROLLER_SWITCH;
+        out->vid = desc->idVendor;
+        out->pid = desc->idProduct;
         return 1;
     }
 
@@ -587,7 +628,9 @@ int controller_identify(libusb_device* dev, const struct libusb_device_descripto
         // 8BitDo Ultimate 2C 2.4G wireless adapter in idle receiver state (controller turned OFF).
         // The adapter automatically switches to 0x310A (Xbox 360 mode) as soon as the controller is turned ON.
         // Ignore idle receiver to prevent false gamepad claiming and user picker popups!
-        daemon_log(LOG_LEVEL_INFO, "Device 0x2DC8:0x301C is 8BitDo idle wireless receiver (controller OFF) — ignoring");
+        if (should_log_vid_pid_once(desc->idVendor, desc->idProduct)) {
+            daemon_log(LOG_LEVEL_INFO, "Device 0x2DC8:0x301C is 8BitDo idle wireless receiver (controller OFF) — ignoring");
+        }
         return 0;
     }
 

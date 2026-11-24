@@ -386,8 +386,8 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
 
     // 4. Main Content Area
     if (currentTabId == TAB_SETTINGS) {
-        // --- SETTINGS VIEW (6 Cards) ---
-        const int TOTAL_CARDS = 6;
+        // --- SETTINGS VIEW (8 Cards) ---
+        const int TOTAL_CARDS = 8;
         const int VISIBLE_CARDS = 5;
 
         int scrollOffset = 0;
@@ -404,7 +404,9 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
             "Swap Bumpers & Triggers",
             "Controller Vibration",
             "Switch Controller Layout",
-            "System Notifications"
+            "System Notifications",
+            "Back / View Button",
+            "Touchpad Combo Modifier"
         };
 
         const char* cardDescs[TOTAL_CARDS] = {
@@ -413,12 +415,15 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
             "Invert bumper (LB/RB) and trigger (LT/RT) functions.",
             "Enable or disable controller rumble feedback.",
             "Positional (bottom=X) or by letter (A=Circle, B=Cross).",
-            "Show or hide system pop-up notifications on connection."
+            "Show or hide system pop-up notifications on connection.",
+            "Choose action for Xbox View / Back or Switch Minus button.",
+            "Modifier button for virtual touchpad combos (Deferred avoids menu)."
         };
 
         ImageRGBA cardIcons[TOTAL_CARDS] = {
             iconDeadzone, iconDeadzone, iconSwap,
-            iconRumble, iconSwap, iconInfo
+            iconRumble, iconSwap, iconInfo,
+            iconRemap, iconGuide
         };
 
         std::string vals[TOTAL_CARDS];
@@ -428,6 +433,10 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
         vals[3] = ConfigManager::RUMBLE_OPTIONS[cfg.rumble_index];
         vals[4] = ConfigManager::SWITCH_OPTIONS[cfg.switch_index];
         vals[5] = ConfigManager::NOTIFICATIONS_OPTIONS[cfg.notifications_index];
+        vals[6] = (cfg.back_button_index >= 0 && cfg.back_button_index < (int)ConfigManager::BACK_BUTTON_OPTIONS.size())
+                      ? ConfigManager::BACK_BUTTON_OPTIONS[cfg.back_button_index] : "Share";
+        vals[7] = (cfg.combo_modifier_index >= 0 && cfg.combo_modifier_index < (int)ConfigManager::COMBO_MODIFIER_OPTIONS.size())
+                      ? ConfigManager::COMBO_MODIFIER_OPTIONS[cfg.combo_modifier_index] : "Share (Deferred)";
 
         int selectorCenterX = 1380;
 
@@ -460,8 +469,8 @@ void UI::render(Scene2D* scene, const AppConfig& cfg, int currentTabId, int sele
             std::string fullStr = "[   " + vals[cardIndex] + "   ]";
             draw_text_centered(scene, fullStr, fontValue, selectorCenterX, cardY + 54, textColor);
 
-            draw_text(scene, "<", fontValue, selectorCenterX - 130, cardY + 54, arrowColor);
-            draw_text(scene, ">", fontValue, selectorCenterX + 120, cardY + 54, arrowColor);
+            draw_text(scene, "<", fontValue, selectorCenterX - 155, cardY + 54, arrowColor);
+            draw_text(scene, ">", fontValue, selectorCenterX + 140, cardY + 54, arrowColor);
         }
 
         // Vertical Scrollbar on the right of cards
@@ -1321,7 +1330,7 @@ void UI::render_remap(Scene2D* scene, const HidStatus& status, const HidProfile&
 }
 
 void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard, const HidStatus& status) {
-    const int TOTAL_CARDS = 8;
+    const int TOTAL_CARDS = 9;
     const int VISIBLE_CARDS = 5;
 
     int scrollOffset = 0;
@@ -1337,6 +1346,7 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         "Lightbar Color",
         "LED Brightness",
         "Adaptive Triggers",
+        "Trigger Effect Target",
         "Player Indicator LEDs",
         "Internal Speaker Volume",
         "Mute Button Remap",
@@ -1347,7 +1357,8 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         "DualSense lightbar illumination behavior during gameplay.",
         "Static LED color (active when Lightbar Mode is Static Color).",
         "Overall brightness intensity for lightbar and player LEDs.",
-        "Hardware adaptive trigger motor resistance for L2 and R2.",
+        "Hardware adaptive trigger motor resistance preset.",
+        "Apply adaptive trigger resistance to Both, R2 Only, or L2.",
         "White LEDs below the touchpad indicating assigned player slot.",
         "In-game audio volume for the DualSense internal speaker (0% - 100%).",
         "Remap the physical microphone mute button to Touchpad Click.",
@@ -1359,6 +1370,7 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         &iconMode,
         &iconGear,
         &iconSwap,
+        &btnR2,
         &iconMode,
         &iconRumble,
         &iconRemap,
@@ -1382,9 +1394,13 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         cardValues[3] = ConfigManager::DS_TRIGGER_OPTIONS[cfg.ds_trigger_mode];
     } else cardValues[3] = "Standard / Off";
 
+    if (cfg.ds_trigger_target >= 0 && cfg.ds_trigger_target < (int)ConfigManager::DS_TRIGGER_TARGET_OPTIONS.size()) {
+        cardValues[4] = ConfigManager::DS_TRIGGER_TARGET_OPTIONS[cfg.ds_trigger_target];
+    } else cardValues[4] = "Both (L2 + R2)";
+
     if (cfg.ds_player_leds >= 0 && cfg.ds_player_leds < (int)ConfigManager::DS_PLAYER_LEDS_OPTIONS.size()) {
-        cardValues[4] = ConfigManager::DS_PLAYER_LEDS_OPTIONS[cfg.ds_player_leds];
-    } else cardValues[4] = "Player Slot";
+        cardValues[5] = ConfigManager::DS_PLAYER_LEDS_OPTIONS[cfg.ds_player_leds];
+    } else cardValues[5] = "Player Slot";
 
     char volStr[32];
     if (cfg.ds_speaker_volume <= 0) {
@@ -1392,15 +1408,15 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
     } else {
         snprintf(volStr, sizeof(volStr), "%d%%", cfg.ds_speaker_volume);
     }
-    cardValues[5] = volStr;
+    cardValues[6] = volStr;
 
     if (cfg.ds_mute_action >= 0 && cfg.ds_mute_action < (int)ConfigManager::DS_MUTE_OPTIONS.size()) {
-        cardValues[6] = ConfigManager::DS_MUTE_OPTIONS[cfg.ds_mute_action];
-    } else cardValues[6] = "Default";
+        cardValues[7] = ConfigManager::DS_MUTE_OPTIONS[cfg.ds_mute_action];
+    } else cardValues[7] = "Default";
 
     if (cfg.ds_bt_mode >= 0 && cfg.ds_bt_mode < (int)ConfigManager::DS_BT_MODE_OPTIONS.size()) {
-        cardValues[7] = ConfigManager::DS_BT_MODE_OPTIONS[cfg.ds_bt_mode];
-    } else cardValues[7] = "Safe Mode (10-Byte)";
+        cardValues[8] = ConfigManager::DS_BT_MODE_OPTIONS[cfg.ds_bt_mode];
+    } else cardValues[8] = "Safe Mode (10-Byte)";
 
     // Static color preview table
     static const Color colorPreviews[6] = {
@@ -1457,7 +1473,7 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
                 draw_circle_outline(scene, CARD_X + CARD_W - 275, cardY + 48, 7, COLOR_WHITE, 1);
             }
             draw_text_centered(scene, cardValues[cardIdx], fontValue, CARD_X + CARD_W - 165, cardY + 54, COLOR_WHITE);
-        } else if (cardIdx == 5) {
+        } else if (cardIdx == 6) {
             // Speaker Volume Card: draw percentage text + mini volume gauge bar
             draw_text_centered(scene, cardValues[cardIdx], fontValue, CARD_X + CARD_W - 170, cardY + 44, COLOR_WHITE);
             int vBarX = CARD_X + CARD_W - 250;
@@ -1529,7 +1545,7 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
             draw_text(scene, uName, fontCardTitle, BOX_X + 74, itemY + 32, COLOR_WHITE);
 
             char macStr[64];
-            snprintf(macStr, sizeof(macStr), "MAC: %s", dev.mac.c_str());
+            snprintf(macStr, sizeof(macStr), "MAC: %s [%s]", dev.mac.c_str(), dev.extended_mode ? "0x31" : "0x01");
             draw_text(scene, macStr, fontCardDesc, BOX_X + 74, itemY + 54, COLOR_TEXT_DIM);
 
             // Battery % & Charging
@@ -1552,9 +1568,11 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
     } else {
         // Single Controller Connected View
         // 1. Connection Status
-        draw_circle(scene, BOX_X + 36, BOX_Y + 104, 6, Color{ 0, 255, 120 });
+        Color statusColor = status.extended_mode ? Color{ 0, 255, 120 } : Color{ 255, 200, 60 };
+        const char* statusStr = status.extended_mode ? "Connected (Bluetooth 0x31)" : "Connected (Safe Mode 0x01)";
+        draw_circle(scene, BOX_X + 36, BOX_Y + 104, 6, statusColor);
         draw_text(scene, "Status:", fontCardTitle, BOX_X + 54, BOX_Y + 110, COLOR_TEXT_DIM);
-        draw_text(scene, "Connected (Bluetooth 0x31)", fontCardTitle, BOX_X + 130, BOX_Y + 110, Color{ 0, 255, 120 });
+        draw_text(scene, statusStr, fontCardTitle, BOX_X + 130, BOX_Y + 110, statusColor);
 
         // 2. Battery Meter
         draw_text(scene, "Battery Level:", fontCardTitle, BOX_X + 30, BOX_Y + 150, COLOR_WHITE);
@@ -1602,9 +1620,9 @@ void UI::render_dualsense(Scene2D* scene, const AppConfig& cfg, int selectedCard
         draw_text(scene, "Hardware Details:", fontCardTitle, BOX_X + 30, BOX_Y + 350, COLOR_WHITE);
         draw_text(scene, "Vendor ID: 0x054C (Sony Interactive Entertainment)", fontCardDesc, BOX_X + 30, BOX_Y + 378, COLOR_TEXT_DIM);
         draw_text(scene, "Product ID: 0x0CE6 (DualSense Wireless)", fontCardDesc, BOX_X + 30, BOX_Y + 402, COLOR_TEXT_DIM);
-        draw_text(scene, "Transport: Bluetooth 78-byte extended (CRC32)", fontCardDesc, BOX_X + 30, BOX_Y + 426, COLOR_TEXT_DIM);
-        draw_text(scene, "Active Features: Motion (Gyro/Accel), Touchpad", fontCardDesc, BOX_X + 30, BOX_Y + 450, COLOR_TEXT_DIM);
-        draw_text(scene, "Force Feedback: Dual Motors + Trigger Effects", fontCardDesc, BOX_X + 30, BOX_Y + 474, COLOR_TEXT_DIM);
+        draw_text(scene, status.extended_mode ? "Transport: Bluetooth 78-byte extended (CRC32)" : "Transport: Bluetooth 10-byte standard (Safe Mode)", fontCardDesc, BOX_X + 30, BOX_Y + 426, COLOR_TEXT_DIM);
+        draw_text(scene, status.extended_mode ? "Active Features: Motion (Gyro/Accel), Touchpad" : "Active Features: Buttons, Sticks, D-Pad, Triggers", fontCardDesc, BOX_X + 30, BOX_Y + 450, COLOR_TEXT_DIM);
+        draw_text(scene, status.extended_mode ? "Force Feedback: Dual Motors + Trigger Effects" : "Force Feedback: Disabled in Safe Mode (FW/config limit)", fontCardDesc, BOX_X + 30, BOX_Y + 474, COLOR_TEXT_DIM);
         draw_text(scene, "Subsystem: Ring-0 /dev/bt allowlist dynamic patch", fontCardDesc, BOX_X + 30, BOX_Y + 498, COLOR_TEXT_DIM);
     }
 

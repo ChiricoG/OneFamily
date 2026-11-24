@@ -39,6 +39,14 @@ const std::vector<std::string> ConfigManager::NOTIFICATIONS_OPTIONS = {
     "Enabled", "Disabled"
 };
 
+const std::vector<std::string> ConfigManager::BACK_BUTTON_OPTIONS = {
+    "Share", "Touchpad Click"
+};
+
+const std::vector<std::string> ConfigManager::COMBO_MODIFIER_OPTIONS = {
+    "Share (Deferred)", "L3 Click", "Disabled"
+};
+
 const std::vector<std::string> ConfigManager::DS_BT_MODE_OPTIONS = {
     "Safe Mode (10-Byte)", "Extended (78-Byte)"
 };
@@ -56,7 +64,11 @@ const std::vector<std::string> ConfigManager::DS_BRIGHTNESS_OPTIONS = {
 };
 
 const std::vector<std::string> ConfigManager::DS_TRIGGER_OPTIONS = {
-    "Standard / Off", "Hair Trigger (Click)", "Continuous Resistance", "Vibration / Bow"
+    "Standard / Off", "Hair Trigger (Click)", "Continuous Resistance", "Vibration / Bow", "End-Stop Resistance"
+};
+
+const std::vector<std::string> ConfigManager::DS_TRIGGER_TARGET_OPTIONS = {
+    "Both (L2 + R2)", "R2 Only", "L2 Only"
 };
 
 const std::vector<std::string> ConfigManager::DS_PLAYER_LEDS_OPTIONS = {
@@ -175,6 +187,30 @@ bool ConfigManager::load() {
                 } else if (strcasecmp(key.c_str(), "enable_notifications") == 0 || strcasecmp(key.c_str(), "notifications") == 0) {
                     int v = atoi(val.c_str());
                     config.notifications_index = (v != 0) ? 0 : 1; // 0=Enabled (1), 1=Disabled (0)
+                } else if (strcasecmp(key.c_str(), "back_button_action") == 0 ||
+                           strcasecmp(key.c_str(), "view_action") == 0 ||
+                           strcasecmp(key.c_str(), "back_action") == 0) {
+                    if (strcasecmp(val.c_str(), "touchpad") == 0 ||
+                        strcasecmp(val.c_str(), "touchpad_click") == 0 ||
+                        atoi(val.c_str()) == 1) {
+                        config.back_button_index = 1;
+                    } else {
+                        config.back_button_index = 0;
+                    }
+                } else if (strcasecmp(key.c_str(), "touchpad_combo_modifier") == 0 ||
+                           strcasecmp(key.c_str(), "combo_modifier") == 0) {
+                    if (strcasecmp(val.c_str(), "l3") == 0 || atoi(val.c_str()) == 1) {
+                        config.combo_modifier_index = 1;
+                    } else if (strcasecmp(val.c_str(), "disabled") == 0 ||
+                               strcasecmp(val.c_str(), "off") == 0 ||
+                               strcasecmp(val.c_str(), "none") == 0 ||
+                               atoi(val.c_str()) == 2) {
+                        config.combo_modifier_index = 2;
+                    } else {
+                        config.combo_modifier_index = 0;
+                    }
+                } else if (strcasecmp(key.c_str(), "disable_speaker") == 0) {
+                    config.disable_speaker = (atoi(val.c_str()) != 0) ? 1 : 0;
                 } else if (strcasecmp(key.c_str(), "dualsense_bt_mode") == 0 || strcasecmp(key.c_str(), "bt_mode") == 0) {
                     int v = atoi(val.c_str());
                     if (v >= 0 && v < (int)DS_BT_MODE_OPTIONS.size()) config.ds_bt_mode = v;
@@ -190,6 +226,9 @@ bool ConfigManager::load() {
                 } else if (strcasecmp(key.c_str(), "dualsense_trigger_mode") == 0 || strcasecmp(key.c_str(), "trigger_mode") == 0) {
                     int v = atoi(val.c_str());
                     if (v >= 0 && v < (int)DS_TRIGGER_OPTIONS.size()) config.ds_trigger_mode = v;
+                } else if (strcasecmp(key.c_str(), "dualsense_trigger_target") == 0 || strcasecmp(key.c_str(), "trigger_target") == 0) {
+                    int v = atoi(val.c_str());
+                    if (v >= 0 && v < (int)DS_TRIGGER_TARGET_OPTIONS.size()) config.ds_trigger_target = v;
                 } else if (strcasecmp(key.c_str(), "dualsense_player_leds") == 0 || strcasecmp(key.c_str(), "player_leds") == 0) {
                     int v = atoi(val.c_str());
                     if (v >= 0 && v < (int)DS_PLAYER_LEDS_OPTIONS.size()) config.ds_player_leds = v;
@@ -224,6 +263,7 @@ bool ConfigManager::save() {
     int rumble_val = (config.rumble_index == 0) ? 1 : 0;
     int switch_val = (config.switch_index == 0) ? 1 : 0;
     int notify_val = (config.notifications_index == 0) ? 1 : 0;
+    const char* back_val = (config.back_button_index == 1) ? "touchpad" : "share";
 
     int len = snprintf(out, sizeof(out),
         "# OneFamily Daemon - Configuration File\n"
@@ -237,10 +277,13 @@ bool ConfigManager::save() {
         "[General]\n"
         "enable_rumble = %d\n"
         "enable_notifications = %d\n"
+        "back_button_action = %s\n"
+        "disable_speaker = %d\n"
         "\n"
         "[Remap]\n"
         "swap_triggers_bumpers = %d\n"
         "switch_positional_layout = %d\n"
+        "touchpad_combo_modifier = %d\n"
         "\n"
         "[DualSense]\n"
         "dualsense_bt_mode = %d\n"
@@ -248,6 +291,7 @@ bool ConfigManager::save() {
         "dualsense_lightbar_color = %d\n"
         "dualsense_brightness = %d\n"
         "dualsense_trigger_mode = %d\n"
+        "dualsense_trigger_target = %d\n"
         "dualsense_player_leds = %d\n"
         "dualsense_mute_action = %d\n"
         "dualsense_speaker_volume = %d\n",
@@ -255,13 +299,17 @@ bool ConfigManager::save() {
         trigger_val,
         rumble_val,
         notify_val,
+        back_val,
+        config.disable_speaker ? 1 : 0,
         swap_val,
         switch_val,
+        config.combo_modifier_index,
         config.ds_bt_mode,
         config.ds_lightbar_mode,
         config.ds_lightbar_color,
         config.ds_brightness,
         config.ds_trigger_mode,
+        config.ds_trigger_target,
         config.ds_player_leds,
         config.ds_mute_action,
         config.ds_speaker_volume

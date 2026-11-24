@@ -67,6 +67,10 @@ int daemon_sys_unlink(const char *path) {
     return (int)daemon_syscall(10, path);
 }
 
+int daemon_sys_rename(const char *oldpath, const char *newpath) {
+    return (int)daemon_syscall(128, oldpath, newpath);
+}
+
 int daemon_sys_mkdir(const char *path, int mode) {
     return (int)daemon_syscall(136, path, mode);
 }

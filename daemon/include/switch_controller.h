@@ -135,6 +135,12 @@ static inline int is_switch_input_only_controller(uint16_t vid, uint16_t pid) {
             return 1;
         }
     }
+    // PowerA Wired Nintendo Switch Controllers (Issue #112)
+    if (vid == 0x20D6) {
+        if ((pid >= 0xA711 && pid <= 0xA716) || pid == 0xA719) {
+            return 1;
+        }
+    }
 
     return 0;
 }

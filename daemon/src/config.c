@@ -25,6 +25,7 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
     cfg->enable_mode_combo = 1;
     cfg->enable_rumble = 1;
     cfg->enable_homebrew = 1;
+    cfg->disable_speaker = 0;
 
     // [Deadzone]
     cfg->stick_deadzone = 15;        // ~12% deadzone
@@ -33,7 +34,7 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
     // [Remap]
     cfg->swap_triggers_bumpers = 0;
     cfg->switch_positional = 1;
-
+    cfg->touchpad_combo_modifier = CONFIG_COMBO_MOD_SHARE;
 
     // [DualSense]
     cfg->dualsense_bt_mode = 1; // 0 = Safe Mode (Report 0x01, 10 bytes), 1 = Extended Mode (Report 0x31, 78 bytes)
@@ -41,6 +42,7 @@ void daemon_config_init_defaults(DaemonConfig *cfg) {
     cfg->dualsense_lightbar_color = 0;
     cfg->dualsense_brightness = 0;
     cfg->dualsense_trigger_mode = 0;
+    cfg->dualsense_trigger_target = 0;
     cfg->dualsense_player_leds = 0;
     cfg->dualsense_mute_action = 0;
     cfg->dualsense_speaker_volume = 80;
@@ -183,6 +185,8 @@ void daemon_config_load(DaemonConfig *cfg) {
                 cfg->enable_rumble = parse_int(val, 1);
             } else if (str_case_eq(key, "enable_homebrew")) {
                 cfg->enable_homebrew = parse_int(val, 1);
+            } else if (str_case_eq(key, "disable_speaker")) {
+                cfg->disable_speaker = parse_int(val, 0) ? 1 : 0;
             } else if (str_case_eq(key, "stick_deadzone")) {
                 int dz = parse_int(val, 15);
                 if (dz < 0) dz = 0;
@@ -197,6 +201,14 @@ void daemon_config_load(DaemonConfig *cfg) {
                 cfg->swap_triggers_bumpers = parse_int(val, 0);
             } else if (str_case_eq(key, "switch_positional_layout")) {
                 cfg->switch_positional = parse_int(val, 1);
+            } else if (str_case_eq(key, "touchpad_combo_modifier") || str_case_eq(key, "combo_modifier")) {
+                if (str_case_eq(val, "l3") || str_case_eq(val, "1")) {
+                    cfg->touchpad_combo_modifier = CONFIG_COMBO_MOD_L3;
+                } else if (str_case_eq(val, "disabled") || str_case_eq(val, "off") || str_case_eq(val, "none") || str_case_eq(val, "2")) {
+                    cfg->touchpad_combo_modifier = CONFIG_COMBO_MOD_DISABLED;
+                } else {
+                    cfg->touchpad_combo_modifier = CONFIG_COMBO_MOD_SHARE;
+                }
             } else if (str_case_eq(key, "dualsense_bt_mode") || str_case_eq(key, "bt_mode")) {
                 cfg->dualsense_bt_mode = parse_int(val, 0);
             } else if (str_case_eq(key, "dualsense_lightbar_mode") || str_case_eq(key, "lightbar_mode")) {
@@ -206,7 +218,15 @@ void daemon_config_load(DaemonConfig *cfg) {
             } else if (str_case_eq(key, "dualsense_brightness") || str_case_eq(key, "brightness")) {
                 cfg->dualsense_brightness = parse_int(val, 0);
             } else if (str_case_eq(key, "dualsense_trigger_mode") || str_case_eq(key, "trigger_mode")) {
-                cfg->dualsense_trigger_mode = parse_int(val, 0);
+                int tm = parse_int(val, 0);
+                if (tm < 0) tm = 0;
+                if (tm > 4) tm = 4;
+                cfg->dualsense_trigger_mode = tm;
+            } else if (str_case_eq(key, "dualsense_trigger_target") || str_case_eq(key, "trigger_target")) {
+                int tt = parse_int(val, 0);
+                if (tt < 0) tt = 0;
+                if (tt > 2) tt = 2;
+                cfg->dualsense_trigger_target = tt;
             } else if (str_case_eq(key, "dualsense_player_leds") || str_case_eq(key, "player_leds")) {
                 cfg->dualsense_player_leds = parse_int(val, 0);
             } else if (str_case_eq(key, "dualsense_mute_action") || str_case_eq(key, "mute_action")) {
@@ -237,6 +257,7 @@ bool daemon_config_check_reload(DaemonConfig *cfg) {
         old.dualsense_lightbar_color != cfg->dualsense_lightbar_color ||
         old.dualsense_brightness != cfg->dualsense_brightness ||
         old.dualsense_trigger_mode != cfg->dualsense_trigger_mode ||
+        old.dualsense_trigger_target != cfg->dualsense_trigger_target ||
         old.dualsense_player_leds != cfg->dualsense_player_leds ||
         old.dualsense_speaker_volume != cfg->dualsense_speaker_volume
     );

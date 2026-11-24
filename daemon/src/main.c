@@ -95,9 +95,11 @@ int main(int argc, char *argv[]) {
 
     daemon_log(LOG_LEVEL_INFO, "=== Daemon Ready - Entering USB & BT Polling Loop (250 Hz) ===");
 
-    uint32_t loop_count = 0;
+    uint64_t last_vibe_check_us = daemon_sys_time_us();
+    uint64_t last_reload_check_us = last_vibe_check_us;
+    uint64_t last_cfg_check_us = last_vibe_check_us;
 
-    // Main service loop (250 Hz)
+    // Main service loop (250 Hz, 1000 Hz on high-polling USB dongles)
     while (g_running) {
         uint64_t loop_start_us = daemon_sys_time_us();
 
@@ -110,13 +112,17 @@ int main(int argc, char *argv[]) {
         // Poll virtual DS4 rumble from OS/games
         vpad_poll_rumble();
 
-        // Poll companion app vibration test IPC (~50 Hz = every 5 loops)
-        if (++loop_count % 5 == 0) {
+        uint64_t now_us = daemon_sys_time_us();
+
+        // Poll companion app vibration test IPC (every 50 ms)
+        if ((now_us - last_vibe_check_us) >= 50000ULL) {
+            last_vibe_check_us = now_us;
             check_vibe_file();
         }
 
-        // Check if mapping reload was requested by Companion App (~10 Hz = every 25 loops)
-        if (loop_count % 25 == 0) {
+        // Check if mapping reload was requested by Companion App (every 250 ms)
+        if ((now_us - last_reload_check_us) >= 250000ULL) {
+            last_reload_check_us = now_us;
             int reload_fd = daemon_sys_open("/data/onefamily/onefamily.reload", 0 /* O_RDONLY */, 0);
             if (reload_fd < 0) {
                 reload_fd = daemon_sys_open("/user/data/onefamily/onefamily.reload", 0 /* O_RDONLY */, 0);
@@ -135,20 +141,20 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // Periodically check if configuration INI file was updated (every ~1s = 250 loops)
-        if (loop_count % 250 == 0) {
+        // Periodically check if configuration INI file was updated (every 2 s)
+        if ((now_us - last_cfg_check_us) >= 2000000ULL) {
+            last_cfg_check_us = now_us;
             daemon_config_check_reload(&g_daemon_config);
             vpad_check_user_rebind(g_daemon_config.mode);
         }
 
-        // Precision sleep: pace at 1000 Hz (1000 us) when a high-polling USB receiver
-        // (bInterval < 4, e.g. GuliKit KK3 Max 2.4GHz 1000 Hz dongle) is connected,
-        // otherwise pace at 250 Hz (4000 us).
-        uint64_t target_loop_us = (g_usb_state.connected && g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4)
-                                      ? 1000ULL
-                                      : 4000ULL;
+        // Smart sleep: skip redundant usleep when a high-polling USB xfer already paced the tick
+        bool high_poll_usb = (g_usb_state.connected && g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4);
+        uint64_t target_loop_us = high_poll_usb ? 1000ULL : 4000ULL;
         uint64_t elapsed_us = daemon_sys_time_us() - loop_start_us;
-        if (elapsed_us < target_loop_us) {
+        if (!high_poll_usb && elapsed_us < target_loop_us) {
+            daemon_sys_usleep((uint32_t)(target_loop_us - elapsed_us));
+        } else if (high_poll_usb && elapsed_us < 500ULL) {
             daemon_sys_usleep((uint32_t)(target_loop_us - elapsed_us));
         }
     }

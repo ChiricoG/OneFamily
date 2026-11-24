@@ -1214,10 +1214,18 @@ void translator_convert_stadia(const StadiaInputReport* stadia, OrbisPadData* ds
         }
     }
 
-    // Capture (bit 0: 0x01) and Google Assistant (bit 1: 0x02) buttons
-    // Mapped directly to DualShock 4 Touchpad button!
-    if (stadia->buttons_main & 0x03) {
+    // Capture (bit 0: 0x01) -> Right Touchpad Click (PS2 START)
+    // Google Assistant (bit 1: 0x02) -> Left Touchpad Click (PS2 SELECT) (Issue #82)
+    uint16_t stadia_tx = 960;
+    uint16_t stadia_ty = 470;
+    if (stadia->buttons_main & 0x02) {
         ds4_buttons |= DS4_BUTTON_TOUCHPAD;
+        stadia_tx = 400;
+        stadia_ty = 470;
+    } else if (stadia->buttons_main & 0x01) {
+        ds4_buttons |= DS4_BUTTON_TOUCHPAD;
+        stadia_tx = 1520;
+        stadia_ty = 470;
     }
 
     // D-Pad Hat Switch (0=Up, 1=UpRight, 2=Right, 3=DownRight, 4=Down, 5=DownLeft, 6=Left, 7=UpLeft, 8=Release)
@@ -1235,12 +1243,12 @@ void translator_convert_stadia(const StadiaInputReport* stadia, OrbisPadData* ds
 
     ds4->buttons = ds4_buttons;
 
-    // Capacitive Touchpad emulation: when Touchpad button is pressed, emit centered touch point
+    // Capacitive Touchpad emulation: when Touchpad button is pressed, emit dedicated zone coordinates
     if (ds4_buttons & DS4_BUTTON_TOUCHPAD) {
         ds4->touch.fingers = 1;
         ds4->touch.touch[0].finger = 0;
-        ds4->touch.touch[0].x = 960;
-        ds4->touch.touch[0].y = 470;
+        ds4->touch.touch[0].x = stadia_tx;
+        ds4->touch.touch[0].y = stadia_ty;
     } else {
         ds4->touch.fingers = 0;
     }

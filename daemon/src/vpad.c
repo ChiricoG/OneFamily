@@ -87,6 +87,7 @@ typedef struct {
     int last_ps_state;
     uint32_t last_logged_buttons;
     int logged_insert_packets;
+    int logged_ps_transitions;
     uint8_t last_rumble_lg;
     uint8_t last_rumble_sm;
     uint8_t last_raw_rumble_lg;
@@ -145,12 +146,14 @@ static sceUserServiceGetUserName_t          p_sceUserServiceGetUserName = NULL;
 static int s_assigned_slot = 1;
 static char s_assigned_username[64] = "Player 1";
 static int s_last_login_count = -1;
+static uint64_t s_last_add_device_us = 0;
 
 struct ElevateArgs {
     uint64_t target_authid;
     uint64_t original_authid;
     uint8_t target_caps[16];
     uint8_t original_caps[16];
+    uint8_t original_attr;
     int restore;
     int rc;
 };
@@ -194,10 +197,12 @@ static int kernel_elevate_ucred(void* thread, void* uap) {
         if (args->original_authid != 0) {
             *authid_ptr = args->original_authid;
             memcpy(caps_ptr, args->original_caps, 16);
+            *attr_ptr = args->original_attr;
         }
     } else {
         args->original_authid = *authid_ptr;
         memcpy(args->original_caps, caps_ptr, 16);
+        args->original_attr = *attr_ptr;
         if (args->target_authid != 0) {
             *authid_ptr = args->target_authid;
         }
@@ -212,6 +217,7 @@ static int kernel_elevate_ucred(void* thread, void* uap) {
 static int vpad_elevate_creds(int restore) {
     static uint64_t s_orig_authid = 0;
     static uint8_t s_orig_caps[16];
+    static uint8_t s_orig_attr = 0;
     static bool s_is_elevated = false;
 
     if (restore) {
@@ -221,6 +227,7 @@ static int vpad_elevate_creds(int restore) {
         args.restore = 1;
         args.original_authid = s_orig_authid;
         memcpy(args.original_caps, s_orig_caps, 16);
+        args.original_attr = s_orig_attr;
         long ret = daemon_syscall(11 /* SYS_KEXEC */, (long)kernel_elevate_ucred, (long)&args, 0);
         if (ret == 0 && args.rc == 0) {
             s_is_elevated = false;
@@ -240,6 +247,7 @@ static int vpad_elevate_creds(int restore) {
     if (ret == 0 && args.rc == 0) {
         s_orig_authid = args.original_authid;
         memcpy(s_orig_caps, args.original_caps, 16);
+        s_orig_attr = args.original_attr;
         s_is_elevated = true;
         daemon_log(LOG_LEVEL_INFO, "vpad: Credentials elevated to system service (orig_authid=0x%llX -> 0x%llX)",
                    (unsigned long long)s_orig_authid, (unsigned long long)args.target_authid);
@@ -584,9 +592,11 @@ static int vpad_bind_user_slot(int slot_idx, ConfigMode mode, int *out_slot, cha
             vpad_pulse_ps_button_slot(slot_idx);
         }
     } else {
-        daemon_log(LOG_LEVEL_INFO, "Virtual DS4 slot %d awaiting user selection (mode=%d, player=%d) — triggering user picker",
+        daemon_log(LOG_LEVEL_INFO, "Virtual DS4 slot %d awaiting user selection (mode=%d, player=%d)",
                    slot_idx, mode, player_slot);
-        vpad_pulse_ps_button_slot(slot_idx);
+        if (mode != CONFIG_MODE_AUTO) {
+            vpad_pulse_ps_button_slot(slot_idx);
+        }
     }
 
     if (out_slot) *out_slot = player_slot;
@@ -632,7 +642,7 @@ void vpad_pulse_ps_button_slot(int slot) {
     pulse.buttons = DS4_BUTTON_PS;
     pulse.timestamp = now;
     pulse.quat.w = 1.0f;
-    pulse.acell.y = -1.0f;
+    pulse.vel.z = 1.0f;
 
     // Send initial PS button press frame without blocking the polling thread
     p_scePadVirtualDeviceInsertData(g_slots[slot].handle, &pulse);
@@ -713,10 +723,6 @@ void vpad_check_user_rebind(ConfigMode mode) {
 }
 
 static int vpad_ensure_subsystem(void) {
-    // Elevate credentials to SceShellCore system service (authid 0x3800000000010003ULL)
-    // so SceShellCore login manager trusts virtual devices and routes user picker input
-    vpad_elevate_creds(0);
-
     // 1. Mandatory: libSceMbus must be loaded prior to libScePad
     if (g_hMbus == 0) {
         if (load_prx("libSceMbus.sprx", &g_hMbus) < 0) {
@@ -768,13 +774,14 @@ static int vpad_ensure_subsystem(void) {
         if (p_scePadInit) {
             int r = p_scePadInit();
             daemon_log(LOG_LEVEL_INFO, "scePadInit() = 0x%08X", r);
-            if (r != 0) {
-                // If scePadInit failed with elevated credentials, retry with original credentials
-                daemon_log(LOG_LEVEL_WARN, "scePadInit failed (0x%08X), retrying with original credentials...", r);
-                vpad_elevate_creds(1);
-                r = p_scePadInit();
-                daemon_log(LOG_LEVEL_INFO, "scePadInit() with orig creds = 0x%08X", r);
-                vpad_elevate_creds(0);
+            if (r != 0 && (uint32_t)r != 0x80920004U) {
+                // Fallback: temporarily elevate only if native credentials were rejected
+                daemon_log(LOG_LEVEL_WARN, "scePadInit failed (0x%08X), retrying with temporary credential elevation...", r);
+                if (vpad_elevate_creds(0) == 0) {
+                    r = p_scePadInit();
+                    daemon_log(LOG_LEVEL_INFO, "scePadInit() with elevated creds = 0x%08X", r);
+                    vpad_elevate_creds(1);
+                }
             }
         }
         if (p_scePadMbusInit) {
@@ -822,6 +829,12 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
         return -1;
     }
 
+    // Settle guard (Issue #110): prevent consecutive AddDevice calls while SceLoginMgr opens the user picker
+    uint64_t now_open = daemon_sys_time_us();
+    if (s_last_add_device_us != 0 && (now_open - s_last_add_device_us) < 2500000ULL) {
+        return -16; // EBUSY: defer until SceLoginMgr settles
+    }
+
     // Power off physical DS4 before opening the first virtual pad only when explicitly in MERGE mode.
     // In AUTO mode, the native "Who is using this controller?" user picker handles profile selection
     // and automatically replaces Player 1's DS4 only if the user chooses Player 1's account.
@@ -842,9 +855,17 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
     int vHandle = -1;
     int ret = p_scePadVirtualDeviceAddDevice(&param, &vHandle);
     if (ret < 0 || vHandle < 0) {
+        daemon_log(LOG_LEVEL_WARN, "scePadVirtualDeviceAddDevice(type 1) failed for slot %d (0x%08X), retrying with temporary elevation...", slot, ret);
+        if (vpad_elevate_creds(0) == 0) {
+            ret = p_scePadVirtualDeviceAddDevice(&param, &vHandle);
+            vpad_elevate_creds(1);
+        }
+    }
+    if (ret < 0 || vHandle < 0) {
         daemon_log(LOG_LEVEL_ERROR, "scePadVirtualDeviceAddDevice(type 1) failed for slot %d: 0x%08X", slot, ret);
         return ret;
     }
+    s_last_add_device_us = daemon_sys_time_us();
 
     memset(&g_slots[slot], 0, sizeof(VPadSlotState));
     g_slots[slot].handle = vHandle;
@@ -865,8 +886,8 @@ int vpad_slot_open_dev(VPadSource source, uint64_t device_key, int *out_slot) {
         daemon_log(LOG_LEVEL_INFO, "scePadSetConnection(0x%X, 1) = 0x%08X", vHandle, r);
     }
 
-    // Pulse PS button asynchronously to prompt native user picker without blocking the main polling loop
-    vpad_pulse_ps_button_slot(slot);
+    // In AUTO mode, SceLoginMgr opens "Who is using this controller?" natively on SCE_MBUS_EVENT_DEVICE_ADDED;
+    // never emit an automatic PS button pulse here (Issue #101).
     if (g_daemon_config.mode != CONFIG_MODE_AUTO) {
         vpad_bind_user_slot(slot, g_daemon_config.mode, NULL, NULL, 0);
     }
@@ -1006,12 +1027,18 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
         state_changed = true;
     }
 
-    // Rate-limiting: only throttle when pad is completely neutral/untouched (keep-alive at 60 Hz = ~16.6ms)
-    // When buttons or sticks are active, never throttle: stream at full 250 Hz for zero input lag and rhythm games!
+    // Rate-limiting: throttle neutral idle frames at 60 Hz (~16.6ms) to keep SceMbus alive.
+    // Deliver button/touch transitions immediately (0 ms lag), while pacing continuous analog-only updates at 250 Hz (4 ms).
+    bool urgent_change = (!s->has_sent_first ||
+                          data->buttons != s->last_sent_data.buttons ||
+                          data->touch.fingers != s->last_sent_data.touch.fingers ||
+                          s->ps_pulse_active);
     if (is_neutral && !state_changed) {
         if ((now - s->last_send_time_us) < 16666ULL) {
             return 0; // Throttled cleanly when idle
         }
+    } else if (!urgent_change && (now - s->last_send_time_us) < 4000ULL) {
+        return 0; // Pace continuous analog-only updates at 250 Hz
     }
 
     // Sequential rolling counter (1..255, wrapping to 1) adhering to DualShock 4 hardware spec
@@ -1034,13 +1061,13 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
         send_data.timestamp = now;
     }
 
-    // Identity orientation quaternion and downward resting gravity
+    // Identity orientation quaternion and downward resting gravity (OpenOrbis vel = linear accel)
     if (send_data.quat.x == 0.0f && send_data.quat.y == 0.0f &&
         send_data.quat.z == 0.0f && send_data.quat.w == 0.0f) {
         send_data.quat.w = 1.0f;
     }
-    if (send_data.acell.x == 0.0f && send_data.acell.y == 0.0f && send_data.acell.z == 0.0f) {
-        send_data.acell.y = -1.0f;
+    if (send_data.vel.x == 0.0f && send_data.vel.y == 0.0f && send_data.vel.z == 0.0f) {
+        send_data.vel.z = 1.0f;
     }
 
     // Capacitive Touchpad Emulation for Touchpad Click:
@@ -1064,8 +1091,11 @@ int vpad_send_data_slot(int slot, const OrbisPadData *data) {
     int ps_now = (data->buttons & DS4_BUTTON_PS) ? 1 : 0;
     if (ps_now != s->last_ps_state) {
         s->last_ps_state = ps_now;
-        daemon_log(LOG_LEVEL_INFO, "vpad_send_data_slot(%d): PS Button %s (btn=0x%08X, ret=0x%08X)",
-                   slot, ps_now ? "ACTIVE" : "RELEASED", data->buttons, ret);
+        if (s->logged_ps_transitions < 10) {
+            daemon_log(LOG_LEVEL_INFO, "vpad_send_data_slot(%d): PS Button %s (btn=0x%08X, ret=0x%08X)",
+                       slot, ps_now ? "ACTIVE" : "RELEASED", data->buttons, ret);
+            s->logged_ps_transitions++;
+        }
     }
 
     if (s->logged_insert_packets < 5 || (ret != 0 && s->logged_insert_packets < 25) ||
@@ -1107,8 +1137,8 @@ void vpad_poll_rumble(void) {
                     rel.quat.z == 0.0f && rel.quat.w == 0.0f) {
                     rel.quat.w = 1.0f;
                 }
-                if (rel.acell.x == 0.0f && rel.acell.y == 0.0f && rel.acell.z == 0.0f) {
-                    rel.acell.y = -1.0f;
+                if (rel.vel.x == 0.0f && rel.vel.y == 0.0f && rel.vel.z == 0.0f) {
+                    rel.vel.z = 1.0f;
                 }
                 p_scePadVirtualDeviceInsertData(g_slots[i].handle, &rel);
                 g_slots[i].last_send_time_us = now_pulse;

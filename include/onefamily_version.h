@@ -9,10 +9,10 @@
 #define ONEFAMILY_VERSION_MAJOR     1
 #define ONEFAMILY_VERSION_MINOR     2
 #define ONEFAMILY_VERSION_PATCH     4
-#define ONEFAMILY_VERSION_RAW       "1.2.4-beta1"
-#define ONEFAMILY_VERSION_STRING    "v1.2.4-beta1"
+#define ONEFAMILY_VERSION_RAW       "1.2.4-beta2"
+#define ONEFAMILY_VERSION_STRING    "v1.2.4-beta2"
 #define ONEFAMILY_VERSION_SFO       "01.24"
 #define ONEFAMILY_VERSION_TITLE     "Hotfix - Profile Navigation & Controller Fixes"
-#define ONEFAMILY_VERSION_FULL      "v1.2.4-beta1 (Hotfix - Profile Navigation & Controller Fixes)"
+#define ONEFAMILY_VERSION_FULL      "v1.2.4-beta2 (Hotfix - Profile Navigation & Controller Fixes)"
 
 #endif // ONEFAMILY_VERSION_H

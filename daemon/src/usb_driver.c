@@ -137,6 +137,7 @@ static int load_usbd(void) {
 
 static int s_logged_first_report = 0;
 static int s_logged_x360_report = 0;
+static int s_logged_xone_report = 0;
 static int s_logged_generic_report = 0;
 static int s_last_guide_pressed = 0;
 static int s_consecutive_disconnects = 0;
@@ -226,6 +227,10 @@ static void add_rejected_hid_device(uint16_t vid, uint16_t pid) {
 
 static int      s_usb_vpad_slot = -1;
 static bool     s_share_combo_active = false;
+static bool     s_share_was_down = false;
+static bool     s_share_hold_forwarded = false;
+static uint64_t s_share_down_since_us = 0;
+static uint64_t s_share_tap_until_us = 0;
 
 // Universal per-controller button remapping (Issue #59: supports all native and generic controllers via VVVV_PPPP.ini)
 #define REMAP_BTN_COUNT 17
@@ -282,8 +287,33 @@ static bool parse_remap_btn_name(const char* name, uint32_t* out_bit) {
         *out_bit = 0;
         return true;
     }
-    if (remap_str_eq(name, "left"))  { *out_bit = DS4_BUTTON_DPAD_LEFT;  return true; }
-    if (remap_str_eq(name, "right")) { *out_bit = DS4_BUTTON_DPAD_RIGHT; return true; }
+    if (remap_str_eq(name, "left")  || remap_str_eq(name, "dpad_left"))  { *out_bit = DS4_BUTTON_DPAD_LEFT;  return true; }
+    if (remap_str_eq(name, "right") || remap_str_eq(name, "dpad_right")) { *out_bit = DS4_BUTTON_DPAD_RIGHT; return true; }
+    if (remap_str_eq(name, "dpad_up"))   { *out_bit = DS4_BUTTON_DPAD_UP;   return true; }
+    if (remap_str_eq(name, "dpad_down")) { *out_bit = DS4_BUTTON_DPAD_DOWN; return true; }
+    if (remap_str_eq(name, "a")) { *out_bit = DS4_BUTTON_CROSS;    return true; }
+    if (remap_str_eq(name, "b")) { *out_bit = DS4_BUTTON_CIRCLE;   return true; }
+    if (remap_str_eq(name, "x")) { *out_bit = DS4_BUTTON_SQUARE;   return true; }
+    if (remap_str_eq(name, "y")) { *out_bit = DS4_BUTTON_TRIANGLE; return true; }
+    if (remap_str_eq(name, "lb") || remap_str_eq(name, "l"))  { *out_bit = DS4_BUTTON_L1; return true; }
+    if (remap_str_eq(name, "rb") || remap_str_eq(name, "r"))  { *out_bit = DS4_BUTTON_R1; return true; }
+    if (remap_str_eq(name, "lt") || remap_str_eq(name, "zl")) { *out_bit = DS4_BUTTON_L2; return true; }
+    if (remap_str_eq(name, "rt") || remap_str_eq(name, "zr")) { *out_bit = DS4_BUTTON_R2; return true; }
+    if (remap_str_eq(name, "ls")) { *out_bit = DS4_BUTTON_L3; return true; }
+    if (remap_str_eq(name, "rs")) { *out_bit = DS4_BUTTON_R3; return true; }
+    if (remap_str_eq(name, "view") || remap_str_eq(name, "back") ||
+        remap_str_eq(name, "select") || remap_str_eq(name, "minus")) {
+        *out_bit = DS4_BUTTON_SHARE;
+        return true;
+    }
+    if (remap_str_eq(name, "menu") || remap_str_eq(name, "start") || remap_str_eq(name, "plus")) {
+        *out_bit = DS4_BUTTON_OPTIONS;
+        return true;
+    }
+    if (remap_str_eq(name, "home") || remap_str_eq(name, "guide")) {
+        *out_bit = DS4_BUTTON_PS;
+        return true;
+    }
     for (int i = 0; i < REMAP_BTN_COUNT; i++) {
         if (remap_str_eq(name, s_remap_btns[i].name)) {
             *out_bit = s_remap_btns[i].bit;
@@ -393,7 +423,7 @@ void usb_driver_reload_remap(void) {
 }
 
 static void close_controller(void) {
-    bool had_vpad = (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active());
+    bool had_vpad = (s_usb_vpad_slot >= 0) ? vpad_slot_is_active(s_usb_vpad_slot) : false;
     uint16_t closing_vid = g_usb_state.vid;
     uint16_t closing_pid = g_usb_state.pid;
     int had_any_reports = s_logged_first_report;
@@ -410,8 +440,6 @@ static void close_controller(void) {
     if (s_usb_vpad_slot >= 0) {
         vpad_slot_close(s_usb_vpad_slot);
         s_usb_vpad_slot = -1;
-    } else {
-        vpad_shutdown();
     }
     generic_hid_reset();
     write_status_file(false, CONTROLLER_NONE, 0, 0, "None", 0);
@@ -435,6 +463,7 @@ static void close_controller(void) {
     s_xboxone_guide = 0;
     s_logged_first_report = 0;
     s_logged_x360_report = 0;
+    s_logged_xone_report = 0;
     s_logged_generic_report = 0;
     s_last_guide_pressed = 0;
     s_consecutive_disconnects = 0;
@@ -445,6 +474,10 @@ static void close_controller(void) {
     s_ds4_ep_out_stalls = 0;
     s_x360_wireless_present = -1;
     s_share_combo_active = false;
+    s_share_was_down = false;
+    s_share_hold_forwarded = false;
+    s_share_down_since_us = 0;
+    s_share_tap_until_us = 0;
     s_switch_pro_full_mode = false;
     s_remap_rule_count = 0;
     memset(&s_last_ds4, 0, sizeof(s_last_ds4));
@@ -494,7 +527,10 @@ static uint8_t s_gip_init_seq = 1;
 static void send_gip_announce_response(void) {
     uint8_t start_cmd[] = { 0x05, 0x20, s_gip_init_seq++, 0x01, 0x00 };
     send_init_packet(start_cmd, sizeof(start_cmd));
-    if (g_usb_state.vid == 0x0E6F || g_usb_state.vid == 0x10F5) {
+    if (g_usb_state.vid == 0x045E) {
+        uint8_t led_cmd[] = { 0x0A, 0x20, s_gip_init_seq++, 0x03, 0x00, 0x01, 0x14 };
+        send_init_packet(led_cmd, sizeof(led_cmd));
+    } else if (g_usb_state.vid == 0x0E6F || g_usb_state.vid == 0x10F5) {
         uint8_t pdp_init1[] = { 0x0a, 0x20, s_gip_init_seq++, 0x03, 0x00, 0x01, 0x14 };
         send_init_packet(pdp_init1, sizeof(pdp_init1));
         uint8_t pdp_init2[] = { 0x06, 0x20, s_gip_init_seq++, 0x02, 0x01, 0x00 };
@@ -515,10 +551,17 @@ static void init_gip_controller(void) {
     send_init_packet(start_cmd, sizeof(start_cmd));
     daemon_sys_usleep(10000);
 
-    // 2. Mode switch / host wake-up packet for Xbox One S / Elite Series 2
-    if (!is_powera_moga) {
+    // 2. Mode switch / host wake-up packet (Linux xpad: Xbox One S 0x02EA only)
+    if (g_usb_state.vid == 0x045E && g_usb_state.pid == 0x02EA) {
         uint8_t s_init[] = { 0x05, 0x20, s_gip_init_seq++, 0x0F, 0x06 };
         send_init_packet(s_init, sizeof(s_init));
+        daemon_sys_usleep(10000);
+    }
+
+    // 2b. Solid LED on Microsoft Xbox One / Series X|S controllers (Issue #104: stop blinking Xbox Guide button)
+    if (g_usb_state.vid == 0x045E) {
+        uint8_t led_cmd[] = { 0x0A, 0x20, s_gip_init_seq++, 0x03, 0x00, 0x01, 0x14 };
+        send_init_packet(led_cmd, sizeof(led_cmd));
         daemon_sys_usleep(10000);
     }
 
@@ -1409,6 +1452,8 @@ static int scan_and_open(void) {
                         }
                     } else if (det.type == CONTROLLER_SWITCH_PRO) {
                         init_switch_pro_controller(h, &desc);
+                    } else if (det.type == CONTROLLER_DS4 && g_daemon_config.disable_speaker) {
+                        usb_driver_send_rumble(0, 0);
                     } else if (det.type == CONTROLLER_GENERIC_HID && desc.idVendor == 0x046D) {
                         // Send initial Logitech lg2ff rumble stop (0xF3) so any latched motor state is cleared on claim
                         usb_driver_send_rumble(0, 0);
@@ -1425,6 +1470,8 @@ static int scan_and_open(void) {
                     }
 
                     // Initialize Virtual DualShock 4 (Type 1) ONLY once controller is confirmed ready!
+                    // Note: vpad_slot_open may return -16 (EBUSY) during the 2.5s multi-controller settle guard,
+                    // in which case usb_driver_poll_step() retries opening without blocking input reads.
                     if (s_usb_vpad_slot < 0) {
                         vpad_slot_open(VPAD_SOURCE_USB, &s_usb_vpad_slot);
                     }
@@ -1432,7 +1479,7 @@ static int scan_and_open(void) {
                         vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
                     }
 
-                    int slot = vpad_get_assigned_slot_num(s_usb_vpad_slot);
+                    int slot = (s_usb_vpad_slot >= 0) ? vpad_get_assigned_slot_num(s_usb_vpad_slot) : 1;
                     if (s_usb_is_reenum_ds4) {
                         // Suppress notification: this is a multi-mode clone in DS4 personality
                         // during re-enumeration. The user will see the notification only after the
@@ -1637,6 +1684,9 @@ void usb_driver_send_rumble(uint8_t large_motor, uint8_t small_motor) {
         memset(&pkt, 0, sizeof(pkt));
         pkt.report_id = 0x05;
         pkt.valid_flag0 = 0x07; // Rumble + LED valid
+        if (g_daemon_config.disable_speaker) {
+            pkt.valid_flag0 |= 0x80; // Volume enable flag with speaker volume 0x00 (reserved2[10] == offset 21)
+        }
         pkt.motor_right = small_motor;
         pkt.motor_left = large_motor;
         pkt.lightbar_blue = 255; // Default blue LED
@@ -1716,103 +1766,164 @@ int usb_driver_init(void) {
 }
 
 static void apply_universal_shortcuts(OrbisPadData* ds4) {
-    bool share_down = (ds4->buttons & DS4_BUTTON_SHARE) != 0;
+    int combo_mod = g_daemon_config.touchpad_combo_modifier;
+    if (combo_mod == CONFIG_COMBO_MOD_DISABLED) {
+        s_share_combo_active = false;
+        s_share_was_down = false;
+        s_share_hold_forwarded = false;
+        s_share_tap_until_us = 0;
+        return;
+    }
 
-    if (share_down) {
+    uint64_t now_us = daemon_sys_time_us();
+    uint32_t mod_bit = (combo_mod == CONFIG_COMBO_MOD_L3) ? DS4_BUTTON_L3 : DS4_BUTTON_SHARE;
+    bool mod_phys_down = (ds4->buttons & mod_bit) != 0;
+
+    if (combo_mod == CONFIG_COMBO_MOD_SHARE) {
+        if (mod_phys_down && !s_share_was_down) {
+            s_share_was_down = true;
+            s_share_down_since_us = now_us;
+            s_share_combo_active = false;
+            s_share_hold_forwarded = false;
+            s_share_tap_until_us = 0;
+        } else if (!mod_phys_down && s_share_was_down) {
+            s_share_was_down = false;
+            if (!s_share_combo_active && !s_share_hold_forwarded) {
+                s_share_tap_until_us = now_us + 80000ULL;
+            }
+            s_share_combo_active = false;
+            s_share_hold_forwarded = false;
+        }
+    } else {
+        s_share_was_down = false;
+        s_share_hold_forwarded = false;
+        s_share_tap_until_us = 0;
+    }
+
+    if (mod_phys_down) {
+        bool eval_combos = (combo_mod == CONFIG_COMBO_MOD_L3) || !s_share_hold_forwarded;
         bool combo_matched = false;
-        int rx_delta = (int)ds4->rightStick.x - 128;
-        int ry_delta = (int)ds4->rightStick.y - 128;
+        if (eval_combos) {
+            int rx_delta = (int)ds4->rightStick.x - 128;
+            int ry_delta = (int)ds4->rightStick.y - 128;
 
-        // 1. Share + Options (Back + Start / Minus + Plus / Select + Start) -> Center Touchpad Click
-        if (ds4->buttons & DS4_BUTTON_OPTIONS) {
-            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_OPTIONS);
-            ds4->buttons |= DS4_BUTTON_TOUCHPAD;
-            if (ds4->touch.fingers == 0) {
+            // 1. Modifier + Options (Back + Start / Minus + Plus / Select + Start) -> Center Touchpad Click
+            if (ds4->buttons & DS4_BUTTON_OPTIONS) {
+                ds4->buttons &= ~(mod_bit | DS4_BUTTON_OPTIONS);
+                ds4->buttons |= DS4_BUTTON_TOUCHPAD;
+                if (ds4->touch.fingers == 0) {
+                    ds4->touch.fingers = 1;
+                    ds4->touch.touch[0].finger = 1;
+                    ds4->touch.touch[0].x = 960;
+                    ds4->touch.touch[0].y = 470;
+                }
+                combo_matched = true;
+            }
+            // 2. Modifier + D-Pad Up -> Center Touchpad Click
+            else if (ds4->buttons & DS4_BUTTON_DPAD_UP) {
+                ds4->buttons &= ~(mod_bit | DS4_BUTTON_DPAD_UP);
+                ds4->buttons |= DS4_BUTTON_TOUCHPAD;
+                if (ds4->touch.fingers == 0) {
+                    ds4->touch.fingers = 1;
+                    ds4->touch.touch[0].finger = 1;
+                    ds4->touch.touch[0].x = 960;
+                    ds4->touch.touch[0].y = 470;
+                }
+                combo_matched = true;
+            }
+            // 3. Modifier + L1 or D-Pad Left -> Left Touchpad Click (Issue #89)
+            else if (ds4->buttons & (DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT)) {
+                ds4->buttons &= ~(mod_bit | DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT);
+                ds4->buttons |= DS4_BUTTON_TOUCHPAD;
                 ds4->touch.fingers = 1;
                 ds4->touch.touch[0].finger = 1;
-                ds4->touch.touch[0].x = 960;
+                ds4->touch.touch[0].x = 400;
                 ds4->touch.touch[0].y = 470;
+                combo_matched = true;
             }
-            combo_matched = true;
-        }
-        // 2. Share + D-Pad Up (Back + D-Pad Up) -> Center Touchpad Click
-        else if (ds4->buttons & DS4_BUTTON_DPAD_UP) {
-            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_UP);
-            ds4->buttons |= DS4_BUTTON_TOUCHPAD;
-            if (ds4->touch.fingers == 0) {
+            // 4. Modifier + R1 or D-Pad Right -> Right Touchpad Click (Issue #89)
+            else if (ds4->buttons & (DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT)) {
+                ds4->buttons &= ~(mod_bit | DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT);
+                ds4->buttons |= DS4_BUTTON_TOUCHPAD;
                 ds4->touch.fingers = 1;
                 ds4->touch.touch[0].finger = 1;
-                ds4->touch.touch[0].x = 960;
+                ds4->touch.touch[0].x = 1520;
                 ds4->touch.touch[0].y = 470;
+                combo_matched = true;
             }
-            combo_matched = true;
-        }
-        // 3. Share + L1 or Share + D-Pad Left -> Left Touchpad Click (Issue #89)
-        else if (ds4->buttons & (DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT)) {
-            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_L1 | DS4_BUTTON_DPAD_LEFT);
-            ds4->buttons |= DS4_BUTTON_TOUCHPAD;
-            ds4->touch.fingers = 1;
-            ds4->touch.touch[0].finger = 1;
-            ds4->touch.touch[0].x = 400;
-            ds4->touch.touch[0].y = 470;
-            combo_matched = true;
-        }
-        // 4. Share + R1 or Share + D-Pad Right -> Right Touchpad Click (Issue #89)
-        else if (ds4->buttons & (DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT)) {
-            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_R1 | DS4_BUTTON_DPAD_RIGHT);
-            ds4->buttons |= DS4_BUTTON_TOUCHPAD;
-            ds4->touch.fingers = 1;
-            ds4->touch.touch[0].finger = 1;
-            ds4->touch.touch[0].x = 1520;
-            ds4->touch.touch[0].y = 470;
-            combo_matched = true;
-        }
-        // 5. Share + D-Pad Down (Back + D-Pad Down) -> PS Button (Home)
-        else if (ds4->buttons & DS4_BUTTON_DPAD_DOWN) {
-            ds4->buttons &= ~(DS4_BUTTON_SHARE | DS4_BUTTON_DPAD_DOWN);
-            ds4->buttons |= DS4_BUTTON_PS;
-            combo_matched = true;
-        }
-        // 6. Share + Right Stick -> Directional Capacitive Touchpad Swipe (Issues #82, #83, #88)
-        else if (rx_delta > 45 || rx_delta < -45 || ry_delta > 45 || ry_delta < -45) {
-            ds4->buttons &= ~DS4_BUTTON_SHARE;
-            ds4->rightStick.x = 128;
-            ds4->rightStick.y = 128;
-            uint64_t now_swipe = daemon_sys_time_us();
-            uint32_t phase = (uint32_t)((now_swipe / 1000ULL) % 180ULL);
-            int abs_rx = rx_delta < 0 ? -rx_delta : rx_delta;
-            int abs_ry = ry_delta < 0 ? -ry_delta : ry_delta;
-            ds4->touch.fingers = 1;
-            ds4->touch.touch[0].finger = 1;
-            if (abs_rx >= abs_ry) {
-                ds4->touch.touch[0].y = 470;
-                if (rx_delta > 0) {
-                    ds4->touch.touch[0].x = (uint16_t)(360 + (phase * 1200) / 180);
-                } else {
-                    ds4->touch.touch[0].x = (uint16_t)(1560 - (phase * 1200) / 180);
-                }
-            } else {
-                ds4->touch.touch[0].x = 960;
-                if (ry_delta > 0) {
-                    ds4->touch.touch[0].y = (uint16_t)(170 + (phase * 600) / 180);
-                } else {
-                    ds4->touch.touch[0].y = (uint16_t)(770 - (phase * 600) / 180);
-                }
+            // 5. Modifier + D-Pad Down -> PS Button (Home)
+            else if (ds4->buttons & DS4_BUTTON_DPAD_DOWN) {
+                ds4->buttons &= ~(mod_bit | DS4_BUTTON_DPAD_DOWN);
+                ds4->buttons |= DS4_BUTTON_PS;
+                combo_matched = true;
             }
-            combo_matched = true;
+            // 6. Modifier + Right Stick -> Directional Capacitive Touchpad Swipe (Issues #82, #83, #88)
+            else if (rx_delta > 45 || rx_delta < -45 || ry_delta > 45 || ry_delta < -45) {
+                ds4->buttons &= ~mod_bit;
+                ds4->rightStick.x = 128;
+                ds4->rightStick.y = 128;
+                uint32_t phase = (uint32_t)((now_us / 1000ULL) % 180ULL);
+                int abs_rx = rx_delta < 0 ? -rx_delta : rx_delta;
+                int abs_ry = ry_delta < 0 ? -ry_delta : ry_delta;
+                ds4->touch.fingers = 1;
+                ds4->touch.touch[0].finger = 1;
+                if (abs_rx >= abs_ry) {
+                    ds4->touch.touch[0].y = 470;
+                    if (rx_delta > 0) {
+                        ds4->touch.touch[0].x = (uint16_t)(360 + (phase * 1200) / 180);
+                    } else {
+                        ds4->touch.touch[0].x = (uint16_t)(1560 - (phase * 1200) / 180);
+                    }
+                } else {
+                    ds4->touch.touch[0].x = 960;
+                    if (ry_delta > 0) {
+                        ds4->touch.touch[0].y = (uint16_t)(170 + (phase * 600) / 180);
+                    } else {
+                        ds4->touch.touch[0].y = (uint16_t)(770 - (phase * 600) / 180);
+                    }
+                }
+                combo_matched = true;
+            }
         }
 
         if (combo_matched) {
             s_share_combo_active = true;
         } else if (s_share_combo_active) {
-            // Asynchronous release de-ghosting:
-            // The secondary button was released slightly before Share.
-            // Suppress Share until Share is physically released to avoid accidental screenshots / Share menu.
-            ds4->buttons &= ~DS4_BUTTON_SHARE;
+            // Asynchronous release de-ghosting: suppress modifier until released
+            ds4->buttons &= ~mod_bit;
+        } else if (combo_mod == CONFIG_COMBO_MOD_SHARE && !s_share_hold_forwarded) {
+            if ((now_us - s_share_down_since_us) >= 600000ULL) {
+                s_share_hold_forwarded = true;
+            } else {
+                ds4->buttons &= ~DS4_BUTTON_SHARE;
+            }
         }
     } else {
-        // Share was fully released: reset the combo lock
         s_share_combo_active = false;
+        if (combo_mod == CONFIG_COMBO_MOD_SHARE && s_share_tap_until_us != 0) {
+            if (now_us < s_share_tap_until_us) {
+                ds4->buttons |= DS4_BUTTON_SHARE;
+            } else {
+                s_share_tap_until_us = 0;
+            }
+        }
+    }
+}
+
+static void update_deferred_share_keepalive(uint64_t now_us) {
+    if (g_daemon_config.touchpad_combo_modifier != CONFIG_COMBO_MOD_SHARE) return;
+    if (s_share_tap_until_us != 0) {
+        if (now_us < s_share_tap_until_us) {
+            s_last_ds4.buttons |= DS4_BUTTON_SHARE;
+        } else {
+            s_share_tap_until_us = 0;
+            s_last_ds4.buttons &= ~DS4_BUTTON_SHARE;
+        }
+    } else if (s_share_was_down && !s_share_combo_active) {
+        if (s_share_hold_forwarded || (now_us - s_share_down_since_us) >= 600000ULL) {
+            s_share_hold_forwarded = true;
+            s_last_ds4.buttons |= DS4_BUTTON_SHARE;
+        }
     }
 }
 
@@ -1841,8 +1952,6 @@ static void handle_pad_input_and_send(const OrbisPadData* ds4) {
     s_last_ds4 = out_ds4;
     if (s_usb_vpad_slot >= 0) {
         vpad_send_data_slot(s_usb_vpad_slot, &out_ds4);
-    } else {
-        vpad_send_data(&out_ds4);
     }
 }
 
@@ -1858,12 +1967,24 @@ void usb_driver_poll_step(void) {
         return;
     }
 
+    // Retry deferred virtual pad slot open if a settle guard delayed allocation at USB connect
+    if (s_usb_vpad_slot < 0) {
+        if (vpad_slot_open(VPAD_SOURCE_USB, &s_usb_vpad_slot) == 0 && s_usb_vpad_slot >= 0) {
+            vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
+            write_status_file(true, g_usb_state.type, g_usb_state.vid, g_usb_state.pid,
+                              controller_friendly_name(g_usb_state.type, g_usb_state.vid, g_usb_state.pid),
+                              (g_usb_state.type == CONTROLLER_GENERIC_HID) ? generic_hid_get_nbuttons() : 16);
+        }
+    }
+
     // 2. Read from connected controller
     uint8_t rx[128];
     memset(rx, 0, sizeof(rx));
     int transferred = 0;
     int read_len = sizeof(rx);
-    if (g_usb_state.type == CONTROLLER_DUALSENSE ||
+    if (g_usb_state.type == CONTROLLER_XBOX360) {
+        read_len = (g_usb_state.wMaxPacketSize >= 20 && g_usb_state.wMaxPacketSize <= 64) ? g_usb_state.wMaxPacketSize : 32;
+    } else if (g_usb_state.type == CONTROLLER_DUALSENSE ||
         g_usb_state.type == CONTROLLER_DS4 ||
         g_usb_state.type == CONTROLLER_DS3 ||
         g_usb_state.type == CONTROLLER_STADIA ||
@@ -1883,28 +2004,24 @@ void usb_driver_poll_step(void) {
     int ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, rx, read_len, &transferred, poll_timeout_ms);
     uint64_t xfer_dur_us = daemon_sys_time_us() - xfer_start_us;
 
-    // High-Polling USB FIFO Drain:
-    // Standard 125Hz/250Hz Xbox 360 controllers (bInterval >= 4) never accumulate backlogs in our 250 Hz loop and must NOT run this drain,
-    // avoiding 1ms blocking timeouts and frame stalling.
-    // For high-polling adapters (bInterval < 4, e.g. GuliKit KK3 Max 1000Hz) AND Xbox One / Series controllers
-    // (where bInterval is nominally 4 in the descriptor but internal MCU streams at 250-1000Hz and ring buffer backlogs accumulate):
-    // Drain pending packets to the newest real-time head while preserving transient button/D-pad transitions.
+    // High-Polling USB FIFO Drain (Issue #24):
+    // Only drain already-queued packets when initial xfer completed fast (< 2000 us),
+    // and abort immediately if a drain xfer approaches its timeout (>= 400 us) so we never block waiting for future frames.
     bool is_high_polling = (g_usb_state.bInterval > 0 && g_usb_state.bInterval < 4);
     bool should_drain = (is_high_polling || g_usb_state.type == CONTROLLER_XBOXONE);
-    // Issue #24: On PS4 Orbis OS, libSceUsbd interrupt transfer round-trip takes ~2-3.5ms even when packets
-    // are queued in the xHCI buffer. For true high-polling devices (bInterval < 4, e.g. GuliKit KK3 Max 1000Hz),
-    // always drain pending packets without gating on xfer_dur_us < 2000ULL so the dongle's TX FIFO never overflows or sleeps.
-    if (ret == 0 && should_drain && (is_high_polling || xfer_dur_us < 2000ULL) &&
+    if (ret == 0 && should_drain && xfer_dur_us < 2000ULL &&
         ((g_usb_state.type == CONTROLLER_XBOX360 && transferred >= 14) ||
          (g_usb_state.type == CONTROLLER_XBOXONE && transferred >= 4))) {
         uint8_t next_rx[128];
         int next_transferred = 0;
         int drain_count = 0;
-        int max_drain = is_high_polling ? 12 : 8;
+        int max_drain = is_high_polling ? 4 : 6;
         uint8_t xone_burst_btn_low = (g_usb_state.type == CONTROLLER_XBOXONE && rx[0] == XBOXONE_REPORT_INPUT && transferred >= 5) ? rx[4] : 0;
         uint8_t xone_burst_btn_high = (g_usb_state.type == CONTROLLER_XBOXONE && rx[0] == XBOXONE_REPORT_INPUT && transferred >= 6) ? rx[5] : 0;
         while (drain_count < max_drain) {
+            uint64_t d_start = daemon_sys_time_us();
             int drain_ret = p_sceUsbdInterruptTransfer(g_dev_handle, g_usb_state.endpoint_in, next_rx, read_len, &next_transferred, 1);
+            uint64_t d_dur = daemon_sys_time_us() - d_start;
             if (drain_ret == 0 && next_transferred > 0) {
                 if (g_usb_state.type == CONTROLLER_XBOX360) {
                     if (g_usb_state.is_wireless) {
@@ -1970,6 +2087,9 @@ void usb_driver_poll_step(void) {
                     }
                 }
                 drain_count++;
+                if (d_dur >= 400ULL) {
+                    break;
+                }
             } else {
                 break; // Hardware FIFO queue is now fully drained!
             }
@@ -2085,6 +2205,12 @@ void usb_driver_poll_step(void) {
                     memcpy(&xone_padded, rx, (size_t)transferred);
                     xone_ptr = &xone_padded;
                 }
+                if (s_logged_xone_report < 5) {
+                    daemon_log(LOG_LEVEL_INFO, "Xbox One report [%d bytes]: b_lo=0x%02X b_hi=0x%02X lt=%u rt=%u",
+                               transferred, xone_ptr->buttons_low, xone_ptr->buttons_high,
+                               (unsigned)xone_ptr->left_trigger, (unsigned)xone_ptr->right_trigger);
+                    s_logged_xone_report++;
+                }
                 translator_convert_xboxone(xone_ptr, &ds4, &s_trans_cfg);
                 if (s_xboxone_guide) {
                     ds4.buttons |= get_guide_button_mask();
@@ -2114,8 +2240,6 @@ void usb_driver_poll_step(void) {
                 s_last_ds4.timestamp = daemon_sys_time_us();
                 if (s_usb_vpad_slot >= 0) {
                     vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
-                } else {
-                    vpad_send_data(&s_last_ds4);
                 }
             } else {
                 // Handle general GIP control / status / announce packets requiring host ACK
@@ -2140,7 +2264,7 @@ void usb_driver_poll_step(void) {
                 ds4.buttons |= get_guide_button_mask();
             }
             handle_pad_input_and_send(&ds4);
-        } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO && transferred >= 11) {
+        } else if (g_usb_state.type == CONTROLLER_SWITCH_PRO && transferred >= (int)sizeof(SwitchInputOnlyReport)) {
             static int s_logged_sw_report = 0;
             if (s_logged_sw_report < 10) {
                 daemon_log(LOG_LEVEL_INFO, "Switch Pro report [%d bytes]: rx[0]=0x%02X b3=0x%02X b4=0x%02X b5=0x%02X",
@@ -2324,13 +2448,11 @@ void usb_driver_poll_step(void) {
             }
 
             // Normal USB interrupt timeout: keep 250 Hz stream alive with last known state
-            if (s_last_ds4.connected && (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active())) {
-                s_last_ds4.timestamp = daemon_sys_time_us();
-                if (s_usb_vpad_slot >= 0) {
-                    vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
-                } else {
-                    vpad_send_data(&s_last_ds4);
-                }
+            if (s_last_ds4.connected && s_usb_vpad_slot >= 0 && vpad_slot_is_active(s_usb_vpad_slot)) {
+                uint64_t now_to = daemon_sys_time_us();
+                update_deferred_share_keepalive(now_to);
+                s_last_ds4.timestamp = now_to;
+                vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
             }
         } else if (ret != 0) {
             s_consecutive_transfer_errors++;
@@ -2451,13 +2573,11 @@ void usb_driver_poll_step(void) {
                     s_last_ds4.rightStick.y = 128;
                 }
                 // Keep 250 Hz alive with neutral/last state during transient error recovery
-                if (s_last_ds4.connected && (s_usb_vpad_slot >= 0 ? vpad_slot_is_active(s_usb_vpad_slot) : vpad_is_active())) {
-                    s_last_ds4.timestamp = daemon_sys_time_us();
-                    if (s_usb_vpad_slot >= 0) {
-                        vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
-                    } else {
-                        vpad_send_data(&s_last_ds4);
-                    }
+                if (s_last_ds4.connected && s_usb_vpad_slot >= 0 && vpad_slot_is_active(s_usb_vpad_slot)) {
+                    uint64_t now_err = daemon_sys_time_us();
+                    update_deferred_share_keepalive(now_err);
+                    s_last_ds4.timestamp = now_err;
+                    vpad_send_data_slot(s_usb_vpad_slot, &s_last_ds4);
                 }
             }
         }

@@ -14,8 +14,30 @@
 
 #define DAEMON_LOG_PATH_PRIMARY  "/data/onefamily/onefamily.log"
 #define DAEMON_LOG_PATH_FALLBACK "/user/data/onefamily/onefamily.log"
+#define DAEMON_LOG_PREV_PRIMARY  "/data/onefamily/onefamily.prev.log"
+#define DAEMON_LOG_PREV_FALLBACK "/user/data/onefamily/onefamily.prev.log"
+#define DAEMON_LOG_MAX_BYTES     (1024U * 1024U)
 
 static int g_log_fd = -1;
+static int g_log_use_fallback = 0;
+static size_t g_log_bytes = 0;
+
+static void log_rotate_and_open(void) {
+    if (!g_log_use_fallback) {
+        daemon_sys_unlink(DAEMON_LOG_PREV_PRIMARY);
+        daemon_sys_rename(DAEMON_LOG_PATH_PRIMARY, DAEMON_LOG_PREV_PRIMARY);
+        g_log_fd = daemon_sys_open(DAEMON_LOG_PATH_PRIMARY, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (g_log_fd < 0) {
+            g_log_use_fallback = 1;
+        }
+    }
+    if (g_log_fd < 0 && g_log_use_fallback) {
+        daemon_sys_unlink(DAEMON_LOG_PREV_FALLBACK);
+        daemon_sys_rename(DAEMON_LOG_PATH_FALLBACK, DAEMON_LOG_PREV_FALLBACK);
+        g_log_fd = daemon_sys_open(DAEMON_LOG_PATH_FALLBACK, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    }
+    g_log_bytes = 0;
+}
 
 void daemon_log_init(void) {
     if (g_log_fd < 0) {
@@ -25,10 +47,7 @@ void daemon_log_init(void) {
         daemon_sys_mkdir("/user/data", 0777);
         daemon_sys_mkdir("/user/data/onefamily", 0777);
 
-        g_log_fd = daemon_sys_open(DAEMON_LOG_PATH_PRIMARY, O_WRONLY | O_CREAT | O_APPEND, 0666);
-        if (g_log_fd < 0) {
-            g_log_fd = daemon_sys_open(DAEMON_LOG_PATH_FALLBACK, O_WRONLY | O_CREAT | O_APPEND, 0666);
-        }
+        log_rotate_and_open();
     }
 }
 
@@ -58,13 +77,21 @@ void daemon_log(int level, const char *fmt, ...) {
 
     char full_msg[600];
     snprintf(full_msg, sizeof(full_msg), "[%s] %s\n", level_to_str(level), buffer);
+    size_t len = strlen(full_msg);
 
     if (g_log_fd < 0) {
         daemon_log_init();
+    } else if ((g_log_bytes + len) >= DAEMON_LOG_MAX_BYTES) {
+        daemon_sys_close(g_log_fd);
+        g_log_fd = -1;
+        log_rotate_and_open();
     }
 
     if (g_log_fd >= 0) {
-        daemon_sys_write(g_log_fd, full_msg, strlen(full_msg));
+        int wr = daemon_sys_write(g_log_fd, full_msg, len);
+        if (wr > 0) {
+            g_log_bytes += (size_t)wr;
+        }
     }
 }
 

@@ -48,6 +48,8 @@ static std::string trim(const std::string& str) {
 bool HidProfile::read_status(HidStatus& out) {
     out.connected = false;
     out.type = "none";
+    out.extended_mode = true;
+    out.devices.clear();
 
     int fd = sceKernelOpen("/data/onefamily/onefamily.status", O_RDONLY, 0);
     if (fd < 0) return false;
@@ -92,6 +94,8 @@ bool HidProfile::read_status(HidStatus& out) {
                     if (out.battery_pct > 100) out.battery_pct = 100;
                 } else if (k == "battery_charging") {
                     out.battery_charging = (atoi(v.c_str()) != 0);
+                } else if (k == "extended_mode") {
+                    out.extended_mode = (atoi(v.c_str()) != 0);
                 } else if (k == "count") {
                     out.device_count = atoi(v.c_str());
                 } else if (k.rfind("dev_", 0) == 0) {
@@ -116,6 +120,8 @@ bool HidProfile::read_status(HidStatus& out) {
                                 out.devices[devIdx].battery_pct = atoi(v.c_str());
                             } else if (strcmp(field, "charging") == 0) {
                                 out.devices[devIdx].battery_charging = (atoi(v.c_str()) != 0);
+                            } else if (strcmp(field, "extended") == 0) {
+                                out.devices[devIdx].extended_mode = (atoi(v.c_str()) != 0);
                             }
                         }
                     }

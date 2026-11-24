@@ -104,9 +104,10 @@ static inline uint8_t xboxone_get_dpad(const XboxOneReport* report) {
     return report->buttons_high & 0x0F;
 }
 
-// Convert 10-bit trigger to 8-bit (for DS4 compatibility)
+// Convert 10-bit trigger to 8-bit (for DS4 compatibility) with strict 0..1023 clamp
 static inline uint8_t xboxone_trigger_to_8bit(uint16_t trigger) {
-    return (uint8_t)(trigger >> 2);  // 1023 -> 255
+    if (trigger > 1023) trigger = 1023;
+    return (uint8_t)((trigger * 255U + 511U) / 1023U);  // 1023 -> 255
 }
 
 #endif // XBOXONE_H
